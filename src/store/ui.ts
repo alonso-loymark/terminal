@@ -4,7 +4,9 @@ import type { GroupId, PaneId, TabId } from './workspaceModel';
 export type MenuState =
   | { kind: 'tab'; tabId: TabId; x: number; y: number }
   | { kind: 'group'; groupId: GroupId; x: number; y: number }
-  | { kind: 'pane'; paneId: PaneId; x: number; y: number };
+  | { kind: 'pane'; paneId: PaneId; x: number; y: number }
+  /** "▾" next to "+": a new tab with another shell. */
+  | { kind: 'shells'; x: number; y: number };
 
 /** What a confirmed close acts on. */
 export type CloseTarget = { kind: 'tabs'; tabIds: TabId[] } | { kind: 'pane'; paneId: PaneId };

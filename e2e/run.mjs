@@ -209,7 +209,13 @@ const tabAttr = (id, name) => page.locator(tabSel(id)).getAttribute(name, { time
 async function openTab() {
   const before = (await wsState()).order.length;
   await page.keyboard.press('Control+Shift+T');
-  await waitUntil(async () => (await wsState()).order.length === before + 1, 5000);
+  await waitUntil(async () => (await wsState()).order.length >= before + 1, 5000);
+  await sleep(150);
+  const after = await wsState();
+  if (after.order.length !== before + 1) {
+    // Seen once (Fase 4, full run): an extra tab and no focus. Fail with evidence, not later.
+    throw new Error(`Ctrl+Shift+T: ${before} → ${after.order.length} tabs (${after.order.join(',')}); ${await focusReport()}`);
+  }
   await waitUntil(atShellPrompt, 20000);
   return (await wsState()).active;
 }
@@ -251,7 +257,7 @@ async function isolateAfterFailure() {
     ui.closeSearch();
     ui.stopRename();
     const s = window.__workspace.getState();
-    const fresh = s.newTab();
+    const fresh = s.newTab({ cwd: null });
     s.closeTabs(s.tabOrder.filter((id) => id !== fresh));
   });
   await waitUntil(atShellPrompt, 20000);
@@ -302,11 +308,11 @@ async function ptyMatches(id) {
   const grid = await paneSize(id);
   return { ok: pty === grid, detail: `pty ${pty} / xterm ${grid}` };
 }
-/** Starts from a single fresh tab (closing the rest, without dialogs). */
+/** Starts from a single fresh tab in the home folder (closing the rest, without dialogs). */
 async function freshTab() {
   await page.evaluate(() => {
     const s = window.__workspace.getState();
-    const fresh = s.newTab();
+    const fresh = s.newTab({ cwd: null });
     s.closeTabs(s.tabOrder.filter((id) => id !== fresh));
   });
   await waitUntil(atShellPrompt, 20000);
@@ -316,6 +322,107 @@ async function waitPanes(count) {
   await waitUntil(async () => leaves((await activeTab()).layout).length === count, 5000);
   await waitUntil(atShellPrompt, 20000);
   await waitUntil(terminalFocused, 3000);
+}
+
+// ---------------------------------------------------------------- shell integration helpers
+const paneState = (id) => page.evaluate((id) => window.__workspace.getState().panes[id] ?? null, id);
+const homeDir = () => page.evaluate(() => window.__system.getState().homeDir);
+/** The pane's shell reported its integration and sits at its prompt (no command running). */
+const idle = async (id) => {
+  const p = await paneState(id);
+  return !!p && p.status === 'running' && p.integration === 'ok' && !p.commandRunning;
+};
+/**
+ * Records the raw marks a terminal receives. Handlers added later run first; returning false
+ * passes the sequence on to the app's own handler.
+ */
+const spy = (id) =>
+  page.evaluate((id) => {
+    const t = window.__paneTerminal(id);
+    if (!t || t.__e2eSpy) return;
+    const log = { osc7: [], ends: 0 };
+    t.__e2eSpy = log;
+    t.parser.registerOscHandler(7, (data) => (log.osc7.push(data), false));
+    t.parser.registerOscHandler(133, (data) => {
+      // D: the command finished (also when a redefined prompt is wrapped again).
+      if (data.startsWith('D')) log.ends++;
+      return false;
+    });
+  }, id);
+const spied = (id) => page.evaluate((id) => window.__paneTerminal(id)?.__e2eSpy ?? null, id);
+/** Text of the line the cursor is on (the prompt plus whatever is being typed). */
+const cursorLine = () =>
+  page.evaluate(() => {
+    const b = window.__terminal.buffer.active;
+    return b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? '';
+  });
+/** The cursor line matches (waits a little: the prompt is drawn right after the end mark). */
+const lineMatches = (re) => waitUntil(async () => re.test(await cursorLine()), 3000);
+/**
+ * Types a command when the shell integration says the shell is idle at its prompt (any prompt,
+ * any shell) and waits for the next prompt. Refuses to type anywhere else, like `run`.
+ */
+async function runIdle(cmd, { wait = true, timeout = 20000 } = {}) {
+  const id = await activePane();
+  if (!(await waitUntil(() => idle(id), 20000))) {
+    throw new Error(`la shell del panel ${id} no está libre según la integración; no se tipea: ${cmd}`);
+  }
+  if (!(await waitUntil(terminalFocused, 3000))) {
+    throw new Error(`la terminal activa no tiene el foco (${await focusReport()}); no se tipea: ${cmd}`);
+  }
+  await spy(id);
+  const before = (await spied(id)).ends;
+  await page.keyboard.type(cmd);
+  await page.keyboard.press('Enter');
+  if (!wait) return paneState(id);
+  if (!(await waitUntil(async () => (await spied(id)).ends > before && (await idle(id)), timeout))) {
+    throw new Error(`timeout esperando el fin de: ${cmd}\n--- pantalla ---\n${await screen()}`);
+  }
+  // The end mark comes right before the prompt is drawn: wait for the prompt itself.
+  await waitUntil(async () => (await cursorLine()).trim() !== '', 3000);
+  return paneState(id);
+}
+/** A folder under the e2e temp dir, by its real long path (os.tmpdir() may use 8.3 names). */
+function trickyDir(...parts) {
+  const dir = path.join(WORK, ...parts);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync.native(dir);
+}
+const PARENT_DIR = ['carpeta con espacios'];
+const TRICKY_DIR = [...PARENT_DIR, 'Ñandú áéíóú'];
+const psQuote = (s) => `'${s.replace(/'/g, "''")}'`;
+/**
+ * cd into TRICKY_DIR typing only ASCII: the shell finds the accented folder itself (the only
+ * one inside PARENT_DIR), so the test does not depend on how non-ASCII keys are typed.
+ */
+const cdTricky = () =>
+  runIdle(`Set-Location -LiteralPath ((Get-ChildItem -LiteralPath ${psQuote(trickyDir(...PARENT_DIR))} -Directory)[0].FullName)`);
+/** What the integration scripts send for a folder: file://<computer>/C:/a%20b/%C3%91... */
+const fileUri = (dir) =>
+  `file://${process.env.COMPUTERNAME}/${dir
+    .split('\\')
+    .filter(Boolean)
+    .map((segment, i) => (i === 0 ? segment : encodeURIComponent(segment)))
+    .join('/')}`;
+const statusBar = () =>
+  page.evaluate(() => {
+    const q = (sel) => document.querySelector(`.status-bar ${sel}`);
+    return {
+      cwd: q('.status-cwd')?.textContent ?? null,
+      cwdTitle: q('.status-cwd')?.getAttribute('title') ?? null,
+      command: q('.status-command')?.textContent ?? null,
+      commandState: q('.status-command')?.getAttribute('data-state') ?? null,
+      notice: q('.status-notice')?.textContent ?? null,
+      noticeTitle: q('.status-notice')?.getAttribute('title') ?? null,
+      shell: q('.status-shell')?.textContent ?? null,
+    };
+  });
+const tabSubtitle = (id) =>
+  page.evaluate((sel) => document.querySelector(sel)?.textContent ?? null, `${tabSel(id)} .tab-subtitle`);
+/** The pane's folder once its shell reported it. */
+async function paneCwd(id, timeout = 20000) {
+  await waitUntil(() => idle(id), timeout);
+  return (await paneState(id))?.cwd ?? null;
 }
 
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
@@ -573,9 +680,13 @@ const stages = {
 
     // Fake agents: each gets the newline sequence its own /terminal-setup would install.
     for (const agent of ['claude', 'gemini']) {
+      // The "agent" stage may have left an older "listo" in the buffer: wait for a new one, or
+      // the keys go out before this agent is in raw mode.
+      const ready = `FAKE-AGENT ${agent} listo`;
+      const readyBefore = count(await text(), ready);
       await run(`& '${agentExe(agent)}' '${FAKE_AGENT}'`, { waitPrompt: false });
       try {
-        await waitFor(`FAKE-AGENT ${agent} listo`, { source: screen });
+        await waitFor((s) => count(s, ready) > readyBefore);
         await page.keyboard.type('hola');
         await page.keyboard.press('Shift+Enter');
         await page.keyboard.type('mundo');
@@ -964,6 +1075,247 @@ const stages = {
     await waitUntil(async () => (await wsState()).order.length === tabsBefore, 5000);
     check('Ctrl+Shift+W en el último panel cierra la tab', (await wsState()).order.length === tabsBefore);
     await shot('10-panes');
+  },
+
+  // ------------------------------------------------------------ shell integration (Fase 4)
+  async cwd() {
+    await freshTab();
+    const tabId = (await wsState()).active;
+    const id = await activePane();
+    const ready = await waitUntil(() => idle(id), 20000);
+    let st = await paneState(id);
+    check(
+      'PowerShell carga la integración (sin -NoProfile: el perfil carga como siempre)',
+      ready && st.shell === 'powershell' && (await value("[string]([Environment]::GetCommandLineArgs() -contains '-NoProfile')", 'np')) === 'False',
+      JSON.stringify({ integration: st.integration, error: st.integrationError }),
+    );
+    // A new tab starts in the active pane's folder, so it can start anywhere: go home first.
+    const home = await homeDir();
+    st = await runIdle(`Set-Location -LiteralPath ${psQuote(home)}`);
+    check('el cwd del panel es la carpeta de la shell', st.cwd === home, `${st.cwd} / ${home}`);
+
+    const parent = trickyDir(...PARENT_DIR);
+    const dir = trickyDir(...TRICKY_DIR);
+    st = await cdTricky();
+    check('cd a una ruta con espacios, tildes y ñ actualiza el cwd del panel', st.cwd === dir, `${st.cwd} / ${dir}`);
+    const raw = (await spied(id)).osc7.at(-1);
+    check('OSC 7: file:// URI con UTF-8 codificado (%20, %C3%91...)', raw === fileUri(dir), `${raw}\nesperado ${fileUri(dir)}`);
+
+    const bar = await statusBar();
+    const underHome = dir.toLowerCase().startsWith(`${home.toLowerCase()}\\`);
+    check(
+      'status bar: cwd acortado (~ y …) con la ruta completa en el tooltip',
+      bar.cwdTitle === dir && bar.cwd.endsWith('Ñandú áéíóú') && (!underHome || bar.cwd.startsWith('~\\')) && bar.cwd.length < dir.length,
+      JSON.stringify(bar),
+    );
+    win('resize', appPid, 640, 560);
+    await sleep(700);
+    const narrow = await statusBar();
+    check(
+      'ventana angosta: el cwd se colapsa en el medio (…) y conserva la carpeta',
+      narrow.cwd.includes('…') && narrow.cwd.endsWith('Ñandú áéíóú') && narrow.cwdTitle === dir,
+      narrow.cwd,
+    );
+    win('resize', appPid, 1100, 700);
+    await sleep(700);
+    check('subtítulo de la tab: el nombre de la carpeta', (await tabSubtitle(tabId)) === 'Ñandú áéíóú');
+
+    st = await runIdle('Set-Location ..');
+    check('cd .. se refleja en el panel y en la tab', st.cwd === parent && (await tabSubtitle(tabId)) === 'carpeta con espacios', st.cwd);
+    st = await runIdle('Set-Location HKCU:\\Software');
+    check('una ubicación que no es una carpeta (registro) no cambia el cwd', st.cwd === parent, st.cwd);
+    await runIdle(`Set-Location -LiteralPath ${psQuote(parent)}`);
+
+    await page.evaluate((id) => window.__workspace.getState().renameTab(id, 'Con nombre'), tabId);
+    check('una tab renombrada no muestra subtítulo', (await tabSubtitle(tabId)) === null);
+    await page.evaluate((id) => window.__workspace.getState().renameTab(id, null), tabId);
+    await shot('20-cwd');
+  },
+
+  async commands() {
+    await freshTab();
+    let st = await runIdle("'todo ' + 'bien'");
+    check('comando correcto: código 0 y la línea del comando', st.lastExitCode === 0 && st.lastCommand === "'todo ' + 'bien'", JSON.stringify(st));
+    let bar = await statusBar();
+    check('status bar: ✓ después de un comando correcto', bar.commandState === 'ok', JSON.stringify(bar));
+    st = await runIdle('cmd /c exit 3');
+    check('programa nativo que falla: su código (3)', st.lastExitCode === 3, String(st.lastExitCode));
+    bar = await statusBar();
+    check('status bar: ✗ con el código', bar.commandState === 'error' && bar.command === '✗ 3', JSON.stringify(bar));
+    st = await runIdle('Get-Item C:\\no-existe-terminal-e2e');
+    check('cmdlet que falla: código 1', st.lastExitCode === 1, String(st.lastExitCode));
+    st = await runIdle("throw 'boom'");
+    check('excepción: código 1', st.lastExitCode === 1, String(st.lastExitCode));
+    await runIdle('cmd /c exit 9');
+    await runIdle("'lec=' + $LASTEXITCODE + ';fin'");
+    check('$LASTEXITCODE del usuario no se pisa', (await text()).includes('lec=9;fin'));
+
+    // A running command with no child process (Start-Sleep runs inside PowerShell): the
+    // process tree shows nothing, OSC 133 does. Closing must ask.
+    const keep = (await wsState()).active;
+    await openTab();
+    const busyTab = (await wsState()).active;
+    const id = await activePane();
+    await runIdle('Start-Sleep -Seconds 60', { wait: false });
+    const running = await waitUntil(async () => (await paneState(id)).commandRunning, 5000);
+    bar = await statusBar();
+    check('comando en ejecución: estado del panel y status bar', running && bar.commandState === 'running' && bar.command.includes('Start-Sleep -Seconds 60'), JSON.stringify(bar));
+    await page.keyboard.press('Control+Shift+W');
+    const dialog = await page.waitForSelector('[role="alertdialog"]', { timeout: 5000 }).catch(() => null);
+    const detail = dialog ? await page.textContent('.dialog-details') : '';
+    check('cerrar con un comando corriendo pide confirmación (aunque no haya procesos hijos)', !!dialog && detail.includes('Start-Sleep -Seconds 60'), detail);
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => !(await page.$('[role="alertdialog"]')), 3000);
+    check('Cancelar deja la tab', (await wsState()).tabs[busyTab] !== undefined);
+    await waitUntil(terminalFocused, 3000);
+    await page.keyboard.press('Control+c');
+    const stopped = await waitUntil(() => idle(id), 8000);
+    st = await paneState(id);
+    check('Ctrl+C termina el comando: deja de estar en ejecución', stopped && st.lastExitCode !== null, JSON.stringify(st));
+    await page.keyboard.press('Control+Shift+W');
+    await waitUntil(async () => (await wsState()).tabs[busyTab] === undefined, 5000);
+    check('sin comando ni procesos, cerrar no pregunta', (await wsState()).tabs[busyTab] === undefined && !(await page.$('[role="alertdialog"]')));
+    check('queda la otra tab', (await wsState()).active === keep);
+    await shot('21-commands');
+  },
+
+  async prompt() {
+    await freshTab();
+    // Custom prompts defined after the integration loaded (like a profile or oh-my-posh that
+    // redefines `prompt` later): the integration wraps them again.
+    await runIdle("function global:prompt { 'MI-PROMPT ' + $PWD.ProviderPath + '> ' }");
+    check('prompt personalizado: se ve tal cual', await lineMatches(/^MI-PROMPT .*> ?$/), await cursorLine());
+    const parent = trickyDir(...PARENT_DIR);
+    let st = await runIdle(`Set-Location -LiteralPath ${psQuote(parent)}`);
+    check('prompt personalizado: el cwd se sigue reportando', st.cwd === parent, st.cwd);
+    st = await runIdle('cmd /c exit 4');
+    check('prompt personalizado: el código de salida se sigue reportando', st.lastExitCode === 4, String(st.lastExitCode));
+
+    // Prompts that show the last status (oh-my-posh, starship...) must see the real $?.
+    await runIdle("function global:prompt { if ($?) { 'BIEN> ' } else { 'MAL> ' } }");
+    await runIdle('Get-Item C:\\no-existe-terminal-e2e');
+    check('un prompt que usa $? ve el fallo', await lineMatches(/^MAL>/), await cursorLine());
+    await runIdle("'ok'");
+    check('... y el éxito', await lineMatches(/^BIEN>/), await cursorLine());
+
+    await runIdle("function global:prompt { Write-Host 'HOST-PROMPT' -NoNewline -ForegroundColor Cyan; ' ' }");
+    st = await runIdle('cmd /c exit 6');
+    check('un prompt con Write-Host sigue integrado', st.lastExitCode === 6 && (await lineMatches(/^HOST-PROMPT/)), await cursorLine());
+
+    // PSReadLine keeps working: history and completion.
+    await page.keyboard.press('ArrowUp');
+    const history = await waitUntil(async () => (await cursorLine()).includes('cmd /c exit 6'), 3000);
+    check('PSReadLine: flecha arriba trae el historial', history, await cursorLine());
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => (await cursorLine()).trim() === 'HOST-PROMPT', 3000);
+    await page.keyboard.type('Get-ChildIt');
+    await page.keyboard.press('Tab');
+    const completed = await waitUntil(async () => (await cursorLine()).includes('Get-ChildItem'), 3000);
+    check('PSReadLine: Tab autocompleta', completed, await cursorLine());
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => (await cursorLine()).trim() === 'HOST-PROMPT', 3000);
+    await shot('22-prompt');
+    await freshTab();
+  },
+
+  async inherit() {
+    await freshTab();
+    const tabId = (await wsState()).active;
+    const dir = trickyDir(...TRICKY_DIR);
+    await cdTricky();
+
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const right = await activePane();
+    check('Alt+Shift+D: el panel nuevo abre en el mismo cwd', (await paneCwd(right)) === dir, String(await paneCwd(right)));
+    await runIdle("'pwd=' + $PWD.ProviderPath + ';fin'");
+    check('... y su shell está ahí de verdad', (await text()).includes(`pwd=${dir};fin`));
+    await page.keyboard.press('Alt+Shift+Minus');
+    await waitPanes(3);
+    const down = await activePane();
+    check('Alt+Shift+-: también', (await paneCwd(down)) === dir, String(await paneCwd(down)));
+
+    await page.click(tabSel(tabId), { button: 'right' });
+    await page.click('[role="menu"] [data-action="duplicate"]');
+    if (!(await waitUntil(async () => (await wsState()).order.length === 2, 5000))) {
+      // Seen once in a full run (Fase 4): no duplicate after the click. Keep the evidence.
+      await shot('fail-inherit-duplicate');
+      const st = await wsState();
+      throw new Error(`duplicar no creó la tab: ${st.order.join(',')} activa=${st.active}; ${await focusReport()}`);
+    }
+    const dup = (await wsState()).active;
+    const dupPane = (await wsState()).tabs[dup].activePaneId;
+    check('duplicar la tab: mismo cwd', dup !== tabId && (await paneCwd(dupPane)) === dir, String(await paneCwd(dupPane)));
+    await waitUntil(atShellPrompt, 20000);
+    const fresh = await openTab();
+    const freshPane = (await wsState()).tabs[fresh].activePaneId;
+    check('Ctrl+Shift+T: la tab nueva abre en el cwd del panel activo', (await paneCwd(freshPane)) === dir, String(await paneCwd(freshPane)));
+
+    // The folder disappears: the next split falls back to home, without errors.
+    const gone = trickyDir('se va a borrar');
+    const st = await runIdle(`Set-Location -LiteralPath ${psQuote(gone)}`);
+    fs.rmSync(gone, { recursive: true, force: true });
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const orphan = await activePane();
+    const home = await homeDir();
+    const orphanCwd = await paneCwd(orphan);
+    const noError = !(await text()).includes('No se pudo iniciar');
+    check('si el cwd ya no existe, el panel nuevo abre en home sin error', st.cwd === gone && orphanCwd === home && noError, `${orphanCwd} / ${home}`);
+    await shot('23-inherit');
+    await freshTab();
+  },
+
+  async notice() {
+    await freshTab();
+    check('sin aviso mientras la integración funciona', (await statusBar()).notice === null);
+    // The marker the injector writes when the script cannot load (execution policy, errors).
+    // The real failure, end to end in PowerShell, is a Rust test
+    // (powershell_integration_failure_is_reported_and_harmless).
+    await run("[Console]::Write([char]27 + ']633;P;IntegrationError=prueba e2e' + [char]7)");
+    await waitUntil(async () => (await statusBar()).notice !== null, 3000);
+    const bar = await statusBar();
+    check(
+      'si la integración falla: aviso discreto en la status bar (motivo en el tooltip)',
+      !!bar.notice?.includes('Sin integración') && !!bar.noticeTitle?.includes('prueba e2e'),
+      JSON.stringify(bar),
+    );
+    check('... y la terminal sigue funcionando', (await value("'si' + 'gue'", 'v')) === 'sigue');
+    await freshTab();
+  },
+
+  async gitbash() {
+    const shells = await page.evaluate(() => window.__system.getState().shells);
+    if (!shells.some((s) => s.kind === 'gitbash')) return skip('gitbash', 'Git Bash no está instalado');
+    await freshTab();
+    const parent = trickyDir(...PARENT_DIR);
+    const dir = trickyDir(...TRICKY_DIR);
+    await cdTricky();
+    const before = (await wsState()).order.length;
+    await page.click('.tab-new-menu');
+    await page.click('[role="menu"] [data-shell="gitbash"]');
+    await waitUntil(async () => (await wsState()).order.length === before + 1, 5000);
+    const id = await activePane();
+    const ready = await waitUntil(() => idle(id), 30000);
+    let st = await paneState(id);
+    check('Git Bash desde el selector "▾", con integración', ready && st.shell === 'gitbash', JSON.stringify({ shell: st.shell, integration: st.integration, error: st.integrationError }));
+    check('Git Bash abre en el cwd del panel activo (tildes y ñ)', st.cwd === dir, `${st.cwd} / ${dir}`);
+    check('status bar: nombre de la shell', (await statusBar()).shell === 'Git Bash');
+    await waitUntil(terminalFocused, 3000);
+    st = await runIdle('cd ..');
+    check('Git Bash: cd actualiza el cwd', st.cwd === parent, st.cwd);
+    st = await runIdle('false');
+    check('Git Bash: comando que falla, código 1', st.lastExitCode === 1 && st.lastCommand === 'false', JSON.stringify(st));
+    st = await runIdle('(exit 4)');
+    check('Git Bash: código de salida 4', st.lastExitCode === 4, String(st.lastExitCode));
+    await page.keyboard.press('Alt+Shift+D');
+    await waitUntil(async () => leaves((await activeTab()).layout).length === 2, 5000);
+    const second = await activePane();
+    const ready2 = await waitUntil(() => idle(second), 30000);
+    st = await paneState(second);
+    check('dividir Git Bash: Git Bash en el mismo cwd', ready2 && st.shell === 'gitbash' && st.cwd === parent, JSON.stringify({ shell: st.shell, cwd: st.cwd }));
+    await shot('24-gitbash');
+    await freshTab();
   },
 
   async passthrough() {

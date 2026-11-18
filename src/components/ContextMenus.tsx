@@ -1,6 +1,7 @@
 import { useShallow } from 'zustand/react/shallow';
 import { TAB_COLORS } from '../config/colors';
 import { closeOtherTabs, focusActiveTerminal, groupTab, requestClosePane, requestCloseTabs } from '../lib/tabActions';
+import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
 import { parentSplit, tabOfPane, tabsInGroup, type GroupId, type PaneId, type TabId } from '../store/workspaceModel';
@@ -23,7 +24,31 @@ export function ContextMenus() {
   if (!menu) return null;
   if (menu.kind === 'tab') return <TabMenu tabId={menu.tabId} x={menu.x} y={menu.y} />;
   if (menu.kind === 'group') return <GroupMenu groupId={menu.groupId} x={menu.x} y={menu.y} />;
+  if (menu.kind === 'shells') return <ShellMenu x={menu.x} y={menu.y} />;
   return <PaneMenu paneId={menu.paneId} x={menu.x} y={menu.y} />;
+}
+
+/** "▾" next to "+": a new tab with any of the available shells, in the active pane's folder. */
+function ShellMenu({ x, y }: { x: number; y: number }) {
+  const shells = useSystem((s) => s.shells);
+  return (
+    <Menu x={x} y={y} label="Nueva tab con" onClose={dismiss}>
+      <MenuLabel>Nueva tab con</MenuLabel>
+      {shells.map((shell) => (
+        <MenuItem
+          key={shell.kind}
+          action="new-tab-shell"
+          data-shell={shell.kind}
+          onSelect={run(() => {
+            useWorkspace.getState().newTab({ shell: shell.kind });
+            focusActiveTerminal();
+          })}
+        >
+          {shell.name}
+        </MenuItem>
+      ))}
+    </Menu>
+  );
 }
 
 /** Shift+right click on a terminal, or Shift+F10 / the menu key. */

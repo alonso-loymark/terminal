@@ -2,9 +2,11 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect } from 'react';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ContextMenus } from './components/ContextMenus';
+import { StatusBar } from './components/StatusBar';
 import { TabBar } from './components/TabBar';
 import { Workspace } from './components/Workspace';
 import { installAppShortcuts } from './lib/appShortcuts';
+import { loadSystemInfo } from './store/system';
 import { useWorkspace } from './store/workspace';
 import { tabTitle } from './store/workspaceModel';
 
@@ -21,11 +23,13 @@ export function App() {
   }, [title]);
 
   useEffect(() => installAppShortcuts(), []);
+  useEffect(() => void loadSystemInfo(), []);
 
   return (
     <div className="app">
       <TabBar />
       <Workspace />
+      <StatusBar />
       <ContextMenus />
       <ConfirmDialog />
     </div>

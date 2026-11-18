@@ -2,6 +2,7 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import type { CSSProperties, MouseEvent } from 'react';
 import { TAB_COLORS } from '../config/colors';
+import { folderName } from '../lib/paths';
 import { focusActiveTerminal, requestCloseTabs } from '../lib/tabActions';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
@@ -25,7 +26,12 @@ export function TabItem({ tabId }: { tabId: TabId }) {
   });
   const exitCode = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.exitCode ?? null);
   const customTitle = useWorkspace((s) => s.tabs[tabId]?.customTitle ?? null);
+  const cwd = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.cwd ?? null);
   const renaming = useUi((s) => s.renamingTabId === tabId);
+  // The active pane's folder under the title, unless the user named the tab (or the title
+  // already says it).
+  const folder = cwd ? folderName(cwd) : null;
+  const subtitle = !customTitle && folder && folder.toLowerCase() !== title.toLowerCase() ? folder : null;
   // Not `disabled: renaming`: dnd-kit would mark the tab (and its input) aria-disabled. While
   // renaming, the drag listeners are simply not attached.
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: tabId });
@@ -57,6 +63,7 @@ export function TabItem({ tabId }: { tabId: TabId }) {
 
   let tooltip = title;
   if (indicator && indicator !== 'activity') tooltip += ` — ${INDICATOR_LABEL[indicator]}${exitCode !== null ? ` (código ${exitCode})` : ''}`;
+  if (cwd) tooltip += `\n${cwd}`;
 
   return (
     <div
@@ -88,7 +95,10 @@ export function TabItem({ tabId }: { tabId: TabId }) {
           onCancel={() => endRename()}
         />
       ) : (
-        <span className="tab-title">{title}</span>
+        <span className="tab-text">
+          <span className="tab-title">{title}</span>
+          {subtitle && <span className="tab-subtitle">{subtitle}</span>}
+        </span>
       )}
       <span className="tab-indicator" aria-label={indicator ? INDICATOR_LABEL[indicator] : undefined} />
       <button

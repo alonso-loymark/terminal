@@ -6,6 +6,10 @@ TypeScript y xterm.js sobre ConPTY.
 
 - Rust maneja los procesos (PTY, ciclo de vida, limpieza del árbol de procesos); el frontend solo
   renderiza y reenvía input.
+- Tabs con grupos estilo Chrome y paneles divididos; las terminales nunca se recrean al moverlas.
+- Shell integration para PowerShell (5.1 y 7) y Git Bash: carpeta actual en la barra de estado y
+  en la tab, estado y código de salida de cada comando, y paneles/tabs nuevos en la misma carpeta.
+  No toca el perfil del usuario.
 - Renderizado con WebGL (fallback DOM), búsqueda, links clickeables, copiar/pegar estilo Windows
   Terminal y zoom.
 

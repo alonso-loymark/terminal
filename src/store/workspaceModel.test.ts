@@ -5,6 +5,7 @@ import {
   activateIndex,
   activateTab,
   addTab,
+  applyShellEvent,
   closePane,
   closeTabs,
   createGroup,
@@ -23,8 +24,10 @@ import {
   removeFromGroup,
   renameTab,
   panesOf,
+  setPaneSession,
   setPaneStatus,
   setPaneTitle,
+  spawnOf,
   setSplitSizes,
   splitPane,
   tabIndicator,
@@ -369,4 +372,84 @@ test('a pane can move to another tab keeping its id (prepared for drag between t
   ws = movePane(ws, 'p2', 'p1', 'vertical', 's9');
   assert.deepEqual(ws.tabOrder, ['t1']);
   assert.deepEqual(panesOf(layoutOf(ws)).sort(), ['p1', 'p2', 'p3', 'q1']);
+});
+
+// ---------------------------------------------------------------- shell integration
+
+const pane = (ws: Workspace, id = 'p1') => {
+  const found = ws.panes[id];
+  assert.ok(found, `pane ${id}`);
+  return found;
+};
+
+/** One tab whose shell loaded the integration. */
+function integrated(): Workspace {
+  let ws = setPaneStatus(workspace(1), 'p1', 'running', null, 7);
+  ws = setPaneSession(ws, 'p1', { shell: 'powershell', integration: true });
+  ws = applyShellEvent(ws, 'p1', { type: 'integration', ok: true });
+  return applyShellEvent(ws, 'p1', { type: 'cwd', cwd: 'C:\\Users\\Ana' });
+}
+
+test('shell integration: cwd, command line, running state and exit code', () => {
+  let ws = integrated();
+  assert.equal(pane(ws).integration, 'ok');
+  assert.equal(pane(ws).cwd, 'C:\\Users\\Ana');
+  ws = applyShellEvent(ws, 'p1', { type: 'commandLine', commandLine: 'npm test' });
+  ws = applyShellEvent(ws, 'p1', { type: 'commandStart' });
+  assert.equal(pane(ws).commandRunning, true);
+  assert.equal(pane(ws).lastCommand, 'npm test');
+  ws = applyShellEvent(ws, 'p1', { type: 'commandEnd', exitCode: 3 });
+  assert.equal(pane(ws).commandRunning, false);
+  assert.equal(pane(ws).lastExitCode, 3);
+  // A stray end mark (no command running) changes nothing.
+  assert.equal(applyShellEvent(ws, 'p1', { type: 'commandEnd', exitCode: 0 }), ws);
+  // Same folder again: same object (no re-render).
+  assert.equal(applyShellEvent(ws, 'p1', { type: 'cwd', cwd: 'C:\\Users\\Ana' }), ws);
+  // A prompt ends whatever was running even without an end mark (e.g. Ctrl+C in some shells).
+  ws = applyShellEvent(applyShellEvent(ws, 'p1', { type: 'commandStart' }), 'p1', { type: 'prompt' });
+  assert.equal(pane(ws).commandRunning, false);
+});
+
+test('shell integration: OSC 7 from inside a running command is not the pane folder (ssh, nested shells)', () => {
+  let ws = applyShellEvent(integrated(), 'p1', { type: 'commandStart' });
+  ws = applyShellEvent(ws, 'p1', { type: 'cwd', cwd: '\\\\remote\\home' });
+  assert.equal(pane(ws).cwd, 'C:\\Users\\Ana');
+});
+
+test('shell integration: load failures, missing script and late reports', () => {
+  let ws = setPaneSession(workspace(1), 'p1', { shell: 'powershell', integration: false });
+  assert.equal(pane(ws).integration, 'unavailable');
+  ws = setPaneSession(workspace(1), 'p1', { shell: 'powershell', integration: true });
+  assert.equal(pane(ws).integration, 'pending');
+  ws = applyShellEvent(ws, 'p1', { type: 'integration', ok: false, error: 'scripts deshabilitados' });
+  assert.equal(pane(ws).integration, 'error');
+  assert.equal(pane(ws).integrationError, 'scripts deshabilitados');
+  // A slow profile that reports after the timeout recovers.
+  ws = applyShellEvent(ws, 'p1', { type: 'integration', ok: true });
+  assert.equal(pane(ws).integration, 'ok');
+  assert.equal(pane(setPaneSession(ws, 'p1', { shell: 'powershell', integration: true })).integration, 'ok');
+  assert.equal(applyShellEvent(ws, 'p1', { type: 'integration', ok: true }), ws, 'no change, same object');
+});
+
+test('a restart forgets the commands but keeps the folder; an exit stops the running command', () => {
+  let ws = applyShellEvent(integrated(), 'p1', { type: 'commandStart' });
+  ws = setPaneStatus(ws, 'p1', 'exited', 0, null);
+  assert.equal(pane(ws).commandRunning, false);
+  ws = setPaneStatus(ws, 'p1', 'starting', null, null);
+  assert.equal(pane(ws).integration, 'pending');
+  assert.equal(pane(ws).lastCommand, null);
+  assert.equal(pane(ws).cwd, 'C:\\Users\\Ana', 'the new session starts there');
+  assert.deepEqual(spawnOf(ws, 'p1'), { shell: 'powershell', cwd: 'C:\\Users\\Ana' });
+});
+
+test('split and new tabs inherit shell and folder; without a reported folder, the starting one', () => {
+  let ws = setPaneSession(integrated(), 'p1', { shell: 'gitbash', integration: true });
+  ws = splitPane(ws, 'p1', 'horizontal', { paneId: 'p2', splitId: 's1' });
+  assert.equal(pane(ws, 'p2').shell, 'gitbash');
+  assert.equal(pane(ws, 'p2').startCwd, 'C:\\Users\\Ana');
+  assert.equal(pane(ws, 'p2').cwd, null, 'until its own shell reports');
+  assert.deepEqual(spawnOf(ws, 'p2'), { shell: 'gitbash', cwd: 'C:\\Users\\Ana' }, 'falls back to startCwd');
+  ws = addTab(ws, { tabId: 't2', paneId: 'q1', shell: null, cwd: 'D:\\x' });
+  assert.deepEqual(spawnOf(ws, 'q1'), { shell: null, cwd: 'D:\\x' });
+  assert.deepEqual(spawnOf(ws, 'nope'), { shell: null, cwd: null });
 });

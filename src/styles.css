@@ -105,12 +105,26 @@ body,
   background: var(--group-color);
 }
 
-.tab-title {
+/* Title, and under it the active pane's folder (shell integration) unless the tab was renamed. */
+.tab-text {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.tab-title,
+.tab-subtitle {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.tab-subtitle {
+  font-size: 10px;
+  line-height: 12px;
+  color: var(--muted);
 }
 
 /* Activity: filled dot. Exited: hollow ring (red if the exit code was not 0). */
@@ -174,9 +188,23 @@ body,
   cursor: pointer;
 }
 
-.tab-new:hover {
+.tab-new:hover,
+.tab-new-menu:hover {
   background: var(--panel);
   color: var(--text);
+}
+
+.tab-new-menu {
+  flex: none;
+  width: 18px;
+  margin: 2px 0 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 11px/1 system-ui, sans-serif;
+  cursor: pointer;
 }
 
 .group-chip {
@@ -311,6 +339,76 @@ body,
 .terminal-pane .xterm .xterm-viewport {
   background-color: transparent;
   scrollbar-width: none;
+}
+
+/* ------------------------------------------------------------------ status bar */
+
+/* The active pane's folder, last command and shell (fed by the shell integration). */
+.status-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 22px;
+  padding: 0 10px;
+  background: var(--chrome);
+  border-top: 1px solid var(--border);
+  font: var(--ui-font);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  user-select: none;
+  overflow: hidden;
+}
+
+.status-cwd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.status-command {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 40%;
+  min-width: 0;
+}
+
+.status-command-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-command[data-state='ok'] {
+  color: #3fb950;
+}
+
+.status-command[data-state='error'] {
+  color: var(--danger);
+}
+
+.status-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.status-spacer {
+  flex: 1;
+}
+
+.status-notice {
+  flex: none;
+  color: #d29922;
+}
+
+.status-shell {
+  flex: none;
 }
 
 /* ------------------------------------------------------------------ search */

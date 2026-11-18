@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{State, Webview};
+use tauri::path::BaseDirectory;
+use tauri::{Manager, State, Webview};
 
 use crate::pty::{
-    self, BusyProcess, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId,
-    ShiftEnterTarget, SpawnOptions,
+    self, BusyProcess, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId, ShellKind,
+    ShellProfile, ShiftEnterTarget, SpawnOptions,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -17,7 +18,18 @@ pub struct SessionExit {
     exit_code: Option<u32>,
 }
 
+/// What `create_session` started.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    session_id: SessionId,
+    shell: ShellKind,
+    /// The shell integration script was injected (cwd and command marks will follow).
+    integration: bool,
+}
+
 /// Forwards a session's events to the webview through its own channels.
+#[derive(Clone)]
 struct ChannelEvents {
     data: Channel<InvokeResponseBody>,
     exit: Channel<SessionExit>,
@@ -43,20 +55,37 @@ pub async fn create_session(
     cols: u16,
     rows: u16,
     cwd: Option<String>,
+    shell: Option<ShellKind>,
     on_data: Channel<InvokeResponseBody>,
     on_exit: Channel<SessionExit>,
-) -> Result<SessionId, PtyError> {
-    let shell = pty::default_shell();
+) -> Result<SessionInfo, PtyError> {
+    let profile = shell
+        .and_then(pty::shell_profile)
+        .or_else(|| pty::shell_profile(ShellKind::PowerShell))
+        .ok_or_else(|| PtyError::Spawn("no shell available".to_owned()))?;
+    // Bundled with the app (tauri.conf.json > bundle.resources); copied next to the exe in dev.
+    let integration_dir = webview
+        .app_handle()
+        .path()
+        .resolve("shell-integration", BaseDirectory::Resource)
+        .ok();
+    let launch = pty::launch(&profile, integration_dir.as_deref());
+    let requested = cwd.map(PathBuf::from);
+    let mut env = vec![("COLORTERM".to_owned(), "truecolor".to_owned())];
+    env.extend(launch.env);
     let options = SpawnOptions {
-        program: shell.program,
-        args: shell.args,
-        cwd: cwd
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_dir())
-            .or_else(pty::default_cwd),
-        env: vec![("COLORTERM".to_owned(), "truecolor".to_owned())],
+        program: launch.program,
+        args: launch.args,
+        // A directory that no longer exists or cannot be read falls back to the home folder.
+        cwd: pty::resolve_cwd(requested.as_deref()),
+        env,
         cols,
         rows,
+    };
+    let info = |session_id| SessionInfo {
+        session_id,
+        shell: profile.kind,
+        integration: launch.integration,
     };
     let manager = manager.inner().clone();
     let owner = webview.label().to_owned();
@@ -66,9 +95,40 @@ pub async fn create_session(
     };
 
     // Starting a shell (and its conhost) blocks for a few ms: keep it off the async workers.
-    tauri::async_runtime::spawn_blocking(move || manager.create(&owner, options, events))
-        .await
-        .map_err(|e| PtyError::Spawn(format!("spawn task failed: {e}")))?
+    tauri::async_runtime::spawn_blocking(move || {
+        match manager.create(&owner, options.clone(), events.clone()) {
+            // The directory passed the checks but CreateProcess still refused it: use home.
+            Err(PtyError::Spawn(_)) if options.cwd != pty::default_cwd() => manager.create(
+                &owner,
+                SpawnOptions {
+                    cwd: pty::default_cwd(),
+                    ..options
+                },
+                events,
+            ),
+            other => other,
+        }
+    })
+    .await
+    .map_err(|e| PtyError::Spawn(format!("spawn task failed: {e}")))?
+    .map(info)
+}
+
+/// Facts the UI needs once: the home folder (to shorten paths) and the shells available.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemInfo {
+    home_dir: Option<String>,
+    shells: Vec<ShellProfile>,
+}
+
+/// Async: probing for shells touches the file system, never on the main thread.
+#[tauri::command]
+pub async fn system_info() -> SystemInfo {
+    SystemInfo {
+        home_dir: pty::default_cwd().map(|dir| dir.display().to_string()),
+        shells: pty::available_shells(),
+    }
 }
 
 #[tauri::command]

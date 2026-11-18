@@ -10,8 +10,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use terminal_lib::pty::{
-    PtyManager, SessionEvents, SessionId, ShiftEnterTarget, SpawnOptions, default_shell,
-    find_on_path,
+    PtyManager, SessionEvents, SessionId, ShellKind, ShiftEnterTarget, SpawnOptions, default_shell,
+    find_on_path, launch, shell_profile,
 };
 use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{
@@ -19,6 +19,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 const FAKE_AGENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../e2e/fake-agent.mjs");
+const INTEGRATION_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/shell-integration");
 const CHARMAP: &str = r"C:\Windows\System32\charmap.exe";
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -80,6 +81,25 @@ impl Shell {
         shell.run("'ready' + '-prompt'", "ready-prompt");
         let ready = shell.output.rfind("ready-prompt").expect("marker");
         shell.wait_for(ready, "PS ");
+        while shell.pump(Duration::from_millis(150)) {}
+        shell
+    }
+
+    /// Starts any command line and waits for `ready` in its output.
+    fn start(manager: &PtyManager, options: SpawnOptions, ready: &str) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let id = manager
+            .create("test", options, ChannelEvents(tx))
+            .expect("spawn shell");
+        let mut shell = Shell {
+            manager: manager.clone(),
+            id,
+            events: rx,
+            output: String::new(),
+            exit: None,
+            output_after_exit: false,
+        };
+        shell.wait_for(0, ready);
         while shell.pump(Duration::from_millis(150)) {}
         shell
     }
@@ -554,6 +574,242 @@ fn busy_lists_what_closing_would_kill_but_not_windowed_apps() {
         let busy = manager.busy_processes(shell.id).unwrap();
         kill_process(app);
         assert!(busy.is_empty(), "a windowed app counted as busy: {busy:?}");
+    }
+    manager.close(shell.id).unwrap();
+}
+
+// ---------------------------------------------------------------- shell integration
+
+/// A fresh directory with spaces, accents and ñ in its path (long form, no 8.3 names).
+fn tricky_dir(tag: &str) -> PathBuf {
+    let base = std::env::temp_dir().join(format!("terminal it {tag} {}", std::process::id()));
+    let dir = base.join("carpeta con espacios").join("Ñandú áéíóú");
+    fs::create_dir_all(&dir).unwrap();
+    let long = fs::canonicalize(&dir).unwrap();
+    PathBuf::from(long.display().to_string().trim_start_matches(r"\\?\"))
+}
+
+/// What OSC 7 must carry for `path`: file://<host>/<drive>/<percent-encoded UTF-8 segments>.
+fn file_uri(path: &Path) -> String {
+    let host = std::env::var("COMPUTERNAME").unwrap();
+    let segments: Vec<String> = path
+        .display()
+        .to_string()
+        .split('\\')
+        .map(|segment| {
+            if segment.len() == 2 && segment.ends_with(':') {
+                return segment.to_owned();
+            }
+            segment
+                .bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                        (b as char).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    format!("file://{host}/{}", segments.join("/"))
+}
+
+fn integrated(kind: ShellKind, cwd: &Path, env: Vec<(String, String)>) -> Option<SpawnOptions> {
+    let profile = shell_profile(kind)?;
+    let launch = launch(&profile, Some(Path::new(INTEGRATION_DIR)));
+    assert!(
+        launch.integration,
+        "integration script not found in {INTEGRATION_DIR}"
+    );
+    let mut all_env = launch.env;
+    all_env.extend(env);
+    Some(SpawnOptions {
+        program: launch.program,
+        args: launch.args,
+        cwd: Some(cwd.to_owned()),
+        env: all_env,
+        cols: 140,
+        rows: 30,
+    })
+}
+
+#[test]
+fn powershell_integration_reports_cwd_commands_and_exit_codes() {
+    let dir = tricky_dir("ps");
+    let manager = PtyManager::new();
+    let options = integrated(ShellKind::PowerShell, &dir, vec![]).unwrap();
+    let mut shell = Shell::start(&manager, options, "\x1b]133;B\x07");
+    assert!(
+        shell.output.contains("\x1b]633;P;Shell=powershell\x07"),
+        "loaded mark"
+    );
+    assert!(
+        shell
+            .output
+            .contains(&format!("\x1b]7;{}\x07", file_uri(&dir))),
+        "OSC 7 with spaces, accents and ñ:\n{:?}",
+        shell.output
+    );
+    assert!(shell.output.contains("\x1b]133;A\x07"));
+
+    let commands = [
+        ("'uno'", "\x1b]133;D;0\x07"),
+        ("cmd /c exit 7", "\x1b]133;D;7\x07"),
+        (r"Get-Item C:\no-existe-terminal-test", "\x1b]133;D;1\x07"),
+        ("'a;b'", "\x1b]133;D;0\x07"),
+    ];
+    for (command, done) in commands {
+        let from = shell.output.len();
+        shell.send(&format!("{command}\r"));
+        let at = shell.wait_for(from, done);
+        let tail = &shell.output[from..at];
+        assert!(tail.contains("\x1b]133;C\x07"), "{command}: no C mark");
+        let escaped = command.replace('\\', "\\\\").replace(';', "\\x3b");
+        assert!(
+            tail.contains(&format!("\x1b]633;E;{escaped}\x07")),
+            "{command}: command line not reported: {tail:?}"
+        );
+        shell.wait_for(at, "\x1b]133;B\x07");
+    }
+
+    // The user redefines the prompt: it keeps its text and the integration re-wraps it.
+    let from = shell.output.len();
+    shell.send("function global:prompt { 'CUSTOM> ' }\r");
+    shell.wait_for(from, "CUSTOM> ");
+    let from = shell.output.len();
+    shell.send("'despues'\r");
+    let at = shell.wait_for(from, "\x1b]133;D;0\x07");
+    let prompt = shell.wait_for(at, "CUSTOM> ");
+    assert!(
+        shell.output[at..prompt].contains("\x1b]133;A\x07"),
+        "prompt not re-wrapped"
+    );
+    shell.wait_for(prompt, "\x1b]133;B\x07");
+
+    // A prompt that depends on $? (like oh-my-posh) still sees the real status.
+    let from = shell.output.len();
+    shell.send("function global:prompt { if ($?) { 'BIEN> ' } else { 'MAL> ' } }\r");
+    shell.wait_for(from, "BIEN> ");
+    let from = shell.output.len();
+    shell.send("Get-Item C:\\no-existe-terminal-test\r");
+    shell.wait_for(from, "MAL> ");
+    let from = shell.output.len();
+    shell.send("'ok'\r");
+    shell.wait_for(from, "BIEN> ");
+
+    // PSReadLine 2.2+ (pwsh 7) reads $? first thing in PSConsoleHostReadLine, to color the
+    // prompt after an error. One built like that must still see the failure through our wrapper.
+    let from = shell.output.len();
+    shell.send(concat!(
+        "function global:PSConsoleHostReadLine { $global:rlStatus = $?; ",
+        "[Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($host.Runspace, $ExecutionContext) }\r"
+    ));
+    shell.wait_for(from, "BIEN> ");
+    let from = shell.output.len();
+    shell.send("Get-Item C:\\no-existe-terminal-test\r");
+    shell.wait_for(from, "MAL> ");
+    let from = shell.output.len();
+    shell.send("'rl=' + $global:rlStatus + (';' + 'end')\r");
+    shell.wait_for(from, "rl=False;end");
+    let from = shell.output.len();
+    shell.send("'rl=' + $global:rlStatus + (';' + 'end')\r");
+    shell.wait_for(from, "rl=True;end");
+
+    // Moving reports the new directory.
+    let parent = dir.parent().unwrap().to_owned();
+    let from = shell.output.len();
+    shell.send(&format!(
+        "Set-Location -LiteralPath '{}'\r",
+        parent.display()
+    ));
+    shell.wait_for(from, &format!("\x1b]7;{}\x07", file_uri(&parent)));
+    manager.close(shell.id).unwrap();
+}
+
+#[test]
+fn powershell_integration_failure_is_reported_and_harmless() {
+    // A Restricted execution policy (process scope) forbids the script: the terminal must say
+    // so and the shell must keep working.
+    let dir = tricky_dir("policy");
+    let manager = PtyManager::new();
+    let env = vec![(
+        "PSExecutionPolicyPreference".to_owned(),
+        "Restricted".to_owned(),
+    )];
+    let options = integrated(ShellKind::PowerShell, &dir, env).unwrap();
+    let mut shell = Shell::start(&manager, options, "\x1b]633;P;IntegrationError=");
+    assert!(
+        !shell.output.contains("633;P;Shell="),
+        "integration must not report success"
+    );
+    shell.wait_for(0, "PS ");
+    shell.run("'sigue-' + 'viva'", "sigue-viva");
+    manager.close(shell.id).unwrap();
+}
+
+#[test]
+fn git_bash_integration_loads_the_users_profile_and_reports_commands() {
+    if shell_profile(ShellKind::GitBash).is_none() {
+        eprintln!("skipped: Git Bash not found");
+        return;
+    }
+    let dir = tricky_dir("bash");
+    // A throwaway HOME with its own profile: proves the user's startup files still load.
+    let home = dir.parent().unwrap().join("home");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        home.join(".bash_profile"),
+        "alias saludo='echo hola-desde-perfil'\nPS1='CUSTOMBASH$ '\n",
+    )
+    .unwrap();
+    let manager = PtyManager::new();
+    let env = vec![("HOME".to_owned(), home.display().to_string())];
+    let options = integrated(ShellKind::GitBash, &dir, env).unwrap();
+    let mut shell = Shell::start(&manager, options, "\x1b]133;B\x07");
+    assert!(
+        shell.output.contains("\x1b]633;P;Shell=bash\x07"),
+        "loaded mark"
+    );
+    assert!(
+        shell
+            .output
+            .contains(&format!("\x1b]7;{}\x07", file_uri(&dir))),
+        "OSC 7:\n{:?}",
+        shell.output
+    );
+    assert!(
+        shell.output.contains("CUSTOMBASH$ "),
+        "the profile's PS1 is kept"
+    );
+
+    shell.run("saludo", "hola-desde-perfil");
+    // An empty line is not a command: no start mark.
+    let at = shell.wait_for(0, "hola-desde-perfil");
+    shell.wait_for(at, "\x1b]133;B\x07");
+    let from = shell.output.len();
+    shell.send("\r");
+    let next = shell.wait_for(from, "\x1b]133;B\x07");
+    assert!(
+        !shell.output[from..next].contains("\x1b]133;C"),
+        "empty line reported as a command"
+    );
+    for (command, done) in [
+        ("false", "\x1b]133;D;1\x07"),
+        ("(exit 4)", "\x1b]133;D;4\x07"),
+        (r"echo a\;b", "\x1b]133;D;0\x07"),
+    ] {
+        let from = shell.output.len();
+        shell.send(&format!("{command}\r"));
+        let at = shell.wait_for(from, done);
+        let tail = &shell.output[from..at];
+        let escaped = command.replace('\\', "\\\\").replace(';', "\\x3b");
+        assert!(tail.contains("\x1b]133;C\x07"), "{command}: no C mark");
+        assert!(
+            tail.contains(&format!("\x1b]633;E;{escaped}\x07")),
+            "{command}: {tail:?}"
+        );
+        shell.wait_for(at, "\x1b]133;B\x07");
     }
     manager.close(shell.id).unwrap();
 }

@@ -5,7 +5,7 @@
 //   - a Tab owns a Layout tree: a leaf is a pane, a split lays its children out horizontally
 //     (side by side) or vertically (stacked) with sizes in percent; splits nest without limit;
 //   - Pane holds the per-session metadata (backend session id, OSC title, status, unseen
-//     output). Panes live in one global map, not inside tabs: a pane is identified by its id
+//     output) and what the shell integration reports (cwd, last command, exit code). Panes live in one global map, not inside tabs: a pane is identified by its id
 //     wherever its leaf sits, so moving a leaf between tabs (`movePane`) keeps its terminal;
 //   - groups are Chrome-style: a group is a contiguous run of tabs in `tabOrder` sharing a
 //     groupId. Every operation keeps that invariant (see `normalize`).
@@ -15,6 +15,37 @@ export type PaneId = string;
 export type GroupId = string;
 export type SplitId = string;
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'failed';
+/** Shell profiles known to the backend (src-tauri/src/pty/shell.rs). */
+export type ShellKind = 'powershell' | 'gitbash';
+/**
+ * pending: the integration script was injected and has not reported yet; ok: loaded;
+ * unavailable: not injected (script missing); error: it failed to load (e.g. execution policy).
+ */
+export type IntegrationState = 'pending' | 'ok' | 'unavailable' | 'error';
+
+/** What the shell integration reports through OSC 7 / 133 / 633 (see lib/shellIntegration.ts). */
+export type ShellEvent =
+  /** OSC 7: the shell's current directory (Windows path). */
+  | { type: 'cwd'; cwd: string }
+  /** OSC 133;A: a prompt is being drawn (the shell is idle). */
+  | { type: 'prompt' }
+  /** OSC 633;E: the command line about to run. */
+  | { type: 'commandLine'; commandLine: string }
+  /** OSC 133;C: the command started (its output follows). */
+  | { type: 'commandStart' }
+  /** OSC 133;D[;code]: the command finished. */
+  | { type: 'commandEnd'; exitCode: number | null }
+  /** OSC 633;P: the integration script loaded, or failed to. */
+  | { type: 'integration'; ok: true }
+  | { type: 'integration'; ok: false; error: string };
+
+/** Where and with what a pane's session starts. */
+export interface PaneSpawn {
+  /** null: the default shell. */
+  shell: ShellKind | null;
+  /** null: the user's home. The backend also falls back to home if the folder is gone. */
+  cwd: string | null;
+}
 
 export const COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange', 'grey'] as const;
 export type TabColor = (typeof COLORS)[number];
@@ -71,6 +102,20 @@ export interface Pane {
   exitCode: number | null;
   /** New output arrived while the pane was not on screen. */
   activity: boolean;
+  /** Shell profile: requested, then the one actually started. null = default. */
+  shell: ShellKind | null;
+  /** Folder the session was asked to start in (inherited from another pane); null = home. */
+  startCwd: string | null;
+  /** Current folder reported by the shell (OSC 7). */
+  cwd: string | null;
+  /** Last command line (OSC 633;E): the running one while `commandRunning`. */
+  lastCommand: string | null;
+  /** Exit code of the last finished command (OSC 133;D); null while running or unknown. */
+  lastExitCode: number | null;
+  /** Between OSC 133;C and 133;D. */
+  commandRunning: boolean;
+  integration: IntegrationState;
+  integrationError: string | null;
 }
 
 export interface Tab {
@@ -173,6 +218,8 @@ export interface NewTab {
   customTitle?: string | null;
   color?: TabColor | null;
   activate?: boolean;
+  shell?: ShellKind | null;
+  cwd?: string | null;
 }
 
 export function addTab(ws: Workspace, spec: NewTab): Workspace {
@@ -186,7 +233,7 @@ export function addTab(ws: Workspace, spec: NewTab): Workspace {
     activePaneId: spec.paneId,
     zoomedPaneId: null,
   };
-  const pane = newPane(spec.paneId);
+  const pane = newPane(spec.paneId, { shell: spec.shell ?? null, cwd: spec.cwd ?? null });
   const at = spec.after ? ws.tabOrder.indexOf(spec.after) : -1;
   const tabOrder = [...ws.tabOrder];
   tabOrder.splice(at >= 0 ? at + 1 : tabOrder.length, 0, tab.id);
@@ -247,14 +294,31 @@ function clearActivity(panes: Record<PaneId, Pane>, ids: PaneId[]): Record<PaneI
   return next;
 }
 
-const newPane = (id: PaneId): Pane => ({
+const newPane = (id: PaneId, spawn: PaneSpawn = { shell: null, cwd: null }): Pane => ({
   id,
   sessionId: null,
   title: '',
   status: 'starting',
   exitCode: null,
   activity: false,
+  shell: spawn.shell,
+  startCwd: spawn.cwd,
+  cwd: null,
+  lastCommand: null,
+  lastExitCode: null,
+  commandRunning: false,
+  integration: 'pending',
+  integrationError: null,
 });
+
+/**
+ * How to start a session like this pane's: same shell, in its current folder (the last one the
+ * shell reported, else the one it started in). Used by split, duplicate, new tab and restart.
+ */
+export function spawnOf(ws: Workspace, paneId: PaneId | null | undefined): PaneSpawn {
+  const pane = paneId ? ws.panes[paneId] : undefined;
+  return { shell: pane?.shell ?? null, cwd: pane?.cwd ?? pane?.startCwd ?? null };
+}
 
 /** Next/previous visible tab, wrapping around (Ctrl+Tab / Ctrl+Shift+Tab). */
 export function cycleTab(ws: Workspace, delta: number): Workspace {
@@ -421,7 +485,73 @@ export function setPaneStatus(
 ): Workspace {
   const pane = ws.panes[paneId];
   if (!pane || (pane.status === status && pane.exitCode === exitCode && pane.sessionId === sessionId)) return ws;
-  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, status, exitCode, sessionId } } };
+  let next: Pane = { ...pane, status, exitCode, sessionId };
+  if (status === 'starting' && pane.status !== 'starting') {
+    // A new session (restart): nothing reported yet. The folder stays: the session starts there.
+    next = {
+      ...next,
+      lastCommand: null,
+      lastExitCode: null,
+      commandRunning: false,
+      integration: 'pending',
+      integrationError: null,
+    };
+  } else if (status === 'exited' || status === 'failed') {
+    next = { ...next, commandRunning: false };
+  }
+  return { ...ws, panes: { ...ws.panes, [paneId]: next } };
+}
+
+/** The backend started the session: which shell, and whether the integration was injected. */
+export function setPaneSession(
+  ws: Workspace,
+  paneId: PaneId,
+  info: { shell: ShellKind; integration: boolean },
+): Workspace {
+  const pane = ws.panes[paneId];
+  if (!pane) return ws;
+  // Never downgrade an 'ok' or 'error' that the shell already reported.
+  const integration: IntegrationState = !info.integration
+    ? 'unavailable'
+    : pane.integration === 'unavailable'
+      ? 'pending'
+      : pane.integration;
+  if (pane.shell === info.shell && pane.integration === integration) return ws;
+  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, shell: info.shell, integration } } };
+}
+
+/** Applies one shell integration mark to the pane. Same object back if nothing changed. */
+export function applyShellEvent(ws: Workspace, paneId: PaneId, event: ShellEvent): Workspace {
+  const pane = ws.panes[paneId];
+  if (!pane) return ws;
+  let patch: Partial<Pane> | null = null;
+  switch (event.type) {
+    case 'cwd':
+      // Our scripts report the folder at the prompt. While a command runs, an OSC 7 comes from
+      // something else (ssh to another machine, a nested shell): not this pane's folder.
+      if (!pane.commandRunning && pane.cwd !== event.cwd) patch = { cwd: event.cwd };
+      break;
+    case 'prompt':
+      if (pane.commandRunning) patch = { commandRunning: false };
+      break;
+    case 'commandLine':
+      if (pane.lastCommand !== event.commandLine) patch = { lastCommand: event.commandLine };
+      break;
+    case 'commandStart':
+      if (!pane.commandRunning || pane.lastExitCode !== null) patch = { commandRunning: true, lastExitCode: null };
+      break;
+    case 'commandEnd':
+      if (pane.commandRunning) patch = { commandRunning: false, lastExitCode: event.exitCode };
+      break;
+    case 'integration':
+      if (event.ok) {
+        if (pane.integration !== 'ok') patch = { integration: 'ok', integrationError: null };
+      } else if (pane.integration !== 'error' || pane.integrationError !== (event.error || null)) {
+        patch = { integration: 'error', integrationError: event.error || null };
+      }
+      break;
+  }
+  return patch ? { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, ...patch } } } : ws;
 }
 
 /** Output arrived: marks the pane unless it is on screen. Cheap no-op otherwise. */
@@ -593,12 +723,16 @@ export function layoutDividers(layout: Layout, rect: Rect = FULL): Divider[] {
 
 // ---------------------------------------------------------------- split panes: operations
 
-/** Splits a pane; the new pane gets half of its space and the focus (Alt+Shift+D / Alt+Shift+-). */
+/**
+ * Splits a pane; the new pane gets half of its space and the focus (Alt+Shift+D / Alt+Shift+-).
+ * By default it runs the same shell in the same folder as the pane it comes from.
+ */
 export function splitPane(
   ws: Workspace,
   paneId: PaneId,
   direction: SplitDirection,
   ids: { paneId: PaneId; splitId: SplitId },
+  spawn: PaneSpawn = spawnOf(ws, paneId),
 ): Workspace {
   const tabId = tabOfPane(ws, paneId);
   const tab = tabId ? ws.tabs[tabId] : undefined;
@@ -606,7 +740,7 @@ export function splitPane(
   const layout = normalizeLayout(insertBeside(tab.layout, paneId, direction, { type: 'pane', paneId: ids.paneId }, ids.splitId));
   const next: Workspace = {
     ...ws,
-    panes: { ...ws.panes, [ids.paneId]: newPane(ids.paneId) },
+    panes: { ...ws.panes, [ids.paneId]: newPane(ids.paneId, spawn) },
     tabs: { ...ws.tabs, [tab.id]: { ...tab, layout, activePaneId: ids.paneId, zoomedPaneId: null } },
   };
   return activateTab(next, tab.id);

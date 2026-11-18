@@ -5,6 +5,8 @@ import type {
   GroupId,
   PaneId,
   SessionStatus,
+  ShellEvent,
+  ShellKind,
   SplitDirection,
   SplitId,
   TabColor,
@@ -17,8 +19,13 @@ const nextId = (prefix: string) => `${prefix}-${++lastId}`;
 let groupsCreated = 0;
 
 interface WorkspaceActions {
-  /** Opens a new tab at the end (or after `after`) and activates it. */
-  newTab: (spec?: Partial<Pick<model.NewTab, 'after' | 'groupId' | 'customTitle' | 'color'>>) => TabId;
+  /**
+   * Opens a new tab at the end (or after `after`) and activates it. Without `cwd` it starts in
+   * the active pane's folder (`cwd: null`: the home folder); without `shell`, the default one.
+   */
+  newTab: (
+    spec?: Partial<Pick<model.NewTab, 'after' | 'groupId' | 'customTitle' | 'color' | 'shell' | 'cwd'>>,
+  ) => TabId;
   /** Removes tabs and their panes from the state (unmounting their terminals closes the sessions). */
   closeTabs: (ids: TabId[]) => void;
   duplicateTab: (id: TabId) => TabId | null;
@@ -37,6 +44,9 @@ interface WorkspaceActions {
   ungroup: (groupId: GroupId) => void;
   setPaneTitle: (paneId: PaneId, title: string) => void;
   setPaneStatus: (paneId: PaneId, status: SessionStatus, exitCode: number | null, sessionId: number | null) => void;
+  setPaneSession: (paneId: PaneId, info: { shell: ShellKind; integration: boolean }) => void;
+  /** A shell integration mark (OSC 7 / 133 / 633) from the pane's terminal. */
+  applyShellEvent: (paneId: PaneId, event: ShellEvent) => void;
   markActivity: (paneId: PaneId) => void;
   /** Splits the pane (default: the active one); the new pane gets the focus. Returns its id. */
   splitPane: (direction: SplitDirection, paneId?: PaneId) => PaneId | null;
@@ -61,14 +71,20 @@ export const useWorkspace = create<WorkspaceStore>()((set, get) => {
     ...initial,
     newTab: (spec = {}) => {
       const tabId = nextId('tab');
-      update((ws) => model.addTab(ws, { ...spec, tabId, paneId: nextId('pane') }));
+      update((ws) => {
+        const cwd = spec.cwd === undefined ? model.spawnOf(ws, selectActivePaneId(ws)).cwd : spec.cwd;
+        return model.addTab(ws, { ...spec, cwd, tabId, paneId: nextId('pane') });
+      });
       return tabId;
     },
     closeTabs: (ids) => update((ws) => model.closeTabs(ws, ids)),
     duplicateTab: (id) => {
-      const tab = get().tabs[id];
+      const ws = get();
+      const tab = ws.tabs[id];
       if (!tab) return null;
-      return get().newTab({ after: id, groupId: tab.groupId, customTitle: tab.customTitle, color: tab.color });
+      // Same name, color, group, shell and folder (the one its active pane is in now).
+      const { shell, cwd } = model.spawnOf(ws, tab.activePaneId);
+      return ws.newTab({ after: id, groupId: tab.groupId, customTitle: tab.customTitle, color: tab.color, shell, cwd });
     },
     activateTab: (id) => update((ws) => model.activateTab(ws, id)),
     cycleTab: (delta) => update((ws) => model.cycleTab(ws, delta)),
@@ -95,6 +111,8 @@ export const useWorkspace = create<WorkspaceStore>()((set, get) => {
     setPaneTitle: (paneId, title) => update((ws) => model.setPaneTitle(ws, paneId, title)),
     setPaneStatus: (paneId, status, exitCode, sessionId) =>
       update((ws) => model.setPaneStatus(ws, paneId, status, exitCode, sessionId)),
+    setPaneSession: (paneId, info) => update((ws) => model.setPaneSession(ws, paneId, info)),
+    applyShellEvent: (paneId, event) => update((ws) => model.applyShellEvent(ws, paneId, event)),
     markActivity: (paneId) => update((ws) => model.markActivity(ws, paneId)),
     splitPane: (direction, paneId) => {
       const target = paneId ?? selectActivePaneId(get());

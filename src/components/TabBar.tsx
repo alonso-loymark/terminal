@@ -12,6 +12,8 @@ import { horizontalListSortingStrategy, SortableContext } from '@dnd-kit/sortabl
 import { Fragment } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { focusActiveTerminal } from '../lib/tabActions';
+import { useSystem } from '../store/system';
+import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
 import { visibleTabIds } from '../store/workspaceModel';
 import { GroupChip } from './GroupChip';
@@ -51,6 +53,7 @@ export function TabBar() {
     }),
   );
   const sortable = segments.filter((id) => !isGroupTarget(id));
+  const shellCount = useSystem((s) => s.shells.length);
   // Keep clicks and double-clicks working: a drag starts after moving 6 px.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
@@ -89,6 +92,21 @@ export function TabBar() {
       >
         +
       </button>
+      {shellCount > 1 && (
+        <button
+          type="button"
+          className="tab-new-menu"
+          title="Nueva tab con otra shell"
+          aria-label="Elegir shell para la nueva tab"
+          aria-haspopup="menu"
+          onClick={(event) => {
+            const box = event.currentTarget.getBoundingClientRect();
+            useUi.getState().openMenu({ kind: 'shells', x: box.left, y: box.bottom });
+          }}
+        >
+          ▾
+        </button>
+      )}
     </nav>
   );
 }

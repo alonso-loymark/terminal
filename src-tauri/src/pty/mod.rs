@@ -18,5 +18,8 @@ pub use error::PtyError;
 pub use manager::{PtyManager, SessionId};
 pub use platform::{PtyBackend, backend};
 pub use session::{FLUSH_INTERVAL, MAX_BATCH_BYTES, SessionEvents, SpawnOptions};
-pub use shell::{ShellCommand, default_cwd, default_shell, find_on_path};
+pub use shell::{
+    Launch, ShellCommand, ShellKind, ShellProfile, available_shells, default_cwd, default_shell,
+    find_on_path, launch, resolve_cwd, shell_profile,
+};
 pub use teardown::BusyProcess;

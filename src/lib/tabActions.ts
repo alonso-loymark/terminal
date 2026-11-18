@@ -20,15 +20,25 @@ export function focusActiveTerminal(): void {
   });
 }
 
-/** Image names of what closing these panes would kill besides their shells (dev servers, agents...). */
-async function busyProcessNames(paneIds: PaneId[]): Promise<string[]> {
+const MAX_COMMAND = 80;
+
+/**
+ * What closing these panes would stop: a command the shell reports as running (OSC 133, which
+ * also covers in-process work like `Start-Sleep` that has no child process), plus the
+ * processes besides the shell (dev servers, agents...; windowed apps are not listed).
+ */
+async function busyDetails(paneIds: PaneId[]): Promise<string[]> {
   const lists = await Promise.all(
-    paneIds.map((paneId) => {
+    paneIds.map(async (paneId) => {
+      const pane = useWorkspace.getState().panes[paneId];
       const sessionId = getPane(paneId)?.session.sessionId;
-      return sessionId == null ? Promise.resolve([]) : sessionBusy(sessionId).catch(() => []);
+      const processes = sessionId == null ? [] : await sessionBusy(sessionId).catch(() => []);
+      const command = pane?.commandRunning ? pane.lastCommand?.trim() || 'un comando' : null;
+      const shown = command && command.length > MAX_COMMAND ? `${command.slice(0, MAX_COMMAND - 1)}…` : command;
+      return [...(shown ? [`«${shown}»`] : []), ...processes.map((p) => p.name)];
     }),
   );
-  return [...new Set(lists.flat().map((p) => p.name))];
+  return [...new Set(lists.flat())];
 }
 
 const panesOfTab = (tabId: TabId): PaneId[] => {
@@ -36,14 +46,14 @@ const panesOfTab = (tabId: TabId): PaneId[] => {
   return tab ? panesOf(tab.layout) : [];
 };
 
-const BUSY_MESSAGE = 'Hay procesos en ejecución que se van a terminar. Las apps con ventana siguen abiertas.';
+const BUSY_MESSAGE = 'Hay comandos o procesos en ejecución que se van a terminar. Las apps con ventana siguen abiertas.';
 
 /** Closes tabs, asking first if any of their panes runs something besides the bare shell. */
 export async function requestCloseTabs(tabIds: TabId[]): Promise<void> {
   const ids = tabIds.filter((id) => useWorkspace.getState().tabs[id]);
   if (ids.length === 0) return;
   const busy = (
-    await Promise.all(ids.map(async (id) => ({ id, names: await busyProcessNames(panesOfTab(id)) })))
+    await Promise.all(ids.map(async (id) => ({ id, names: await busyDetails(panesOfTab(id)) })))
   ).filter((b) => b.names.length > 0);
   if (busy.length === 0) {
     closeTabsNow(ids);
@@ -70,7 +80,7 @@ export async function requestClosePane(paneId?: PaneId): Promise<void> {
   const tabId = target ? tabOfPane(ws, target) : null;
   if (!target || !tabId) return;
   if (panesOfTab(tabId).length === 1) return requestCloseTabs([tabId]);
-  const names = await busyProcessNames([target]);
+  const names = await busyDetails([target]);
   if (names.length === 0) {
     closePaneNow(target);
     return;

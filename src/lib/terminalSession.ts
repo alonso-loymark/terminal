@@ -1,11 +1,23 @@
 import type { IDisposable, Terminal } from '@xterm/xterm';
-import type { SessionStatus } from '../store/workspaceModel';
-import { closeSession, createSession, resizeSession, sendShiftEnter, writeToSession, type SessionId } from './pty';
+import type { PaneSpawn, SessionStatus } from '../store/workspaceModel';
+import {
+  closeSession,
+  createSession,
+  resizeSession,
+  sendShiftEnter,
+  writeToSession,
+  type SessionId,
+  type SessionInfo,
+} from './pty';
 
 export type { SessionStatus };
 
 export interface TerminalSessionCallbacks {
+  /** Shell and folder for each start (asked again on restart: the folder may have changed). */
+  spawn?: () => PaneSpawn;
   onStatus?: (status: SessionStatus, exitCode: number | null) => void;
+  /** The backend started the session (before the status turns 'running'). */
+  onStarted?: (info: SessionInfo) => void;
   /** Called for every batch of output (used for the tab activity indicator). */
   onOutput?: () => void;
 }
@@ -69,10 +81,13 @@ export class TerminalSession {
     const generation = ++this.#generation;
     this.#setStatus('starting');
     const { cols, rows } = this.#term;
+    const { shell, cwd } = this.#callbacks.spawn?.() ?? { shell: null, cwd: null };
     try {
-      const id = await createSession({
+      const info = await createSession({
         cols,
         rows,
+        shell,
+        cwd,
         onData: (data) => {
           if (this.#disposed) return;
           this.#term.write(data);
@@ -80,11 +95,13 @@ export class TerminalSession {
         },
         onExit: ({ exitCode }) => this.#handleExit(generation, exitCode),
       });
+      const id = info.sessionId;
       if (this.#disposed) {
         closeSession(id).catch(ignore);
         return;
       }
       this.#id = id;
+      this.#callbacks.onStarted?.(info);
       this.#setStatus('running');
       // ConPTY asks for the cursor position (ESC[6n) as soon as it starts and renders nothing
       // until it gets an answer. xterm may answer before we knew the id: deliver it now.

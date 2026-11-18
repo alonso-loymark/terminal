@@ -1,8 +1,32 @@
 // The only module that talks to the Rust PTY commands. Components never call `invoke` directly.
 import { Channel, invoke } from '@tauri-apps/api/core';
+import type { ShellKind } from '../store/workspaceModel';
+
+export type { ShellKind };
 
 /** Session id assigned by the Rust `PtyManager`. */
 export type SessionId = number;
+
+/** What `create_session` started. */
+export interface SessionInfo {
+  sessionId: SessionId;
+  shell: ShellKind;
+  /** The shell integration script was injected: cwd and command marks will follow. */
+  integration: boolean;
+}
+
+export interface ShellProfile {
+  kind: ShellKind;
+  /** "PowerShell", "Windows PowerShell", "Git Bash". */
+  name: string;
+  program: string;
+}
+
+export interface SystemInfo {
+  homeDir: string | null;
+  /** Shells available on this machine, the default first. */
+  shells: ShellProfile[];
+}
 
 export interface SessionExit {
   exitCode: number | null;
@@ -16,24 +40,33 @@ export interface PtyBackend {
 export interface CreateSessionOptions {
   cols: number;
   rows: number;
-  cwd?: string;
+  /** Starting folder; missing or inaccessible folders fall back to the user's home. */
+  cwd?: string | null;
+  /** Default: PowerShell. */
+  shell?: ShellKind | null;
   /** Raw PTY output; a batch may end in the middle of a UTF-8 sequence (xterm copes). */
   onData: (data: Uint8Array) => void;
   /** Fires once, after the last `onData`. */
   onExit: (exit: SessionExit) => void;
 }
 
-export function createSession({ cols, rows, cwd, onData, onExit }: CreateSessionOptions): Promise<SessionId> {
+export function createSession({ cols, rows, cwd, shell, onData, onExit }: CreateSessionOptions): Promise<SessionInfo> {
   // Per-session channels (not global events). Raw bytes arrive as ArrayBuffers.
   const dataChannel = new Channel<ArrayBuffer>((buffer) => onData(new Uint8Array(buffer)));
   const exitChannel = new Channel<SessionExit>(onExit);
-  return invoke<SessionId>('create_session', {
+  return invoke<SessionInfo>('create_session', {
     cols,
     rows,
     cwd: cwd ?? null,
+    shell: shell ?? null,
     onData: dataChannel,
     onExit: exitChannel,
   });
+}
+
+/** Home folder and available shells (asked once at startup). */
+export function getSystemInfo(): Promise<SystemInfo> {
+  return invoke('system_info');
 }
 
 export function writeToSession(sessionId: SessionId, data: string): Promise<void> {

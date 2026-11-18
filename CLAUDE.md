@@ -24,9 +24,10 @@ vive en el frontend.
  React / WebView2                                   Rust (proceso Tauri)
  ────────────────                                   ────────────────────
  TerminalSession ── invoke create_session ────────► commands.rs ─► PtyManager::create
-   (lib/terminalSession.ts)  {cols, rows,                             │ abre ConPTY, lanza la shell,
-                              onData: Channel,                        │ la mete en un Job Object
-                              onExit: Channel}                        ▼
+   (lib/terminalSession.ts)  {cols, rows, cwd, shell,                 │ abre ConPTY, lanza la shell
+                              onData: Channel,                        │ (con shell integration),
+                              onExit: Channel}                        │ la mete en un Job Object
+                                                                      ▼
  xterm.onData ───── invoke write_to_session ──────► mpsc ──► hilo writer ──► stdin del PTY
  ResizeObserver+fit ─ invoke resize_session ──────► MasterPty::resize (ResizePseudoConsole)
  term.write(bytes) ◄─ Channel onData (bytes crudos) ◄─ hilo flusher ◄─ mpsc ◄─ hilo reader ◄─ salida PTY
@@ -67,9 +68,11 @@ Reglas de la arquitectura:
     recargar la página (`on_page_load` Started) o salir de la app (`RunEvent::Exit`) cierra las
     sesiones de ese dueño.
 - **Ids de sesión**: `u32` incremental asignado por `PtyManager` (único dentro del proceso).
-- **Comandos Tauri**: `create_session`, `write_to_session`, `resize_session`, `close_session`,
-  `send_shift_enter` (ver abajo) y `pty_backend` (devuelve `{ backend: "conpty", buildNumber }`
-  para la opción `windowsPty` de xterm, que con build ≥ 21376 activa el reflow compatible con ConPTY).
+- **Comandos Tauri**: `create_session` (devuelve `{ sessionId, shell, integration }`),
+  `write_to_session`, `resize_session`, `close_session`, `send_shift_enter` (ver abajo),
+  `session_busy`, `system_info` (`{ homeDir, shells }`, una vez al arrancar) y `pty_backend`
+  (devuelve `{ backend: "conpty", buildNumber }` para la opción `windowsPty` de xterm, que con
+  build ≥ 21376 activa el reflow compatible con ConPTY).
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -128,9 +131,9 @@ Reglas de la arquitectura:
 - **Cerrar** (`lib/tabActions.ts`): `requestClosePane` / `requestCloseTabs` consultan
   `session_busy`; si hay algo más que la shell, se pide confirmación (foco en *Cancelar*).
   Desmontar el pane cierra la sesión con el cierre selectivo. Cerrar la última tab cierra la ventana.
-- **Duplicar** abre una shell nueva con el mismo nombre, color y grupo, pero en el directorio por
-  defecto: el directorio de PowerShell (`$PWD`) no es el del proceso y no se puede leer desde afuera
-  sin *shell integration* (pendiente).
+- **Duplicar** abre una shell nueva con el mismo nombre, color, grupo, shell y carpeta (la que
+  reportó la *shell integration*; ver abajo). Nueva tab y dividir también abren en la carpeta del
+  panel activo.
 - **Actividad**: la salida de un pane que **no está en pantalla** (otra tab, o fuera del zoom) lo
   marca; la tab muestra el punto si cualquiera de sus panes tiene marca. Mostrarlo la limpia.
   Proceso terminado: anillo gris (código 0) o rojo (error), también por cualquier panel. El título
@@ -158,6 +161,83 @@ Reglas de la arquitectura:
 - **Menú del panel**: Shift+clic derecho (o Shift+F10 / tecla menú). El clic derecho solo sigue
   copiando/pegando, como en Windows Terminal.
 
+## Shell integration
+
+La shell le cuenta a la terminal dónde está y qué ejecuta con secuencias OSC (las mismas marcas
+que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
+
+| Secuencia | Cuándo | Para qué |
+|---|---|---|
+| `OSC 7 ; file://<host>/C:/a%20b/%C3%91` | en cada prompt | cwd del panel (UTF-8 + `%XX`; UNC: `file://server/share/...`) |
+| `OSC 133 ; A` / `B` | inicio / fin del prompt | la shell está libre |
+| `OSC 633 ; E ; <línea>` | antes de ejecutar | último comando (escape de VS Code: `\\`, `\x3b`, `\xHH`) |
+| `OSC 133 ; C` / `D ; <código>` | inicio / fin del comando | "comando en ejecución" y su exit code |
+| `OSC 633 ; P ; Shell=<shell>` | al cargar | la integración funciona |
+| `OSC 633 ; P ; IntegrationError=<msg>` | si no carga | aviso en la status bar |
+
+- **Scripts** en `src-tauri/resources/shell-integration/` (recursos de Tauri: en dev se copian a
+  `target/debug/shell-integration`, en el bundle van junto al exe). `commands.rs` los resuelve con
+  `BaseDirectory::Resource`; `shell.rs::launch` arma la línea de comandos de cada perfil.
+- **PowerShell** (`powershell.ps1`, 5.1 y 7; `[char]27` en vez de `` `e ``): se lanza con
+  `-NoLogo -NoExit -Command "try { . '<script>' } catch { <OSC 633;P;IntegrationError> }"`. Sin
+  `-NoProfile`: el perfil del usuario carga primero, como siempre, y nunca se modifica.
+  - Envuelve `prompt` (no lo reemplaza): emite D/OSC 7/A, llama al prompt original (oh-my-posh,
+    starship, el del perfil) y agrega B. Le devuelve el `$?` real (con `Write-Error
+    -ErrorAction Ignore`, que no ensucia `$Error`) y el `$LASTEXITCODE` del usuario.
+  - Envuelve `PSConsoleHostReadLine` para emitir E y C apenas se acepta la línea; PSReadLine
+    sigue manejando historial y autocompletado. PSReadLine 2.2+ (pwsh 7) lee `$?` al entrar para
+    pintar el prompt de error: el wrapper lo captura y se lo pasa (test en `tests/pty.rs`).
+  - Si el usuario (o un módulo) redefine `prompt` o `PSConsoleHostReadLine` más tarde, se
+    vuelven a envolver (marcador `__TerminalShellIntegration` en el cuerpo de la función).
+  - Exit code: 0 si `$?`; si no, `$LASTEXITCODE` cuando un nativo lo cambió; si no, 1.
+  - Sin PSReadLine, E y C se reportan después, desde `Get-History`.
+  - Cuerpo en `& { Set-StrictMode -Off ... }`: un perfil con strict mode no lo rompe.
+- **Execution policy**: se respeta (es *dot-source* de un archivo, como hace VS Code). Con
+  `AllSigned`/`Restricted` el script no carga: la shell funciona igual, el panel queda sin cwd ni
+  estado de comandos y la status bar muestra "⚠ Sin integración de shell" (motivo en el tooltip).
+  Si el script no responde en 20 s (perfil colgado), el mismo aviso; se borra si responde después.
+- **Git Bash** (`bash.sh`): `bash.exe --rcfile <bash.sh> -i` con `CHERE_INVOKING=1` (si no,
+  `/etc/profile` hace `cd ~`). El rcfile emula un login (`/etc/profile` y luego
+  `~/.bash_profile` / `~/.bash_login` / `~/.profile`), agrega sus hooks a `PROMPT_COMMAND`
+  (array) y `PS0` y envuelve `PS1` con A/B. Rutas MSYS → Windows: `/c/x` → `C:/x`, el resto con
+  `cygpath -m`. Se detecta por `git.exe` en el PATH o las rutas de instalación habituales.
+- **Frontend** (`lib/shellIntegration.ts`): `registerOscHandler` para 7, 133 y 633 → eventos
+  puros → `applyShellEvent` en el modelo. Cada `Pane` guarda `cwd`, `lastCommand`,
+  `lastExitCode`, `commandRunning`, `integration` (`pending`/`ok`/`unavailable`/`error`) y la
+  shell. Un OSC 7 que llega **mientras corre un comando** se ignora (ssh a otra máquina, shells
+  anidadas: no es la carpeta del panel).
+- **cwd heredado**: dividir y duplicar usan la shell y la carpeta del panel; nueva tab, la carpeta
+  del panel activo con la shell por defecto (`spawnOf`: `cwd` reportado, si no la carpeta de
+  arranque). El reinicio tras `exit` arranca donde estaba. Si la carpeta ya no existe o no se
+  puede listar, el backend usa la carpeta del usuario (`resolve_cwd`, y reintenta ahí si el
+  spawn falla), sin mostrar error.
+- **Status bar** (`StatusBar.tsx`): cwd del panel activo (home como `~`, segmentos del medio
+  colapsados en `…` según el ancho; ruta completa en el tooltip), comando en ejecución o ✓/✗ con
+  el código, aviso de integración y nombre de la shell. La tab muestra la carpeta como subtítulo
+  si no fue renombrada.
+- **Cerrar**: la confirmación incluye el comando en ejecución según OSC 133 además de los
+  procesos de `session_busy`. Así también pregunta por trabajo sin procesos hijos
+  (`Start-Sleep`, un script de PowerShell largo).
+- **Selector de shell**: "▾" junto al "+" (solo si hay más de una shell). Hoy: PowerShell y
+  Git Bash.
+- **WSL (pendiente, cómo agregarlo)**:
+  1. Perfil: `ShellKind::Wsl` en `shell.rs`, programa `%SystemRoot%\System32\wsl.exe`
+     (detectarlo con `wsl.exe --list --quiet`; una entrada por distro si se quiere).
+  2. cwd: `wsl.exe --cd <ruta Windows>` acepta rutas Windows y las traduce; no hace falta
+     `CHERE_INVOKING`.
+  3. Script: reutilizar `bash.sh` sin la emulación de login de Git Bash (WSL ya corre
+     `~/.bashrc`). Inyectarlo con `wsl.exe -e bash --rcfile /mnt/c/.../bash.sh -i` (ruta del
+     recurso traducida con `wslpath` o armada a mano: `C:\x` → `/mnt/c/x`), o con
+     `--init-file`. Para zsh/fish, scripts propios (precmd/preexec en zsh).
+  4. OSC 7: en WSL el `$PWD` es Linux. Emitir `file://wsl.localhost/<distro>/<ruta>` para rutas
+     del distro y la ruta Windows (`/mnt/c/x` → `C:/x`) para las montadas, así `cwdFromFileUri`
+     produce `\\wsl.localhost\<distro>\...` o `C:\...`, que sirven como cwd de un panel nuevo.
+     Ojo: hoy un host distinto se interpreta como UNC (correcto para `wsl.localhost`).
+  5. `resolve_cwd` acepta UNC `\\wsl.localhost\...` (es listable desde Windows) y Rust puede
+     pasarlo a `wsl.exe --cd`.
+  6. Tests: como `git_bash_integration_loads_the_users_profile_and_reports_commands`, con skip si
+     no hay WSL.
+
 ## Estructura
 
 ```
@@ -171,8 +251,11 @@ src/                        Frontend (solo render + input)
   components/Workspace.tsx  Todos los TerminalPane montados y posicionados + divisores + SearchBar
   components/TerminalPane.tsx  Una instancia xterm + addons + sesión por pane (memo, nunca se recrea)
   components/PaneDivider.tsx   Divisor arrastrable (doble clic: igualar)
+  components/StatusBar.tsx  cwd del panel activo, estado del último comando, aviso de integración
   lib/pty.ts                ÚNICO punto que llama a invoke(); wrappers tipados de los comandos
   lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (buffer de input, restart)
+  lib/shellIntegration.ts   Handlers OSC 7/133/633 → ShellEvent (parsers puros + shellIntegration.test.ts)
+  lib/paths.ts              Nombre de carpeta y acortado de rutas (~, …) para la UI
   lib/terminalRegistry.ts   PaneId → { term, fit, search, session } (objetos imperativos)
   lib/tabActions.ts         Cerrar con confirmación, cerrar ventana con la última tab, foco
   lib/appShortcuts.ts       Atajos de tabs/grupos (listener en captura sobre window)
@@ -184,6 +267,7 @@ src/                        Frontend (solo render + input)
   store/workspaceModel.ts   Modelo puro de tabs/grupos/panes (+ workspaceModel.test.ts)
   store/workspace.ts        zustand sobre el modelo (ids, acciones)
   store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda (estado efímero)
+  store/system.ts           zustand: carpeta del usuario y shells disponibles (system_info)
   store/settings.ts         zustand: fuente, cursor, scrollback, tema, zoom
   config/theme.ts, colors.ts  Tema y paleta de colores de tabs/grupos
 src-tauri/
@@ -195,9 +279,11 @@ src-tauri/
   src/pty/teardown.rs       Cierre selectivo: consola muere, apps con ventana sobreviven
   src/pty/agents.rs         Shift+Enter por contexto: detección de agentes de IA y secuencias
   src/pty/procs.rs          Tabla de procesos (Toolhelp), dueños de ventanas, command lines (Windows)
-  src/pty/shell.rs          pwsh → powershell.exe, cwd inicial = %USERPROFILE%
+  src/pty/shell.rs          Perfiles (PowerShell: pwsh → powershell.exe; Git Bash), cómo lanzarlos
+                            con la integración, cwd inicial y fallback a %USERPROFILE%
   src/pty/platform.rs       Build de Windows (RtlGetVersion) para `pty_backend`
-  tests/pty.rs              Tests de integración con procesos reales (PowerShell/ConPTY)
+  resources/shell-integration/  powershell.ps1 y bash.sh (recursos del bundle)
+  tests/pty.rs              Tests de integración con procesos reales (PowerShell/Git Bash/ConPTY)
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
   fake-agent.mjs            Agente de IA falso para pruebas (ver "Pruebas con agentes")
@@ -238,8 +324,9 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
   salir". Se ejecuta con un `node.exe` enlazado como `claude.exe` / `gemini.exe`, así la
   detección de agentes de la terminal se prueba con el mismo nombre de imagen que el real.
 - `run()` en `e2e/run.mjs` se niega a tipear si el cursor no está en un prompt de PowerShell
-  libre o si la terminal activa no tiene el foco: un fallo nunca debe terminar mandando texto a
-  un programa ajeno (ni perder teclas).
+  libre o si la terminal activa no tiene el foco; `runIdle()`, si la integración no dice que la
+  shell está libre (ningún comando corriendo): un fallo nunca debe terminar mandando texto a un
+  programa ajeno (ni perder teclas).
 
 ## Convenciones
 
@@ -297,12 +384,17 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   sigue ahí y el tamaño es el correcto. Cerrar una tab con un dev server pide confirmación.
 - [ ] Paneles: dividir en ambas direcciones, arrastrar divisores, zoom; en cada panel
   `[Console]::WindowWidth` coincide con su ancho visible.
+- [ ] Shell integration: `cd` a una carpeta con espacios y tildes → la status bar (tooltip con la
+  ruta completa) y el subtítulo de la tab la muestran; dividir, duplicar y nueva tab abren ahí.
+  `cmd /c exit 3` muestra ✗ 3; cerrar la tab durante `Start-Sleep 30` pide confirmación. Con el
+  prompt de oh-my-posh/starship (si se usan) todo sigue igual.
 
 ## Atajos
 
 | Atajo | Acción |
 |---|---|
-| `Ctrl+Shift+T` / botón `+` | Nueva tab |
+| `Ctrl+Shift+T` / botón `+` | Nueva tab (en la carpeta del panel activo) |
+| Botón `▾` junto al `+` | Nueva tab con otra shell (Git Bash) |
 | `Ctrl+Shift+W` | Cerrar el panel activo; si es el último, la tab (confirma si hay procesos además de la shell) |
 | `Alt+Shift+D` / `Alt+Shift+-` | Dividir el panel a la derecha / hacia abajo |
 | `Alt+←↑→↓` | Mover el foco al panel en esa dirección |
@@ -358,7 +450,10 @@ tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab` y `Alt+flechas`.
   abrirlo con rutas relativas.
 - El portapapeles de Windows tiene un lock global: si otro proceso lo retiene, copiar/pegar puede
   fallar en silencio (visto 1 vez en 24 ciclos durante las pruebas). Si aparece en uso real, mover
-  el portapapeles a un comando Rust con reintentos.
+  el portapapeles a un comando Rust con reintentos. En la Fase 4 otro programa lo tuvo abierto
+  varios minutos seguidos (`OpenClipboard` → error 5 en cada intento, sin ventana dueña): las
+  etapas `clipboard` y `agent` (pegado) fallan mientras dure. Diagnóstico rápido antes de culpar
+  a la app: `OpenClipboard(NULL)` desde PowerShell (Add-Type) y mirar `GetLastError`.
 - `onBinary` de xterm (reportes de mouse X10 no UTF-8) no se reenvía todavía.
 - **@dnd-kit y `aria-disabled`**: `useSortable({ disabled })` marca la tab y todo su contenido como
   `aria-disabled` (lectores de pantalla, y Playwright no deja escribir en el input). Mientras se
@@ -374,6 +469,18 @@ tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab` y `Alt+flechas`.
   comporte como enfocada aunque el usuario esté usando otras ventanas mientras corre la suite.
 - **Arrastres en el e2e**: la barra de tabs anima después de cada reorden; `drag()` mide las
   posiciones recién cuando se estabilizan (`settledBox`), si no suelta donde la tab estaba antes.
+- **Rutas `\\?\` y execution policy**: Tauri resuelve los recursos como `\\?\C:\...`; PowerShell
+  trata esa ruta como de red y `RemoteSigned` rechazaba el script ("is not digitally signed"),
+  así que la integración nunca cargaba en la app (en los tests de Rust, con ruta normal, sí).
+  `launch` quita el prefijo (test `the_injected_script_path_is_never_verbatim`). Por el mismo
+  motivo, un zip descargado y extraído con el Explorador (Mark of the Web) haría que
+  `RemoteSigned` lo rechace; un instalador no marca los archivos. Si aparece el aviso:
+  `Unblock-File` sobre el script.
+- **E2E con prompts personalizados y Git Bash**: `runIdle()` no mira el texto del prompt sino el
+  estado de la integración (shell libre, ningún comando corriendo). Espera la marca `133;D` del
+  comando y después el prompt: tras redefinir `prompt`, ese primer prompt sale sin A/B (lo dibuja
+  la función nueva, sin envolver) y el re-envoltorio recién cierra el comando desde
+  `PSConsoleHostReadLine`.
 - **Cuelgue de salida observado una vez (dev)**: tras una sesión larga de `tauri dev` con muchos
   HMR y recargas, cerrar la ventana dejó `terminal.exe` vivo sin ventanas, sin WebView2, sin hijos
   (el Job Object había limpiado todas las shells) y sin CPU. No se reprodujo en 3 intentos
@@ -429,12 +536,42 @@ tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab` y `Alt+flechas`.
     sobrevive a dividir, arrastrar, hacer zoom y cerrar; el PTY de cada panel coincide con su
     tamaño tras cada cambio), `passthrough` (`Ctrl+T`/`Ctrl+W` llegan como 0x14/0x17) y `gpu`
     (18 terminales: solo las 2 visibles tienen WebGL, sin avisos de Chromium).
+- **Fase 4 — shell integration: completa y verificada (2026-11-18).** Scripts para PowerShell y
+  Git Bash inyectados sin tocar el perfil (OSC 7 / 133 / 633), estado por panel (cwd, último
+  comando, exit code, comando en ejecución), status bar, subtítulo de tab con la carpeta, dividir /
+  duplicar / nueva tab en el mismo cwd con fallback a home, confirmación de cierre con OSC 133,
+  selector de shell (▾) y aviso discreto si la integración no carga.
+  - `npm test`: 41 (35 del modelo, 5 nuevos: marcas, carpeta durante un comando, fallos de carga,
+    reinicio, herencia; 6 de parsers OSC y rutas).
+  - `cargo test`: 22 unitarios + 16 de integración (PowerShell real: OSC 7 con espacios/tildes/ñ,
+    E/C/D con códigos 0/7/1, prompt redefinido, `$?` hacia el prompt y hacia
+    `PSConsoleHostReadLine`; policy `Restricted` → `IntegrationError` y la shell sigue; Git Bash
+    con un `.bash_profile` propio que sigue cargando).
+  - `npm run e2e`: 153/153 en dos corridas completas, la última con el código final. Las demás
+    corridas del día fallaron por causas externas (otro programa retuvo el portapapeles; la
+    ventana cambió de tamaño/monitor durante la corrida) o por el caso no reproducido de abajo.
+    Etapas nuevas `cwd`, `commands`, `prompt`,
+    `inherit`, `notice`, `gitbash` (incluye: URI de OSC 7 exacta, status bar ancha y angosta,
+    `$LASTEXITCODE` intacto, `Start-Sleep` sin procesos hijos pide confirmación, historial y Tab
+    de PSReadLine con un prompt propio, carpeta borrada → home).
+  - Bug encontrado por la e2e: rutas `\\?\` de Tauri hacían que `RemoteSigned` rechazara el
+    script (ver Gotchas). Release (`--no-bundle`): los scripts quedan junto al exe y la
+    integración carga (verificado por CDP leyendo la status bar).
+  - Visto una sola vez en ~8 corridas de `inherit` (completas y aisladas): tras duplicar por menú
+    y `Ctrl+Shift+T` había una tab de más y el foco en `BODY`; en otra corrida, el clic en
+    "Duplicar" no creó la tab. No se reprodujo. `openTab()` ahora exige exactamente una tab nueva
+    y el paso de duplicar guarda captura + estado si falla, para tener evidencia la próxima vez.
+  - **No verificado**: pwsh 7 (no está instalado acá; descargar el zip portable para probar fue
+    bloqueado), oh-my-posh y starship reales. Lo de PSReadLine 2.2 está cubierto con una función
+    equivalente en `tests/pty.rs`. Para verificarlo: instalar pwsh 7 (`cargo test` y la app lo
+    eligen solos) y correr `cargo test` + `npm run e2e`.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
 - Próximas fases (ideas): arrastrar paneles a otra tab o a una tab nueva (modelo listo:
-  `movePane`), *shell integration* (cwd para
-  duplicar, límites de comandos), persistir tabs/grupos entre sesiones, archivo de configuración (fuente, tema, shell,
-  atajos), perfiles de shell, flow control con ACKs para salidas gigantes, `conpty.dll` +
-  `OpenConsole.exe` empaquetados (ConPTY más nuevo que el del sistema), lista de agentes y sus
-  secuencias configurable, notificaciones al terminar comandos largos.
+  `movePane`), WSL (ver "Shell integration"), saltar entre comandos y seleccionar la salida de
+  uno (marcas 133 ya disponibles), notificaciones al terminar comandos largos (133;D),
+  persistir tabs/grupos (y su cwd) entre sesiones, archivo de configuración (fuente, tema, shell,
+  atajos), perfiles de shell configurables, flow control con ACKs para salidas gigantes,
+  `conpty.dll` + `OpenConsole.exe` empaquetados (ConPTY más nuevo que el del sistema), lista de
+  agentes y sus secuencias configurable.

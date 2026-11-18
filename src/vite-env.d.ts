@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import type { Terminal } from '@xterm/xterm';
+import type { useSystem } from './store/system';
 import type { useUi } from './store/ui';
 import type { useWorkspace } from './store/workspace';
 
@@ -10,6 +11,7 @@ declare global {
     __terminal?: Terminal;
     __workspace?: typeof useWorkspace;
     __ui?: typeof useUi;
+    __system?: typeof useSystem;
     __paneTerminal?: (paneId: string) => Terminal | undefined;
   }
 }

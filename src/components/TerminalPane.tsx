@@ -9,13 +9,20 @@ import { copySelection, installKeybindings } from '../lib/keybindings';
 import { paneStyle, sameRect } from '../lib/paneGeometry';
 import { getPtyBackend, type PtyBackend } from '../lib/pty';
 import { GpuRenderer } from '../lib/renderer';
+import { registerShellIntegration } from '../lib/shellIntegration';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { getPane, registerPane, unregisterPane, type PaneHandle } from '../lib/terminalRegistry';
 import { TerminalSession } from '../lib/terminalSession';
 import { useSettings, type TerminalSettings } from '../store/settings';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
-import type { PaneId, Rect } from '../store/workspaceModel';
+import { spawnOf, type PaneId, type Rect } from '../store/workspaceModel';
+
+/**
+ * The integration script reports itself as soon as the user's profile finished loading. A
+ * shell that stays silent this long gets the status bar notice (it clears if it reports later).
+ */
+const INTEGRATION_TIMEOUT_MS = 20_000;
 
 function appearance(s: TerminalSettings): ITerminalOptions {
   return {
@@ -90,8 +97,23 @@ export const TerminalPane = memo(
       const gpu = new GpuRenderer(term, (kind) => (host.dataset.renderer = kind));
       fitToHost(fit, host);
 
+      // Shell integration marks (cwd, command start/end, exit code) go to the pane's state.
+      // Registered before the session starts, so the first prompt is not missed.
+      const integration = registerShellIntegration(term, (event) => workspace().applyShellEvent(paneId, event));
+      let integrationTimer = 0;
+
       const session: TerminalSession = new TerminalSession(term, {
+        spawn: () => spawnOf(workspace(), paneId),
         onStatus: (status, exitCode) => workspace().setPaneStatus(paneId, status, exitCode, session.sessionId),
+        onStarted: (info) => {
+          workspace().setPaneSession(paneId, info);
+          window.clearTimeout(integrationTimer);
+          if (!info.integration) return;
+          integrationTimer = window.setTimeout(() => {
+            if (workspace().panes[paneId]?.integration !== 'pending') return;
+            workspace().applyShellEvent(paneId, { type: 'integration', ok: false, error: 'el script no respondió' });
+          }, INTEGRATION_TIMEOUT_MS);
+        },
         onOutput: () => workspace().markActivity(paneId),
       });
       const handle: PaneHandle = { term, fit, search, session, host, gpu };
@@ -161,6 +183,8 @@ export const TerminalPane = memo(
         term.textarea?.removeEventListener('focus', onFocus);
         host.removeEventListener('pointerdown', onFocus);
         titleSubscription.dispose();
+        window.clearTimeout(integrationTimer);
+        integration.dispose();
         unregisterPane(paneId, handle);
         session.dispose();
         term.dispose();
