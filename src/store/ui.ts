@@ -1,16 +1,20 @@
 import { create } from 'zustand';
-import type { GroupId, TabId } from './workspaceModel';
+import type { GroupId, PaneId, TabId } from './workspaceModel';
 
 export type MenuState =
   | { kind: 'tab'; tabId: TabId; x: number; y: number }
-  | { kind: 'group'; groupId: GroupId; x: number; y: number };
+  | { kind: 'group'; groupId: GroupId; x: number; y: number }
+  | { kind: 'pane'; paneId: PaneId; x: number; y: number };
+
+/** What a confirmed close acts on. */
+export type CloseTarget = { kind: 'tabs'; tabIds: TabId[] } | { kind: 'pane'; paneId: PaneId };
 
 export interface ConfirmState {
   title: string;
   message: string;
   details: string[];
   confirmLabel: string;
-  tabIds: TabId[];
+  target: CloseTarget;
 }
 
 /** Transient UI state: what is being renamed, open menus and dialogs, the search bar. */

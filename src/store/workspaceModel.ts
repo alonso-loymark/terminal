@@ -1,42 +1,88 @@
-// Pure model of the workspace: tabs, tab groups and the panes that hold terminal sessions.
+// Pure model of the workspace: tabs, tab groups and the split panes that hold terminal sessions.
 // No runtime imports, so `node --test` can run it directly (see workspaceModel.test.ts).
 //
-// Shape, chosen with split panes in mind:
-//   - a Tab owns a Layout tree of panes; today it is always a single pane, the next phase adds
-//     `{ type: 'split', ... }` nodes without touching tabs or groups;
-//   - Pane holds the per-session metadata (title from OSC 0/2, status, unseen output);
+// Shape:
+//   - a Tab owns a Layout tree: a leaf is a pane, a split lays its children out horizontally
+//     (side by side) or vertically (stacked) with sizes in percent; splits nest without limit;
+//   - Pane holds the per-session metadata (backend session id, OSC title, status, unseen
+//     output). Panes live in one global map, not inside tabs: a pane is identified by its id
+//     wherever its leaf sits, so moving a leaf between tabs (`movePane`) keeps its terminal;
 //   - groups are Chrome-style: a group is a contiguous run of tabs in `tabOrder` sharing a
 //     groupId. Every operation keeps that invariant (see `normalize`).
 
 export type TabId = string;
 export type PaneId = string;
 export type GroupId = string;
+export type SplitId = string;
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'failed';
 
 export const COLORS = ['blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange', 'grey'] as const;
 export type TabColor = (typeof COLORS)[number];
 
-/** Pane tree of a tab. Phase 2: a single pane. */
-export type Layout = { type: 'pane'; paneId: PaneId };
+/** horizontal: children side by side (vertical dividers); vertical: children stacked. */
+export type SplitDirection = 'horizontal' | 'vertical';
+
+export interface PaneLeaf {
+  type: 'pane';
+  paneId: PaneId;
+}
+
+export interface SplitNode {
+  type: 'split';
+  id: SplitId;
+  direction: SplitDirection;
+  children: Layout[];
+  /** One per child, in percent of the split, summing to 100. */
+  sizes: number[];
+}
+
+/** Pane tree of a tab. */
+export type Layout = PaneLeaf | SplitNode;
+
+/** A rectangle in fractions (0..1) of the tab's area. */
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** The draggable boundary between children `index` and `index + 1` of a split. */
+export interface Divider {
+  splitId: SplitId;
+  index: number;
+  direction: SplitDirection;
+  /** The whole split's rectangle; the divider sits at `offset` (fraction of it) along the axis. */
+  split: Rect;
+  offset: number;
+  /** The split's current sizes (percent), the starting point of a drag. */
+  sizes: number[];
+}
+
+export type FocusDirection = 'left' | 'right' | 'up' | 'down';
 
 export interface Pane {
   id: PaneId;
+  /** Backend PTY session while the shell runs. */
+  sessionId: number | null;
   /** Last title set by the process (OSC 0/2). */
   title: string;
   status: SessionStatus;
   exitCode: number | null;
-  /** New output arrived while the pane's tab was not visible. */
+  /** New output arrived while the pane was not on screen. */
   activity: boolean;
 }
 
 export interface Tab {
   id: TabId;
-  /** Set by the user; while null the tab follows the process title. */
+  /** Set by the user; while null the tab follows the active pane's process title. */
   customTitle: string | null;
   color: TabColor | null;
   groupId: GroupId | null;
   layout: Layout;
   activePaneId: PaneId;
+  /** Pane temporarily maximized inside the tab (Ctrl+Shift+Z). */
+  zoomedPaneId: PaneId | null;
 }
 
 export interface Group {
@@ -58,8 +104,16 @@ export type TabIndicator = 'activity' | 'exited' | 'exited-error' | null;
 
 export const emptyWorkspace = (): Workspace => ({ tabs: {}, tabOrder: [], groups: {}, panes: {}, activeTabId: null });
 
+/** Leaves of a layout in visual order (left to right, top to bottom). */
 export function panesOf(layout: Layout): PaneId[] {
-  return [layout.paneId];
+  return layout.type === 'pane' ? [layout.paneId] : layout.children.flatMap(panesOf);
+}
+
+/** A pane is on screen when its tab is active and no other pane of the tab is zoomed. */
+export function isPaneVisible(ws: Workspace, paneId: PaneId): boolean {
+  const tab = ws.activeTabId ? ws.tabs[ws.activeTabId] : undefined;
+  if (!tab || !panesOf(tab.layout).includes(paneId)) return false;
+  return !tab.zoomedPaneId || tab.zoomedPaneId === paneId;
 }
 
 export function tabOfPane(ws: Workspace, paneId: PaneId): TabId | null {
@@ -130,8 +184,9 @@ export function addTab(ws: Workspace, spec: NewTab): Workspace {
     groupId,
     layout: { type: 'pane', paneId: spec.paneId },
     activePaneId: spec.paneId,
+    zoomedPaneId: null,
   };
-  const pane: Pane = { id: spec.paneId, title: '', status: 'starting', exitCode: null, activity: false };
+  const pane = newPane(spec.paneId);
   const at = spec.after ? ws.tabOrder.indexOf(spec.after) : -1;
   const tabOrder = [...ws.tabOrder];
   tabOrder.splice(at >= 0 ? at + 1 : tabOrder.length, 0, tab.id);
@@ -176,14 +231,30 @@ export function activateTab(ws: Workspace, id: TabId): Workspace {
   let groups = ws.groups;
   const group = tab.groupId ? ws.groups[tab.groupId] : undefined;
   if (group?.collapsed) groups = { ...groups, [group.id]: { ...group, collapsed: false } };
-  let panes = ws.panes;
-  for (const paneId of panesOf(tab.layout)) {
-    const pane = panes[paneId];
-    if (pane?.activity) panes = { ...panes, [paneId]: { ...pane, activity: false } };
-  }
+  // What comes on screen is seen: clear the marks of the panes that become visible.
+  const shown = tab.zoomedPaneId ? [tab.zoomedPaneId] : panesOf(tab.layout);
+  const panes = clearActivity(ws.panes, shown);
   if (ws.activeTabId === id && groups === ws.groups && panes === ws.panes) return ws;
   return { ...ws, activeTabId: id, groups, panes };
 }
+
+function clearActivity(panes: Record<PaneId, Pane>, ids: PaneId[]): Record<PaneId, Pane> {
+  let next = panes;
+  for (const id of ids) {
+    const pane = next[id];
+    if (pane?.activity) next = { ...next, [id]: { ...pane, activity: false } };
+  }
+  return next;
+}
+
+const newPane = (id: PaneId): Pane => ({
+  id,
+  sessionId: null,
+  title: '',
+  status: 'starting',
+  exitCode: null,
+  activity: false,
+});
 
 /** Next/previous visible tab, wrapping around (Ctrl+Tab / Ctrl+Shift+Tab). */
 export function cycleTab(ws: Workspace, delta: number): Workspace {
@@ -341,18 +412,343 @@ export function setPaneTitle(ws: Workspace, paneId: PaneId, title: string): Work
   return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, title } } };
 }
 
-export function setPaneStatus(ws: Workspace, paneId: PaneId, status: SessionStatus, exitCode: number | null): Workspace {
+export function setPaneStatus(
+  ws: Workspace,
+  paneId: PaneId,
+  status: SessionStatus,
+  exitCode: number | null,
+  sessionId: number | null = null,
+): Workspace {
   const pane = ws.panes[paneId];
-  if (!pane || (pane.status === status && pane.exitCode === exitCode)) return ws;
-  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, status, exitCode } } };
+  if (!pane || (pane.status === status && pane.exitCode === exitCode && pane.sessionId === sessionId)) return ws;
+  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, status, exitCode, sessionId } } };
 }
 
-/** Output arrived: marks the pane unless its tab is the one on screen. Cheap no-op otherwise. */
+/** Output arrived: marks the pane unless it is on screen. Cheap no-op otherwise. */
 export function markActivity(ws: Workspace, paneId: PaneId): Workspace {
   const pane = ws.panes[paneId];
-  if (!pane || pane.activity) return ws;
-  if (ws.activeTabId && ws.tabs[ws.activeTabId]?.activePaneId === paneId) return ws;
+  if (!pane || pane.activity || isPaneVisible(ws, paneId)) return ws;
   return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, activity: true } } };
+}
+
+// ---------------------------------------------------------------- split panes: tree
+
+const MIN_SIZE = 5; // percent of its split; the UI enforces a pixel minimum on top
+const EPS = 1e-6;
+
+const containsPane = (node: Layout, paneId: PaneId): boolean =>
+  node.type === 'pane' ? node.paneId === paneId : node.children.some((child) => containsPane(child, paneId));
+
+/** Scales sizes to sum 100, keeping proportions; then lifts tiny ones to about MIN_SIZE. */
+function normalizeSizes(sizes: number[]): number[] {
+  const scale = (values: number[]) => {
+    const total = values.reduce((a, b) => a + b, 0) || 1;
+    return values.map((v) => (v / total) * 100);
+  };
+  const scaled = scale(sizes.map((s) => (Number.isFinite(s) && s > 0 ? s : 0)));
+  const floor = sizes.length * MIN_SIZE <= 100 ? MIN_SIZE : 0;
+  return scaled.some((s) => s < floor) ? scale(scaled.map((s) => Math.max(floor, s))) : scaled;
+}
+
+/**
+ * Canonical tree: a split with one child is replaced by the child, and a split nested in a
+ * split of the same direction is merged into its parent (sizes scaled), so dividers act
+ * on the visible arrangement.
+ */
+function normalizeLayout(node: Layout): Layout {
+  if (node.type === 'pane') return node;
+  const children: Layout[] = [];
+  const sizes: number[] = [];
+  node.children.forEach((raw, i) => {
+    const child = normalizeLayout(raw);
+    const share = node.sizes[i] ?? 0;
+    if (child.type === 'split' && child.direction === node.direction) {
+      child.children.forEach((grandchild, k) => {
+        children.push(grandchild);
+        sizes.push((share * (child.sizes[k] ?? 0)) / 100);
+      });
+    } else {
+      children.push(child);
+      sizes.push(share);
+    }
+  });
+  if (children.length === 1 && children[0]) return children[0];
+  return { ...node, children, sizes: normalizeSizes(sizes) };
+}
+
+/** Puts `leaf` next to `target`, splitting `target`'s share in half. */
+function insertBeside(node: Layout, target: PaneId, direction: SplitDirection, leaf: PaneLeaf, splitId: SplitId): Layout {
+  if (node.type === 'pane') {
+    if (node.paneId !== target) return node;
+    return { type: 'split', id: splitId, direction, children: [node, leaf], sizes: [50, 50] };
+  }
+  const at = node.children.findIndex((child) => child.type === 'pane' && child.paneId === target);
+  if (at >= 0 && node.direction === direction) {
+    // Same direction: a new sibling instead of another nesting level.
+    const children = [...node.children];
+    children.splice(at + 1, 0, leaf);
+    const sizes = [...node.sizes];
+    const half = (sizes[at] ?? 0) / 2;
+    sizes.splice(at, 1, half, half);
+    return { ...node, children, sizes };
+  }
+  const children = node.children.map((child) => insertBeside(child, target, direction, leaf, splitId));
+  return children.every((child, i) => child === node.children[i]) ? node : { ...node, children };
+}
+
+/**
+ * Removes a pane; its share goes to the adjacent sibling (the previous one, else the next).
+ * Returns the new tree (null if it was the last pane) and the pane that inherits the space.
+ */
+function removeFromTree(node: Layout, paneId: PaneId): { layout: Layout | null; heir: PaneId | null } {
+  if (node.type === 'pane') return { layout: node.paneId === paneId ? null : node, heir: null };
+  const at = node.children.findIndex((child) => containsPane(child, paneId));
+  const target = node.children[at];
+  if (!target) return { layout: node, heir: null };
+  const inner = removeFromTree(target, paneId);
+  if (inner.layout) {
+    const children = [...node.children];
+    children[at] = inner.layout;
+    return { layout: { ...node, children }, heir: inner.heir };
+  }
+  const children = node.children.filter((_, i) => i !== at);
+  const sizes = node.sizes.filter((_, i) => i !== at);
+  const heirAt = at > 0 ? at - 1 : 0;
+  sizes[heirAt] = (sizes[heirAt] ?? 0) + (node.sizes[at] ?? 0);
+  const heirNode = children[heirAt];
+  // The pane of the heir subtree closest to where the removed one was.
+  const heirPanes = heirNode ? panesOf(heirNode) : [];
+  const heir = (at > 0 ? heirPanes.at(-1) : heirPanes[0]) ?? null;
+  return { layout: { ...node, children, sizes }, heir };
+}
+
+function findSplit(node: Layout, splitId: SplitId): SplitNode | null {
+  if (node.type === 'pane') return null;
+  if (node.id === splitId) return node;
+  for (const child of node.children) {
+    const found = findSplit(child, splitId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function replaceSplit(node: Layout, splitId: SplitId, update: (split: SplitNode) => SplitNode): Layout {
+  if (node.type === 'pane') return node;
+  if (node.id === splitId) return update(node);
+  const children = node.children.map((child) => replaceSplit(child, splitId, update));
+  return children.every((child, i) => child === node.children[i]) ? node : { ...node, children };
+}
+
+/** The split that directly contains `paneId`, if any. */
+export function parentSplit(node: Layout, paneId: PaneId): SplitNode | null {
+  if (node.type === 'pane') return null;
+  if (node.children.some((child) => child.type === 'pane' && child.paneId === paneId)) return node;
+  for (const child of node.children) {
+    const found = parentSplit(child, paneId);
+    if (found) return found;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- split panes: geometry
+
+const FULL: Rect = { x: 0, y: 0, w: 1, h: 1 };
+
+/** Where every pane of the tree sits, in fractions of the tab area. */
+export function layoutRects(layout: Layout, rect: Rect = FULL): Record<PaneId, Rect> {
+  if (layout.type === 'pane') return { [layout.paneId]: rect };
+  const out: Record<PaneId, Rect> = {};
+  let offset = 0;
+  layout.children.forEach((child, i) => {
+    const share = (layout.sizes[i] ?? 0) / 100;
+    const childRect =
+      layout.direction === 'horizontal'
+        ? { x: rect.x + offset * rect.w, y: rect.y, w: share * rect.w, h: rect.h }
+        : { x: rect.x, y: rect.y + offset * rect.h, w: rect.w, h: share * rect.h };
+    Object.assign(out, layoutRects(child, childRect));
+    offset += share;
+  });
+  return out;
+}
+
+/** Every draggable boundary of the tree. */
+export function layoutDividers(layout: Layout, rect: Rect = FULL): Divider[] {
+  if (layout.type === 'pane') return [];
+  const out: Divider[] = [];
+  let offset = 0;
+  layout.children.forEach((child, i) => {
+    const share = (layout.sizes[i] ?? 0) / 100;
+    const childRect =
+      layout.direction === 'horizontal'
+        ? { x: rect.x + offset * rect.w, y: rect.y, w: share * rect.w, h: rect.h }
+        : { x: rect.x, y: rect.y + offset * rect.h, w: rect.w, h: share * rect.h };
+    out.push(...layoutDividers(child, childRect));
+    offset += share;
+    if (i < layout.children.length - 1) {
+      out.push({ splitId: layout.id, index: i, direction: layout.direction, split: rect, offset, sizes: layout.sizes });
+    }
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------- split panes: operations
+
+/** Splits a pane; the new pane gets half of its space and the focus (Alt+Shift+D / Alt+Shift+-). */
+export function splitPane(
+  ws: Workspace,
+  paneId: PaneId,
+  direction: SplitDirection,
+  ids: { paneId: PaneId; splitId: SplitId },
+): Workspace {
+  const tabId = tabOfPane(ws, paneId);
+  const tab = tabId ? ws.tabs[tabId] : undefined;
+  if (!tab || ws.panes[ids.paneId]) return ws;
+  const layout = normalizeLayout(insertBeside(tab.layout, paneId, direction, { type: 'pane', paneId: ids.paneId }, ids.splitId));
+  const next: Workspace = {
+    ...ws,
+    panes: { ...ws.panes, [ids.paneId]: newPane(ids.paneId) },
+    tabs: { ...ws.tabs, [tab.id]: { ...tab, layout, activePaneId: ids.paneId, zoomedPaneId: null } },
+  };
+  return activateTab(next, tab.id);
+}
+
+/**
+ * Closes a pane: the adjacent sibling takes its space (and the focus if it had it). The last
+ * pane of a tab closes the tab.
+ */
+export function closePane(ws: Workspace, paneId: PaneId): Workspace {
+  const tabId = tabOfPane(ws, paneId);
+  const tab = tabId ? ws.tabs[tabId] : undefined;
+  if (!tab) return ws;
+  const { layout, heir } = removeFromTree(tab.layout, paneId);
+  if (!layout) return closeTabs(ws, [tab.id]);
+  const panes = { ...ws.panes };
+  delete panes[paneId];
+  const activePaneId = tab.activePaneId === paneId ? (heir ?? panesOf(layout)[0] ?? paneId) : tab.activePaneId;
+  return {
+    ...ws,
+    panes,
+    tabs: {
+      ...ws.tabs,
+      [tab.id]: { ...tab, layout: normalizeLayout(layout), activePaneId, zoomedPaneId: null },
+    },
+  };
+}
+
+/** Clicking a pane, or moving the focus to it. Also activates its tab. */
+export function focusPane(ws: Workspace, paneId: PaneId): Workspace {
+  const tabId = tabOfPane(ws, paneId);
+  const tab = tabId ? ws.tabs[tabId] : undefined;
+  if (!tab) return ws;
+  const zoomedPaneId = tab.zoomedPaneId && tab.zoomedPaneId !== paneId ? null : tab.zoomedPaneId;
+  const next =
+    tab.activePaneId === paneId && zoomedPaneId === tab.zoomedPaneId
+      ? ws
+      : { ...ws, tabs: { ...ws.tabs, [tab.id]: { ...tab, activePaneId: paneId, zoomedPaneId } } };
+  return activateTab({ ...next, panes: clearActivity(next.panes, [paneId]) }, tab.id);
+}
+
+/**
+ * Alt+arrows: the nearest pane on that side of the active one, by on-screen position. Ties go
+ * to the largest shared edge, then to the closest center, then to the first in visual order.
+ */
+export function focusDirection(ws: Workspace, direction: FocusDirection): Workspace {
+  const tab = ws.activeTabId ? ws.tabs[ws.activeTabId] : undefined;
+  if (!tab) return ws;
+  const rects = layoutRects(tab.layout);
+  const current = rects[tab.activePaneId];
+  if (!current) return ws;
+  const horizontal = direction === 'left' || direction === 'right';
+  let best: { id: PaneId; distance: number; overlap: number; offCenter: number } | null = null;
+  for (const id of panesOf(tab.layout)) {
+    const r = rects[id];
+    if (!r || id === tab.activePaneId) continue;
+    let distance: number;
+    if (direction === 'right') distance = r.x - (current.x + current.w);
+    else if (direction === 'left') distance = current.x - (r.x + r.w);
+    else if (direction === 'down') distance = r.y - (current.y + current.h);
+    else distance = current.y - (r.y + r.h);
+    if (distance < -EPS) continue; // not on that side
+    const overlap = horizontal
+      ? Math.min(r.y + r.h, current.y + current.h) - Math.max(r.y, current.y)
+      : Math.min(r.x + r.w, current.x + current.w) - Math.max(r.x, current.x);
+    if (overlap <= EPS) continue; // no shared edge
+    const offCenter = horizontal
+      ? Math.abs(r.y + r.h / 2 - (current.y + current.h / 2))
+      : Math.abs(r.x + r.w / 2 - (current.x + current.w / 2));
+    const better =
+      !best ||
+      distance < best.distance - EPS ||
+      (Math.abs(distance - best.distance) <= EPS &&
+        (overlap > best.overlap + EPS || (Math.abs(overlap - best.overlap) <= EPS && offCenter < best.offCenter - EPS)));
+    if (better) best = { id, distance, overlap, offCenter };
+  }
+  return best ? focusPane(ws, best.id) : ws;
+}
+
+/** Ctrl+Shift+Z: maximizes the active pane inside its tab, or restores the layout. */
+export function toggleZoom(ws: Workspace): Workspace {
+  const tab = ws.activeTabId ? ws.tabs[ws.activeTabId] : undefined;
+  if (!tab || tab.layout.type === 'pane') return ws;
+  if (tab.zoomedPaneId) {
+    const tabs = { ...ws.tabs, [tab.id]: { ...tab, zoomedPaneId: null } };
+    return { ...ws, tabs, panes: clearActivity(ws.panes, panesOf(tab.layout)) };
+  }
+  return { ...ws, tabs: { ...ws.tabs, [tab.id]: { ...tab, zoomedPaneId: tab.activePaneId } } };
+}
+
+/** Divider drag: new sizes (percent) for the children of a split. */
+export function setSplitSizes(ws: Workspace, splitId: SplitId, sizes: number[]): Workspace {
+  for (const id of ws.tabOrder) {
+    const tab = ws.tabs[id];
+    const split = tab ? findSplit(tab.layout, splitId) : null;
+    if (!tab || !split) continue;
+    if (sizes.length !== split.children.length) return ws;
+    const layout = replaceSplit(tab.layout, splitId, (node) => ({ ...node, sizes: normalizeSizes(sizes) }));
+    return { ...ws, tabs: { ...ws.tabs, [id]: { ...tab, layout } } };
+  }
+  return ws;
+}
+
+/** Double click on a divider: all children of the split share the space equally. */
+export function equalizeSplit(ws: Workspace, splitId: SplitId): Workspace {
+  for (const id of ws.tabOrder) {
+    const split = ws.tabs[id] ? findSplit(ws.tabs[id].layout, splitId) : null;
+    if (split) return setSplitSizes(ws, splitId, split.children.map(() => 100 / split.children.length));
+  }
+  return ws;
+}
+
+/**
+ * Moves a pane (with its session and terminal: same id) next to `targetPaneId` in another tab
+ * or the same one. A tab left without panes is removed. Not exposed in the UI yet.
+ */
+export function movePane(
+  ws: Workspace,
+  paneId: PaneId,
+  targetPaneId: PaneId,
+  direction: SplitDirection,
+  splitId: SplitId,
+): Workspace {
+  const fromId = tabOfPane(ws, paneId);
+  const toId = tabOfPane(ws, targetPaneId);
+  const from = fromId ? ws.tabs[fromId] : undefined;
+  if (!from || !toId || paneId === targetPaneId) return ws;
+  const { layout: rest, heir } = removeFromTree(from.layout, paneId);
+  let tabs = { ...ws.tabs };
+  let tabOrder = ws.tabOrder;
+  if (rest) {
+    const activePaneId = from.activePaneId === paneId ? (heir ?? panesOf(rest)[0] ?? paneId) : from.activePaneId;
+    tabs[from.id] = { ...from, layout: normalizeLayout(rest), activePaneId, zoomedPaneId: null };
+  } else {
+    delete tabs[from.id];
+    tabOrder = tabOrder.filter((id) => id !== from.id);
+  }
+  const to = tabs[toId];
+  if (!to) return ws;
+  const layout = normalizeLayout(insertBeside(to.layout, targetPaneId, direction, { type: 'pane', paneId }, splitId));
+  tabs = { ...tabs, [to.id]: { ...to, layout, activePaneId: paneId, zoomedPaneId: null } };
+  return activateTab(normalize({ ...ws, tabs, tabOrder }), to.id);
 }
 
 // ---------------------------------------------------------------- invariants

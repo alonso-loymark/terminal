@@ -1,8 +1,8 @@
 import { useEffect, useRef, type KeyboardEvent } from 'react';
-import { closeTabsNow, focusActiveTerminal } from '../lib/tabActions';
+import { closeTarget, focusActiveTerminal } from '../lib/tabActions';
 import { useUi } from '../store/ui';
 
-/** Asks before closing tabs with running processes. Cancel has the focus: Enter never kills by accident. */
+/** Asks before closing tabs or panes with running processes. Cancel has the focus: Enter never kills by accident. */
 export function ConfirmDialog() {
   const confirm = useUi((s) => s.confirm);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -20,7 +20,7 @@ export function ConfirmDialog() {
   };
   const accept = () => {
     useUi.getState().closeConfirm();
-    closeTabsNow(confirm.tabIds);
+    closeTarget(confirm.target);
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key === 'Escape') {

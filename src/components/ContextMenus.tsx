@@ -1,9 +1,9 @@
 import { useShallow } from 'zustand/react/shallow';
 import { TAB_COLORS } from '../config/colors';
-import { closeOtherTabs, focusActiveTerminal, groupTab, requestCloseTabs } from '../lib/tabActions';
+import { closeOtherTabs, focusActiveTerminal, groupTab, requestClosePane, requestCloseTabs } from '../lib/tabActions';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
-import { tabsInGroup, type GroupId, type TabId } from '../store/workspaceModel';
+import { parentSplit, tabOfPane, tabsInGroup, type GroupId, type PaneId, type TabId } from '../store/workspaceModel';
 import { ColorSwatches, Menu, MenuItem, MenuLabel, MenuSeparator } from './Menu';
 
 const closeMenu = () => useUi.getState().closeMenu();
@@ -17,14 +17,58 @@ const run = (action: () => void) => () => {
   action();
 };
 
-/** The open context menu (tab or group), if any. */
+/** The open context menu (tab, group or pane), if any. */
 export function ContextMenus() {
   const menu = useUi((s) => s.menu);
   if (!menu) return null;
-  return menu.kind === 'tab' ? (
-    <TabMenu tabId={menu.tabId} x={menu.x} y={menu.y} />
-  ) : (
-    <GroupMenu groupId={menu.groupId} x={menu.x} y={menu.y} />
+  if (menu.kind === 'tab') return <TabMenu tabId={menu.tabId} x={menu.x} y={menu.y} />;
+  if (menu.kind === 'group') return <GroupMenu groupId={menu.groupId} x={menu.x} y={menu.y} />;
+  return <PaneMenu paneId={menu.paneId} x={menu.x} y={menu.y} />;
+}
+
+/** Shift+right click on a terminal, or Shift+F10 / the menu key. */
+function PaneMenu({ paneId, x, y }: { paneId: PaneId; x: number; y: number }) {
+  const tab = useWorkspace((s) => {
+    const tabId = tabOfPane(s, paneId);
+    return tabId ? s.tabs[tabId] : undefined;
+  });
+  if (!tab) return null;
+  const ws = useWorkspace.getState();
+  const split = parentSplit(tab.layout, paneId);
+  const zoomed = tab.zoomedPaneId === paneId;
+  const act = (action: () => void) =>
+    run(() => {
+      action();
+      focusActiveTerminal();
+    });
+
+  return (
+    <Menu x={x} y={y} label="Acciones del panel" onClose={dismiss}>
+      <MenuItem action="split-right" shortcut="Alt+Shift+D" onSelect={act(() => ws.splitPane('horizontal', paneId))}>
+        Dividir a la derecha
+      </MenuItem>
+      <MenuItem action="split-down" shortcut="Alt+Shift+-" onSelect={act(() => ws.splitPane('vertical', paneId))}>
+        Dividir hacia abajo
+      </MenuItem>
+      <MenuItem
+        action="zoom"
+        shortcut="Ctrl+Shift+Z"
+        disabled={tab.layout.type === 'pane'}
+        onSelect={act(() => {
+          ws.focusPane(paneId);
+          ws.toggleZoom();
+        })}
+      >
+        {zoomed ? 'Restaurar paneles' : 'Maximizar panel'}
+      </MenuItem>
+      <MenuItem action="equalize" disabled={!split} onSelect={act(() => split && ws.equalizeSplit(split.id))}>
+        Igualar tamaños
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem action="close-pane" shortcut="Ctrl+Shift+W" onSelect={run(() => void requestClosePane(paneId))}>
+        Cerrar panel
+      </MenuItem>
+    </Menu>
   );
 }
 
@@ -84,7 +128,7 @@ function TabMenu({ tabId, x, y }: { tabId: TabId; x: number; y: number }) {
         </MenuItem>
       )}
       <MenuSeparator />
-      <MenuItem action="close" shortcut="Ctrl+W" onSelect={run(() => void requestCloseTabs([tabId]))}>
+      <MenuItem action="close" onSelect={run(() => void requestCloseTabs([tabId]))}>
         Cerrar
       </MenuItem>
       <MenuItem action="close-others" disabled={tabCount < 2} onSelect={run(() => void closeOtherTabs(tabId))}>

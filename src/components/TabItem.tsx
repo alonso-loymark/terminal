@@ -95,7 +95,7 @@ export function TabItem({ tabId }: { tabId: TabId }) {
         type="button"
         className="tab-close"
         aria-label="Cerrar tab"
-        title="Cerrar (Ctrl+W)"
+        title="Cerrar tab"
         onClick={close}
         onPointerDown={(event) => event.stopPropagation()}
       >

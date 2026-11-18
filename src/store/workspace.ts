@@ -1,6 +1,16 @@
 import { create } from 'zustand';
 import * as model from './workspaceModel';
-import type { GroupId, PaneId, SessionStatus, TabColor, TabId, Workspace } from './workspaceModel';
+import type {
+  FocusDirection,
+  GroupId,
+  PaneId,
+  SessionStatus,
+  SplitDirection,
+  SplitId,
+  TabColor,
+  TabId,
+  Workspace,
+} from './workspaceModel';
 
 let lastId = 0;
 const nextId = (prefix: string) => `${prefix}-${++lastId}`;
@@ -26,8 +36,17 @@ interface WorkspaceActions {
   toggleGroupCollapsed: (groupId: GroupId) => void;
   ungroup: (groupId: GroupId) => void;
   setPaneTitle: (paneId: PaneId, title: string) => void;
-  setPaneStatus: (paneId: PaneId, status: SessionStatus, exitCode: number | null) => void;
+  setPaneStatus: (paneId: PaneId, status: SessionStatus, exitCode: number | null, sessionId: number | null) => void;
   markActivity: (paneId: PaneId) => void;
+  /** Splits the pane (default: the active one); the new pane gets the focus. Returns its id. */
+  splitPane: (direction: SplitDirection, paneId?: PaneId) => PaneId | null;
+  /** Removes a pane from its tab (unmounting its terminal closes the session); last pane closes the tab. */
+  closePane: (paneId: PaneId) => void;
+  focusPane: (paneId: PaneId) => void;
+  focusDirection: (direction: FocusDirection) => void;
+  toggleZoom: () => void;
+  setSplitSizes: (splitId: SplitId, sizes: number[]) => void;
+  equalizeSplit: (splitId: SplitId) => void;
 }
 
 export type WorkspaceStore = Workspace & WorkspaceActions;
@@ -74,8 +93,22 @@ export const useWorkspace = create<WorkspaceStore>()((set, get) => {
     toggleGroupCollapsed: (groupId) => update((ws) => model.toggleGroupCollapsed(ws, groupId)),
     ungroup: (groupId) => update((ws) => model.ungroup(ws, groupId)),
     setPaneTitle: (paneId, title) => update((ws) => model.setPaneTitle(ws, paneId, title)),
-    setPaneStatus: (paneId, status, exitCode) => update((ws) => model.setPaneStatus(ws, paneId, status, exitCode)),
+    setPaneStatus: (paneId, status, exitCode, sessionId) =>
+      update((ws) => model.setPaneStatus(ws, paneId, status, exitCode, sessionId)),
     markActivity: (paneId) => update((ws) => model.markActivity(ws, paneId)),
+    splitPane: (direction, paneId) => {
+      const target = paneId ?? selectActivePaneId(get());
+      if (!target) return null;
+      const ids = { paneId: nextId('pane'), splitId: nextId('split') };
+      update((ws) => model.splitPane(ws, target, direction, ids));
+      return get().panes[ids.paneId] ? ids.paneId : null;
+    },
+    closePane: (paneId) => update((ws) => model.closePane(ws, paneId)),
+    focusPane: (paneId) => update((ws) => model.focusPane(ws, paneId)),
+    focusDirection: (direction) => update((ws) => model.focusDirection(ws, direction)),
+    toggleZoom: () => update((ws) => model.toggleZoom(ws)),
+    setSplitSizes: (splitId, sizes) => update((ws) => model.setSplitSizes(ws, splitId, sizes)),
+    equalizeSplit: (splitId) => update((ws) => model.equalizeSplit(ws, splitId)),
   };
 });
 

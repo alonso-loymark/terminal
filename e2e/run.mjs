@@ -81,7 +81,18 @@ for (let i = 0; i < 300 && !browser; i++) {
 }
 if (!browser) throw new Error('El endpoint CDP nunca apareció (¿falló la compilación? ver tauri-dev.log)');
 const page = browser.contexts()[0].pages()[0];
+/** Console warnings/errors of the page, e.g. Chromium's "Too many active WebGL contexts". */
+const consoleLog = [];
+page.on('console', (message) => {
+  if (['warning', 'error'].includes(message.type())) consoleLog.push(message.text());
+});
 await page.waitForFunction(() => window.__terminal, null, { timeout: 60000 });
+// The user may keep working in other windows while the suite runs. Chromium does not fire
+// focus events in an unfocused window, which made focus checks flaky; CDP's focus emulation
+// (meant for automation) keeps the page behaving as focused without stealing the real focus.
+const cdp = await page.context().newCDPSession(page);
+const emulateFocus = () => cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+await emulateFocus();
 const targetDir = path.join(ROOT, 'src-tauri', 'target').replace(/'/g, "''");
 const appPid = Number(
   powershell(
@@ -151,10 +162,21 @@ const atShellPrompt = () =>
 /** The active terminal owns the keyboard (the app focuses it one frame after a tab switch). */
 const terminalFocused = () =>
   page.evaluate(() => !!window.__terminal && document.activeElement === window.__terminal.textarea);
+/** Where the keyboard focus is, for failure messages. */
+const focusReport = () =>
+  page.evaluate(() => {
+    const el = document.activeElement;
+    const pane = el?.closest?.('[data-pane-id]')?.getAttribute('data-pane-id');
+    const ws = window.__workspace.getState();
+    const activePane = ws.tabs[ws.activeTabId]?.activePaneId;
+    return `foco=${el?.tagName}.${String(el?.className).slice(0, 30)} panel=${pane} activo=${activePane} vis=${document.visibilityState} hasFocus=${document.hasFocus()} ui=${JSON.stringify(window.__ui.getState(), (k, v) => (typeof v === 'function' ? undefined : v))}`;
+  });
 /** Types a command at the shell prompt. Refuses to type anywhere else (e.g. into a TUI). */
 async function run(cmd, { waitPrompt = true } = {}) {
   if (!(await waitUntil(atShellPrompt, 5000))) throw new Error(`sin prompt de PowerShell; no se tipea: ${cmd}`);
-  if (!(await waitUntil(terminalFocused, 3000))) throw new Error(`la terminal activa no tiene el foco; no se tipea: ${cmd}`);
+  if (!(await waitUntil(terminalFocused, 3000))) {
+    throw new Error(`la terminal activa no tiene el foco (${await focusReport()}); no se tipea: ${cmd}`);
+  }
   const before = prompts(await text());
   await page.keyboard.type(cmd);
   await page.keyboard.press('Enter');
@@ -183,18 +205,31 @@ const wsState = () =>
 const tabSel = (id) => `[data-tab-id="${id}"]`;
 const tabLabel = (id) => page.locator(`${tabSel(id)} .tab-title`).textContent({ timeout: 3000 });
 const tabAttr = (id, name) => page.locator(tabSel(id)).getAttribute(name, { timeout: 3000 });
-/** New tab via Ctrl+T, waiting for its shell prompt. Returns its id. */
+/** New tab via Ctrl+Shift+T, waiting for its shell prompt. Returns its id. */
 async function openTab() {
   const before = (await wsState()).order.length;
-  await page.keyboard.press('Control+t');
+  await page.keyboard.press('Control+Shift+T');
   await waitUntil(async () => (await wsState()).order.length === before + 1, 5000);
   await waitUntil(atShellPrompt, 20000);
   return (await wsState()).active;
 }
+/** The element's box once it stops moving (two equal measurements 100 ms apart). */
+async function settledBox(selector) {
+  let previous = await page.locator(selector).boundingBox();
+  for (let i = 0; i < 15; i++) {
+    await sleep(100);
+    const current = await page.locator(selector).boundingBox();
+    if (JSON.stringify(current) === JSON.stringify(previous)) return current;
+    previous = current;
+  }
+  return previous;
+}
 /** Drags with the real pointer (past dnd-kit's 6 px activation distance) and drops on `to`. */
 async function drag(fromSelector, toSelector) {
-  const a = await page.locator(fromSelector).boundingBox();
-  const b = await page.locator(toSelector).boundingBox();
+  // The strip animates after every reorder (dnd-kit transitions): measure once it settles, or
+  // the drop lands where a tab was a moment ago.
+  const a = await settledBox(fromSelector);
+  const b = await settledBox(toSelector);
   await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
   await page.mouse.down();
   await page.mouse.move(a.x + a.width / 2 + 12, a.y + a.height / 2, { steps: 4 });
@@ -235,6 +270,53 @@ const contiguous = (st) =>
     const at = st.order.map((id, i) => (st.tabs[id].groupId === g ? i : -1)).filter((i) => i >= 0);
     return at.length > 0 && at.at(-1) - at[0] + 1 === at.length;
   });
+
+// ---------------------------------------------------------------- pane helpers
+const leaves = (layout) => (layout.type === 'pane' ? [layout.paneId] : layout.children.flatMap(leaves));
+const activeTab = async () => {
+  const st = await wsState();
+  return st.tabs[st.active];
+};
+const activePane = async () => (await activeTab()).activePaneId;
+const paneSel = (id) => `[data-pane-id="${id}"]`;
+const paneBox = (id) => page.locator(paneSel(id)).boundingBox();
+const paneAttr = (id, name) => page.getAttribute(paneSel(id), name);
+const paneSize = (id) =>
+  page.evaluate((id) => {
+    const t = window.__paneTerminal(id);
+    return t ? `${t.cols}x${t.rows}` : null;
+  }, id);
+const paneMark = (id) => page.evaluate((id) => window.__paneTerminal(id)?.__e2eMark ?? null, id);
+/** Clicks a pane (real pointer) so it becomes the active one and takes the keyboard. */
+async function clickPane(id) {
+  const box = await paneBox(id);
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await waitUntil(async () => (await activePane()) === id, 3000);
+  await waitUntil(terminalFocused, 3000);
+}
+/** The PTY size seen by the pane's own shell equals its xterm grid. */
+async function ptyMatches(id) {
+  await clickPane(id);
+  await sleep(300);
+  const pty = await ptySize();
+  const grid = await paneSize(id);
+  return { ok: pty === grid, detail: `pty ${pty} / xterm ${grid}` };
+}
+/** Starts from a single fresh tab (closing the rest, without dialogs). */
+async function freshTab() {
+  await page.evaluate(() => {
+    const s = window.__workspace.getState();
+    const fresh = s.newTab();
+    s.closeTabs(s.tabOrder.filter((id) => id !== fresh));
+  });
+  await waitUntil(atShellPrompt, 20000);
+  await waitUntil(terminalFocused, 3000);
+}
+async function waitPanes(count) {
+  await waitUntil(async () => leaves((await activeTab()).layout).length === count, 5000);
+  await waitUntil(atShellPrompt, 20000);
+  await waitUntil(terminalFocused, 3000);
+}
 
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
 function agentExe(name) {
@@ -356,9 +438,10 @@ const stages = {
   },
 
   async search() {
+    await run("'busca' + 'me-' + 'x'");
     await page.keyboard.press('Control+Shift+F');
     await page.waitForSelector('.search-bar input', { timeout: 3000 });
-    await page.keyboard.type('copiame');
+    await page.keyboard.type('buscame');
     await sleep(300);
     const summary = await page.textContent('.search-summary');
     await shot('03-search');
@@ -369,7 +452,7 @@ const stages = {
       focus: document.activeElement?.classList.contains('xterm-helper-textarea'),
     }));
     check('búsqueda encuentra resultados', /\d+ de \d+/.test(summary ?? ''), summary);
-    check('Esc cierra la búsqueda y devuelve el foco', !state.open && state.focus);
+    check('Esc cierra la búsqueda y devuelve el foco', !state.open && state.focus, state.open || !state.focus ? await focusReport() : '');
   },
 
   async resize() {
@@ -516,7 +599,7 @@ const stages = {
     await page.evaluate(() => (window.__terminal.__e2eMark = 'tab1'));
 
     const second = await openTab();
-    check('Ctrl+T abre una tab nueva y la activa', second !== first && (await wsState()).order.at(-1) === second);
+    check('Ctrl+Shift+T abre una tab nueva y la activa', second !== first && (await wsState()).order.at(-1) === second);
     await page.click('.tab-new');
     await waitUntil(async () => (await wsState()).order.length === 3, 5000);
     await waitUntil(atShellPrompt, 20000);
@@ -631,15 +714,15 @@ const stages = {
 
     // Closing a tab with a running program asks first.
     const ping = Number(await value("(Start-Process ping -ArgumentList '-n','300','127.0.0.1' -WindowStyle Hidden -PassThru).Id", 'ping'));
-    await page.keyboard.press('Control+w');
+    await page.keyboard.press('Control+Shift+W');
     const dialog = await page.waitForSelector('[role="alertdialog"]', { timeout: 5000 }).catch(() => null);
     const detail = dialog ? await dialog.textContent() : '';
-    check('Ctrl+W con un proceso corriendo pide confirmación', !!dialog && /ping\.exe/i.test(detail), detail.slice(0, 120));
+    check('Ctrl+Shift+W con un proceso corriendo pide confirmación', !!dialog && /ping\.exe/i.test(detail), detail.slice(0, 120));
     await shot('08-confirm');
     await page.keyboard.press('Escape');
     await sleep(300);
     check('cancelar deja la tab y el proceso', (await wsState()).tabs[dup] !== undefined && alive(ping));
-    await page.keyboard.press('Control+w');
+    await page.keyboard.press('Control+Shift+W');
     await page.click('[role="alertdialog"] [data-action="confirm"]');
     await waitUntil(async () => !alive(ping), 5000);
     check('confirmar cierra la tab y mata el proceso', (await wsState()).tabs[dup] === undefined && !alive(ping));
@@ -661,7 +744,7 @@ const stages = {
         ),
       );
       const shell = await shellPid();
-      await page.keyboard.press('Control+w');
+      await page.keyboard.press('Control+Shift+W');
       await sleep(1000);
       const asked = !!(await page.$('[role="alertdialog"]'));
       check('cerrar tab: sin diálogo si solo hay una app con ventana', !asked && (await wsState()).tabs[a] === undefined);
@@ -745,10 +828,211 @@ const stages = {
     await closeOtherTabsNow();
   },
 
+  async panes() {
+    await freshTab();
+    const p1 = await activePane();
+    await page.evaluate((id) => (window.__paneTerminal(id).__e2eMark = 'p1'), p1);
+
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const p2 = await activePane();
+    let tab = await activeTab();
+    const [b1, b2] = [await paneBox(p1), await paneBox(p2)];
+    check(
+      'Alt+Shift+D divide a la derecha y enfoca el panel nuevo',
+      tab.layout.direction === 'horizontal' && JSON.stringify(leaves(tab.layout)) === JSON.stringify([p1, p2]) &&
+        b2.x >= b1.x + b1.width && Math.abs(b1.height - b2.height) < 2,
+    );
+    check('dividir no recrea la terminal existente', (await paneMark(p1)) === 'p1');
+    check('borde resaltado solo en el panel activo', (await paneAttr(p2, 'data-focused')) !== null && (await paneAttr(p1, 'data-focused')) === null);
+    let pty = await ptyMatches(p2);
+    check('PTY del panel nuevo = su tamaño', pty.ok, pty.detail);
+
+    await page.keyboard.press('Alt+ArrowLeft');
+    check('Alt+Izquierda enfoca el panel de la izquierda', (await activePane()) === p1);
+    pty = await ptyMatches(p1);
+    check('PTY del panel izquierdo = su tamaño (achicado)', pty.ok, pty.detail);
+
+    await page.keyboard.press('Alt+Shift+Minus');
+    await waitPanes(3);
+    const p3 = await activePane();
+    tab = await activeTab();
+    const [c1, c3] = [await paneBox(p1), await paneBox(p3)];
+    check(
+      'Alt+Shift+- divide hacia abajo (anidado)',
+      JSON.stringify(leaves(tab.layout)) === JSON.stringify([p1, p3, p2]) && tab.layout.children[0].direction === 'vertical' &&
+        c3.y >= c1.y + c1.height && Math.abs(c1.x - c3.x) < 2,
+    );
+
+    const moves = [];
+    for (const [key, want] of [['Alt+ArrowUp', p1], ['Alt+ArrowRight', p2], ['Alt+ArrowLeft', p1], ['Alt+ArrowDown', p3]]) {
+      await page.keyboard.press(key);
+      await sleep(100);
+      moves.push((await activePane()) === want);
+    }
+    check('Alt+flechas mueven el foco según la posición en pantalla', moves.every(Boolean), moves.join(','));
+    await clickPane(p2);
+    check('clic en un panel lo enfoca', (await activePane()) === p2 && (await paneAttr(p2, 'data-focused')) !== null);
+
+    // Divider: drag the root boundary 200 px to the left.
+    const rootDivider = `[data-split-id="${tab.layout.id}"][data-index="0"]`;
+    const before = await paneSize(p2);
+    const d = await page.locator(rootDivider).boundingBox();
+    await page.mouse.move(d.x + d.width / 2, d.y + d.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(d.x + d.width / 2 - 200, d.y + d.height / 2, { steps: 12 });
+    await page.mouse.up();
+    await sleep(500);
+    tab = await activeTab();
+    const after = await paneSize(p2);
+    check('arrastrar el divisor cambia los tamaños', tab.layout.sizes[0] < 42 && Number(after.split('x')[0]) > Number(before.split('x')[0]), `${before} -> ${after}, sizes ${tab.layout.sizes.map(Math.round)}`);
+    pty = await ptyMatches(p2);
+    check('PTY sigue al divisor', pty.ok, pty.detail);
+    await page.dblclick(rootDivider);
+    await sleep(300);
+    tab = await activeTab();
+    check('doble clic en el divisor reparte en partes iguales', tab.layout.sizes.every((s) => Math.abs(s - 50) < 0.01));
+
+    // Zoom.
+    await clickPane(p2);
+    const normal = await paneSize(p2);
+    await page.keyboard.press('Control+Shift+Z');
+    await sleep(500);
+    tab = await activeTab();
+    const zoomedHidden = (await paneAttr(p1, 'hidden')) !== null && (await paneAttr(p3, 'hidden')) !== null;
+    const zoomed = await paneSize(p2);
+    check('Ctrl+Shift+Z maximiza el panel activo', tab.zoomedPaneId === p2 && zoomedHidden && Number(zoomed.split('x')[0]) > Number(normal.split('x')[0]), `${normal} -> ${zoomed}`);
+    pty = await ptyMatches(p2);
+    check('PTY sigue al zoom', pty.ok, pty.detail);
+    check('WebGL solo en lo visible (zoom): el resto suelta su contexto', (await paneAttr(p2, 'data-renderer')) === 'webgl' && (await paneAttr(p1, 'data-renderer')) === 'dom' && (await paneAttr(p3, 'data-renderer')) === 'dom');
+    await page.keyboard.press('Control+Shift+Z');
+    await sleep(500);
+    check('Ctrl+Shift+Z restaura los paneles', (await activeTab()).zoomedPaneId === null && (await paneAttr(p1, 'hidden')) === null && (await paneAttr(p1, 'data-renderer')) === 'webgl');
+    check('zoom y divisores no recrean terminales', (await paneMark(p1)) === 'p1');
+
+    // The tab title follows the active pane.
+    const tabId = (await wsState()).active;
+    await clickPane(p1);
+    await run("$Host.UI.RawUI.WindowTitle = 'tit-' + 'p1'");
+    await clickPane(p2);
+    await run("$Host.UI.RawUI.WindowTitle = 'tit-' + 'p2'");
+    await waitUntil(async () => (await tabLabel(tabId)) === 'tit-p2', 3000);
+    const withP2 = await tabLabel(tabId);
+    await page.keyboard.press('Alt+ArrowLeft');
+    await waitUntil(async () => (await tabLabel(tabId)) === 'tit-p1', 3000);
+    check('el título de la tab sigue al panel activo', withP2 === 'tit-p2' && (await tabLabel(tabId)) === 'tit-p1');
+
+    // Activity from a pane that is not the active one, while the tab is hidden.
+    await clickPane(p1);
+    await run("Start-Sleep -Milliseconds 1500; 'salida-' + 'p1'", { waitPrompt: false });
+    await clickPane(p2);
+    const other = await openTab();
+    const marked = await waitUntil(async () => (await tabAttr(tabId, 'data-indicator')) === 'activity', 6000);
+    check('la actividad de cualquier panel marca la tab', marked);
+    await page.click(tabSel(tabId));
+    await sleep(300);
+    check('mostrar la tab limpia la marca', (await tabAttr(tabId, 'data-indicator')) === null);
+    await page.evaluate((id) => window.__workspace.getState().closeTabs([id]), other);
+    await waitUntil(atShellPrompt);
+
+    // Closing panes: the sibling takes the space, terminals survive.
+    await clickPane(p3);
+    const tall = await paneBox(p1);
+    await page.keyboard.press('Control+Shift+W');
+    await waitUntil(async () => leaves((await activeTab()).layout).length === 2, 5000);
+    tab = await activeTab();
+    const grown = await paneBox(p1);
+    check('cerrar un panel: el hermano ocupa su espacio', JSON.stringify(leaves(tab.layout)) === JSON.stringify([p1, p2]) && grown.height > tall.height * 1.8 && tab.activePaneId === p1);
+    check('cerrar un panel no recrea las demás terminales', (await paneMark(p1)) === 'p1');
+    pty = await ptyMatches(p1);
+    check('PTY del hermano agrandado = su tamaño', pty.ok, pty.detail);
+
+    await clickPane(p2);
+    const ping = Number(await value("(Start-Process ping -ArgumentList '-n','300','127.0.0.1' -WindowStyle Hidden -PassThru).Id", 'ping'));
+    await page.keyboard.press('Control+Shift+W');
+    const dialog = await page.waitForSelector('[role="alertdialog"]', { timeout: 5000 }).catch(() => null);
+    const title = dialog ? await page.textContent('#confirm-title') : '';
+    check('cerrar un panel con un proceso pide confirmación', title === '¿Cerrar el panel?');
+    await page.click('[role="alertdialog"] [data-action="confirm"]');
+    await waitUntil(async () => !alive(ping), 5000);
+    tab = await activeTab();
+    check('confirmar cierra el panel y mata su proceso', tab.layout.type === 'pane' && tab.layout.paneId === p1 && !alive(ping));
+
+    const tabsBefore = (await wsState()).order.length;
+    await openTab();
+    await page.keyboard.press('Control+Shift+W');
+    await waitUntil(async () => (await wsState()).order.length === tabsBefore, 5000);
+    check('Ctrl+Shift+W en el último panel cierra la tab', (await wsState()).order.length === tabsBefore);
+    await shot('10-panes');
+  },
+
+  async passthrough() {
+    // Ctrl+T / Ctrl+W are no longer app shortcuts: they must reach the program.
+    await freshTab();
+    const log = path.join(WORK, 'keys.log');
+    await run(`$env:FAKE_AGENT_LOG = '${log}'`);
+    await run(`& '${process.execPath}' '${FAKE_AGENT}' probe`, { waitPrompt: false });
+    try {
+      await waitFor('FAKE-AGENT probe listo', { source: screen });
+      const tabs = (await wsState()).order.length;
+      await page.keyboard.press('Control+t');
+      await page.keyboard.press('Control+w');
+      await sleep(600);
+      const bytes = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+      check(
+        'Ctrl+T y Ctrl+W llegan al programa (0x14, 0x17) y no tocan las tabs',
+        /(^|\s)14(\s|$)/m.test(bytes) && /(^|\s)17(\s|$)/m.test(bytes) && (await wsState()).order.length === tabs,
+        bytes.replace(/\n/g, ' | ').slice(0, 80),
+      );
+    } finally {
+      await exitToPrompt();
+    }
+  },
+
+  async gpu() {
+    // 18 terminals (17 tabs, one of them split): beyond Chromium's ~16 WebGL contexts, unless
+    // hidden terminals release theirs.
+    await freshTab();
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const first = (await wsState()).active;
+    const warningsBefore = consoleLog.length;
+    await page.evaluate(() => {
+      const s = window.__workspace.getState();
+      for (let i = 0; i < 16; i++) s.newTab();
+    });
+    await sleep(1500);
+    for (let i = 0; i < 17; i++) {
+      await page.keyboard.press('Control+Tab');
+      await sleep(120);
+    }
+    await page.click(tabSel(first));
+    await sleep(600);
+    const dom = await page.evaluate(() => {
+      const panes = [...document.querySelectorAll('.terminal-pane')];
+      const visible = panes.filter((p) => !p.hidden);
+      return {
+        total: panes.length,
+        visibleWebgl: visible.filter((p) => p.dataset.renderer === 'webgl').length,
+        visible: visible.length,
+        hiddenWithCanvas: panes.filter((p) => p.hidden && p.querySelector('canvas')).length,
+      };
+    });
+    const warnings = consoleLog.slice(warningsBefore).filter((m) => /WebGL/i.test(m));
+    check(
+      'WebGL solo en las terminales visibles (18 terminales, 2 visibles)',
+      dom.total === 18 && dom.visible === 2 && dom.visibleWebgl === 2 && dom.hiddenWithCanvas === 0,
+      JSON.stringify(dom),
+    );
+    check('sin avisos de contextos WebGL de más', warnings.length === 0, warnings.join(' | ').slice(0, 200));
+    await freshTab();
+  },
+
   async reload() {
     const pid = await shellPid();
     await page.reload();
     await page.waitForFunction(() => window.__terminal, null, { timeout: 30000 });
+    await emulateFocus();
     await waitFor(/PS [A-Za-z]:\\.*>/, { timeout: 30000 });
     await sleep(1500);
     check('recargar la página cierra la sesión anterior', !alive(pid), `pid ${pid}`);

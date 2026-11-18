@@ -80,7 +80,7 @@ export function TabBar() {
       <button
         type="button"
         className="tab-new"
-        title="Nueva tab (Ctrl+T)"
+        title="Nueva tab (Ctrl+Shift+T)"
         aria-label="Nueva tab"
         onClick={() => {
           useWorkspace.getState().newTab();

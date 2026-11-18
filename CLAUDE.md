@@ -96,9 +96,8 @@ Reglas de la arquitectura:
 
 - **Modelo** (`store/workspaceModel.ts`, puro y sin imports en runtime → se testea con
   `node --test`): `tabs`, `tabOrder`, `groups`, `panes`, `activeTabId`. Cada **Tab** tiene un
-  `layout` (árbol de panes; hoy siempre `{ type: 'pane' }`) y `activePaneId`: la fase de paneles
-  divididos agrega nodos `split` sin tocar tabs ni grupos. Cada **Pane** guarda la metadata de su
-  sesión: título OSC, estado, código de salida, actividad.
+  `layout`, `activePaneId` y `zoomedPaneId`. Cada **Pane** (mapa global, no anidado en tabs) guarda
+  la metadata de su sesión: `sessionId` del backend, título OSC, estado, código de salida, actividad.
 - **Grupos estilo Chrome**: un grupo es un tramo **contiguo** de `tabOrder` con el mismo `groupId`.
   `normalize()` restaura la contigüidad y borra grupos vacíos después de cada cambio.
 - **Arrastre** (`moveTab`): soltar *estrictamente entre* dos tabs de un grupo la mete; en el borde
@@ -108,18 +107,56 @@ Reglas de la arquitectura:
 - **La tab activa nunca queda oculta**: colapsar un grupo que la contiene activa la tab visible más
   cercana afuera (si no hay, no colapsa); activar una tab de un grupo colapsado lo expande.
   `Ctrl+Tab` salta las tabs colapsadas.
-- **Terminales siempre montadas**: `Workspace` renderiza un `TerminalPane` por pane, en orden de
-  creación (reordenar tabs nunca mueve DOM de xterm). Las inactivas usan `display: none` (xterm
-  pausa el render y conserva scrollback y modos); al mostrarse, `fit()` + foco. Las instancias
-  viven en `lib/terminalRegistry.ts`, nunca en zustand.
-- **Cerrar** (`lib/tabActions.ts`): si alguna tab tiene algo más que la shell (`session_busy`), se
-  pide confirmación (foco en *Cancelar*). Desmontar el pane cierra la sesión con el cierre
-  selectivo. Cerrar la última tab cierra la ventana.
+- **Terminales siempre montadas y planas**: `Workspace` renderiza un `TerminalPane` por pane, en
+  orden de creación y **fuera del árbol**: el layout solo decide el rectángulo de cada uno
+  (`layoutRects` → `left/top/width/height` en %, ver `lib/paneGeometry.ts`). Dividir, cerrar,
+  arrastrar divisores, hacer zoom o cambiar de tab solo cambia estilos: **nunca se recrea una
+  instancia xterm**. Las ocultas usan `display: none` (xterm pausa el render y conserva scrollback
+  y modos); al mostrarse, `fit()` + foco al panel activo. Instancias en `lib/terminalRegistry.ts`.
+- **Por qué no `react-resizable-panels`**: renderiza el contenido de cada panel como hijo de su
+  `PanelGroup`; al dividir o cerrar, el contenido cambia de padre y React lo desmonta (se
+  recrearía xterm). Los divisores propios (`PaneDivider`) escriben tamaños en el store, que es la
+  única fuente de verdad. Una dependencia menos.
+- **Resize → PTY**: cada `TerminalPane` tiene un `ResizeObserver`; cualquier cambio de tamaño
+  (ventana, split, divisor, zoom) hace `fit()`, que dispara `resize_session` con las nuevas
+  columnas/filas. Verificado en e2e midiendo `[Console]::WindowWidth` dentro de cada panel.
+- **WebGL solo en lo visible** (`lib/renderer.ts`, `GpuRenderer`): al ocultarse una terminal
+  (otra tab, o fuera del zoom) suelta su contexto WebGL y queda con el renderer DOM; al mostrarse
+  lo recrea (fallback al DOM si falla). `dispose()` del addon no libera el contexto en Chromium
+  hasta el GC: hay que llamar `WEBGL_lose_context.loseContext()`; sin eso, tras ~16 ciclos aparece
+  "Too many active WebGL contexts" (verificado en e2e con 18 terminales).
+- **Cerrar** (`lib/tabActions.ts`): `requestClosePane` / `requestCloseTabs` consultan
+  `session_busy`; si hay algo más que la shell, se pide confirmación (foco en *Cancelar*).
+  Desmontar el pane cierra la sesión con el cierre selectivo. Cerrar la última tab cierra la ventana.
 - **Duplicar** abre una shell nueva con el mismo nombre, color y grupo, pero en el directorio por
   defecto: el directorio de PowerShell (`$PWD`) no es el del proceso y no se puede leer desde afuera
   sin *shell integration* (pendiente).
-- **Actividad**: la salida de un pane cuya tab no está activa lo marca (punto); activar la tab lo
-  limpia. Proceso terminado: anillo gris (código 0) o rojo (error).
+- **Actividad**: la salida de un pane que **no está en pantalla** (otra tab, o fuera del zoom) lo
+  marca; la tab muestra el punto si cualquiera de sus panes tiene marca. Mostrarlo la limpia.
+  Proceso terminado: anillo gris (código 0) o rojo (error), también por cualquier panel. El título
+  de la tab sigue al panel activo.
+
+## Paneles divididos
+
+- **Árbol** (`Layout`): una hoja `{ type: 'pane', paneId }` o un split `{ type: 'split', id,
+  direction, children, sizes }`. `horizontal` = hijos lado a lado (divisores verticales),
+  `vertical` = apilados; `sizes` en % suman 100. Anidable sin límite.
+- **Forma canónica** (`normalizeLayout`): un split de un solo hijo se reemplaza por el hijo, y un
+  split dentro de otro de la misma dirección se fusiona con su padre (dividir dos veces a la
+  derecha da tres hermanos, no splits anidados). Así el doble clic en un divisor iguala lo visible.
+- **Dividir** (`splitPane`): el panel nuevo recibe la mitad del espacio del panel dividido y el foco.
+- **Cerrar** (`closePane`): el hermano adyacente (el anterior; si no hay, el siguiente) hereda el
+  espacio y, si el cerrado tenía el foco, el panel de ese hermano más cercano lo toma. El último
+  panel cierra la tab.
+- **Foco por posición** (`focusDirection`): el panel más cercano en esa dirección que comparte
+  borde; desempates por mayor borde compartido, luego centro más cercano, luego orden visual.
+- **Zoom** (`zoomedPaneId`): el panel ocupa toda la tab; los demás quedan ocultos (y sin WebGL).
+  Mover el foco a otro panel, dividir o cerrar restaura el layout.
+- **Mover paneles entre tabs** (fase futura): `movePane` ya existe y está testeado. Como los panes
+  viven en un mapa global y se renderizan planos, mover una hoja de árbol no desmonta su terminal
+  ni toca su sesión; falta solo la UI de arrastre.
+- **Menú del panel**: Shift+clic derecho (o Shift+F10 / tecla menú). El clic derecho solo sigue
+  copiando/pegando, como en Windows Terminal.
 
 ## Estructura
 
@@ -131,8 +168,9 @@ src/                        Frontend (solo render + input)
   components/TabBar.tsx     Barra de tabs + DndContext (TabItem, GroupChip, RenameInput)
   components/ContextMenus.tsx  Menús de tab y de grupo (primitivas en Menu.tsx)
   components/ConfirmDialog.tsx Confirmación al cerrar tabs con procesos
-  components/Workspace.tsx  Todos los TerminalPane montados + SearchBar de la tab activa
-  components/TerminalPane.tsx  Una instancia xterm + addons + sesión por pane
+  components/Workspace.tsx  Todos los TerminalPane montados y posicionados + divisores + SearchBar
+  components/TerminalPane.tsx  Una instancia xterm + addons + sesión por pane (memo, nunca se recrea)
+  components/PaneDivider.tsx   Divisor arrastrable (doble clic: igualar)
   lib/pty.ts                ÚNICO punto que llama a invoke(); wrappers tipados de los comandos
   lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (buffer de input, restart)
   lib/terminalRegistry.ts   PaneId → { term, fit, search, session } (objetos imperativos)
@@ -140,7 +178,8 @@ src/                        Frontend (solo render + input)
   lib/appShortcuts.ts       Atajos de tabs/grupos (listener en captura sobre window)
   lib/keybindings.ts        Atajos de terminal: copiar/pegar, búsqueda, zoom, Shift+Enter
   lib/clipboard.ts          navigator.clipboard con fallback
-  lib/renderer.ts           WebGL con fallback al renderer DOM (también ante pérdida de contexto)
+  lib/renderer.ts           GpuRenderer: WebGL solo mientras se ve, fallback al DOM, loseContext al ocultar
+  lib/paneGeometry.ts       Rectángulos del layout → CSS de panes y divisores (gap, mínimo en px)
   lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui para e2e
   store/workspaceModel.ts   Modelo puro de tabs/grupos/panes (+ workspaceModel.test.ts)
   store/workspace.ts        zustand sobre el modelo (ids, acciones)
@@ -256,13 +295,21 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 - [ ] `Shift+Enter` en PowerShell agrega una línea (`>>`) en vez de ejecutar.
 - [ ] Tabs: abrir, cambiar, renombrar, arrastrar y agrupar; al volver a una tab, el scrollback
   sigue ahí y el tamaño es el correcto. Cerrar una tab con un dev server pide confirmación.
+- [ ] Paneles: dividir en ambas direcciones, arrastrar divisores, zoom; en cada panel
+  `[Console]::WindowWidth` coincide con su ancho visible.
 
 ## Atajos
 
 | Atajo | Acción |
 |---|---|
-| `Ctrl+T` / botón `+` | Nueva tab |
-| `Ctrl+W` | Cerrar tab (pide confirmación si hay procesos además de la shell) |
+| `Ctrl+Shift+T` / botón `+` | Nueva tab |
+| `Ctrl+Shift+W` | Cerrar el panel activo; si es el último, la tab (confirma si hay procesos además de la shell) |
+| `Alt+Shift+D` / `Alt+Shift+-` | Dividir el panel a la derecha / hacia abajo |
+| `Alt+←↑→↓` | Mover el foco al panel en esa dirección |
+| `Ctrl+Shift+Z` | Maximizar / restaurar el panel activo dentro de la tab |
+| Clic en un panel | Enfocarlo |
+| Arrastrar un divisor / doble clic | Redimensionar / repartir en partes iguales |
+| `Shift`+clic derecho en un panel, `Shift+F10` | Menú del panel: dividir, maximizar, igualar, cerrar |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Tab siguiente / anterior (salta las de grupos colapsados) |
 | `Ctrl+1`…`Ctrl+8` / `Ctrl+9` | Ir a la tab N / a la última (expande su grupo si está colapsado) |
 | `F2`, doble clic en la tab | Renombrar (`Enter` guarda, `Escape` cancela, vacío vuelve al título del proceso) |
@@ -279,9 +326,10 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom de fuente |
 | `Ctrl+clic` en un link | Abrir en el navegador |
 
-Los atajos de tabs se escuchan en fase de captura sobre `window`: ganan sobre xterm y el programa
-nunca los recibe. Costo aceptado: `Ctrl+T`/`Ctrl+W` dejan de llegar a readline (transponer /
-borrar palabra), `Ctrl+W` a nano (buscar) y `F2` a los TUI que lo usan.
+Los atajos de tabs y paneles se escuchan en fase de captura sobre `window`: ganan sobre xterm y el
+programa nunca los recibe. Por eso siguen el estilo de Windows Terminal (`Ctrl+Shift+…`,
+`Alt+Shift+…`): `Ctrl+T` y `Ctrl+W` llegan al programa (readline, nano; verificado en e2e). Siguen
+tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab` y `Alt+flechas`.
 
 ## Gotchas conocidos
 
@@ -318,8 +366,20 @@ borrar palabra), `Ctrl+W` a nano (buscar) y `F2` a los TUI que lo usan.
 - **Foco al cambiar de tab**: el pane recién mostrado recibe el foco un frame después (antes era
   `display: none`). `focusActiveTerminal()` no lo roba si hay un renombrado, menú o diálogo abierto
   (si no, el doble clic para renombrar cerraba el input al instante).
-- **Límite de contextos WebGL**: Chromium mantiene unos 16 contextos WebGL por página. Con más tabs,
-  los más viejos pierden el contexto y caen al renderer DOM (ya manejado en `lib/renderer.ts`).
+- **Límite de contextos WebGL**: Chromium mantiene unos 16 contextos WebGL por página. Resuelto con
+  WebGL solo en lo visible + `loseContext()` explícito al ocultar (ver "Tabs, grupos y panes").
+- **Eventos de foco con la ventana sin foco**: Chromium no dispara `focus` mientras la ventana no
+  tiene el foco del sistema. Por eso un clic en un panel lo selecciona en `pointerdown`, no solo en
+  el `focus` del textarea. En el e2e, `Emulation.setFocusEmulationEnabled` hace que la página se
+  comporte como enfocada aunque el usuario esté usando otras ventanas mientras corre la suite.
+- **Arrastres en el e2e**: la barra de tabs anima después de cada reorden; `drag()` mide las
+  posiciones recién cuando se estabilizan (`settledBox`), si no suelta donde la tab estaba antes.
+- **Cuelgue de salida observado una vez (dev)**: tras una sesión larga de `tauri dev` con muchos
+  HMR y recargas, cerrar la ventana dejó `terminal.exe` vivo sin ventanas, sin WebView2, sin hijos
+  (el Job Object había limpiado todas las shells) y sin CPU. No se reprodujo en 3 intentos
+  dirigidos (con y sin HMR), ni en corridas completas del e2e ni en release. Si reaparece: crear un
+  dump (Administrador de tareas → "Crear archivo de volcado") antes de matarlo, para ver dónde está
+  el hilo principal.
 
 ## Estado
 
@@ -357,10 +417,23 @@ borrar palabra), `Ctrl+W` a nano (buscar) y `F2` a los TUI que lo usan.
     teclado reales vía CDP: incluye que volver a una tab conserva la misma instancia xterm y su
     scrollback, que una tab oculta se re-ajusta al mostrarse tras un resize, que cerrar una tab con
     un proceso pide confirmación y que una app con ventana sobrevive al cerrar su tab.
+- **Fase 3 — paneles divididos: completa y verificada (2026-11-18).** Árbol de splits anidables
+  por tab (cada panel su propia sesión PTY), `Alt+Shift+D` / `Alt+Shift+-` y menú del panel,
+  divisores arrastrables con doble clic para igualar, foco con borde, `Alt+flechas` y clic, cierre
+  con herencia de espacio y confirmación, zoom `Ctrl+Shift+Z`, actividad y título por panel.
+  Además: atajos estilo Windows Terminal (`Ctrl+T`/`Ctrl+W` vuelven al programa) y WebGL solo
+  para terminales visibles.
+  - `npm test`: 30 tests del modelo (12 nuevos de paneles: anidar/aplanar, herencia de espacio,
+    geometría y divisores, navegación por posición, zoom, actividad entre paneles, `movePane`).
+  - `npm run e2e`: 106/106. Nuevas etapas `panes` (26 checks: la instancia xterm original
+    sobrevive a dividir, arrastrar, hacer zoom y cerrar; el PTY de cada panel coincide con su
+    tamaño tras cada cambio), `passthrough` (`Ctrl+T`/`Ctrl+W` llegan como 0x14/0x17) y `gpu`
+    (18 terminales: solo las 2 visibles tienen WebGL, sin avisos de Chromium).
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
-- Próximas fases (ideas): paneles divididos dentro de cada tab, *shell integration* (cwd para
+- Próximas fases (ideas): arrastrar paneles a otra tab o a una tab nueva (modelo listo:
+  `movePane`), *shell integration* (cwd para
   duplicar, límites de comandos), persistir tabs/grupos entre sesiones, archivo de configuración (fuente, tema, shell,
   atajos), perfiles de shell, flow control con ACKs para salidas gigantes, `conpty.dll` +
   `OpenConsole.exe` empaquetados (ConPTY más nuevo que el del sistema), lista de agentes y sus
