@@ -1,6 +1,33 @@
+# Dependencias y builds
 node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/schemas/
+*.tsbuildinfo
+.vite/
+
+# Artefactos de pruebas e2e (capturas, logs)
+e2e/artifacts/
+
+# Entorno y secretos (solo se versionan los ejemplos)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+
+# Logs
 *.log
+npm-debug.log*
+
+# Configuración local de herramientas
+.claude/settings.local.json
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Sistema operativo
 .DS_Store
+Thumbs.db
+desktop.ini

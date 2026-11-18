@@ -88,6 +88,11 @@ src-tauri/
   src/pty/shell.rs          pwsh → powershell.exe, cwd inicial = %USERPROFILE%
   src/pty/platform.rs       Build de Windows (RtlGetVersion) para `pty_backend`
   tests/pty.rs              Tests de integración con procesos reales (PowerShell/ConPTY)
+e2e/
+  run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
+  fake-agent.mjs            Agente de IA falso para pruebas (ver "Pruebas con agentes")
+  win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
+  artifacts/                Capturas y log de `tauri dev` (ignorado por git)
 ```
 
 ## Comandos
@@ -98,7 +103,24 @@ npm run tauri dev                       # app en modo desarrollo (Vite + cargo r
 npm run build                           # typecheck (tsc) + build del frontend
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
+npm run e2e                             # lanza `tauri dev`, corre todas las etapas y cierra la app
+npm run e2e -- agent,close              # solo algunas etapas
 ```
+
+`npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
+app y usa el portapapeles (lo restaura al terminar). Capturas en `e2e/artifacts/`.
+
+## Pruebas con agentes de IA (regla obligatoria)
+
+- **Ninguna prueba (e2e, de integración ni manual automatizada) envía input a un `claude`,
+  `codex` o `gemini` real**, ni siquiera tipear sin Enter: cualquier interacción puede consumir
+  uso de la cuenta del usuario (y un agente en *auto mode* puede ejecutar cosas).
+- Para probar comportamiento con agentes se usa `e2e/fake-agent.mjs`: editor de línea en raw
+  mode, bracketed paste, la secuencia de salto de línea de cada agente y "Ctrl+C dos veces para
+  salir". Se ejecuta con un `node.exe` enlazado como `claude.exe` / `gemini.exe`, así la
+  detección de agentes de la terminal se prueba con el mismo nombre de imagen que el real.
+- `run()` en `e2e/run.mjs` se niega a tipear si el cursor no está en un prompt de PowerShell
+  libre: un fallo nunca debe terminar mandando texto a un programa ajeno.
 
 ## Convenciones
 
@@ -131,7 +153,7 @@ terminada solo si:
 
 1. `npm run build` pasa sin errores.
 2. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` y `cargo test` pasan.
-3. `npm run tauri dev` abre la app y el smoke test manual de abajo pasa.
+3. `npm run e2e` pasa completo (cubre automáticamente casi todo el smoke test de abajo).
 
 Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fases sobre una rota.
 
@@ -143,7 +165,8 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 - [ ] `Ctrl+C` sin selección interrumpe (`ping -t 127.0.0.1`); con selección copia.
 - [ ] Pegar con `Ctrl+V` / `Ctrl+Shift+V` / `Shift+Insert` (multilínea respeta bracketed paste).
 - [ ] Redimensionar la ventana: `[Console]::WindowWidth` coincide con las columnas visibles.
-- [ ] `claude` arranca, se ve bien y sale con `Ctrl+C` dos veces.
+- [ ] Un agente (el falso de `e2e/`) arranca, recibe input y sale con `Ctrl+C` dos veces.
+  Probar a mano con un agente real queda a criterio del usuario, nunca automatizado.
 - [ ] Cerrar la ventana no deja `powershell`/`pwsh`/hijos vivos (verificar en el Administrador de tareas).
 
 ## Atajos (MVP)
@@ -195,10 +218,10 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   búsqueda, links, zoom.
   - `cargo test`: 6 unitarios + 8 de integración (ConPTY real: colores/truecolor, Ctrl+C, resize,
     código de salida, kill del árbol con nieto oculto, cierre por dueño), estables en 6 corridas.
-  - E2E sobre la app real vía CDP de WebView2: 35/35 (renderer WebGL, tamaños PTY = xterm al
-    arrancar, con zoom y al redimensionar la ventana; colores por atributo de celda; Ctrl+C;
-    copiar/pegar con Ctrl+C/Ctrl+V/Shift+Insert/clic derecho; búsqueda; vim; nano; `claude`;
-    recarga de página; exit/restart; cerrar la ventana mata app + shell + nieto).
+  - `npm run e2e`: 34/34 (renderer WebGL, tamaños PTY = xterm al arrancar, con zoom y al
+    redimensionar la ventana; colores por atributo de celda; Ctrl+C; copiar/pegar con
+    Ctrl+C/Ctrl+V/Shift+Insert/clic derecho; búsqueda; vim; nano; agente falso con pegado
+    multilínea; recarga de página; exit/restart; cerrar la ventana mata app + shell + nieto).
   - Release con CSP de producción: IPC, Ctrl+C y pegado OK, consola sin violaciones de CSP.
   - Medido en release (arranque limpio, 8 s en reposo): `terminal.exe` 6.4 MB en disco y 5.9 MB de
     memoria privada; app + WebView2 ≈ 216 MB privados, de los cuales **126 MB son el proceso GPU**
