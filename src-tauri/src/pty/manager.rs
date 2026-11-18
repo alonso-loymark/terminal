@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
+use super::agents::{self, ShiftEnterTarget};
 use super::error::PtyError;
 use super::session::{Session, SessionEvents, SpawnOptions};
 
@@ -70,6 +71,16 @@ impl PtyManager {
 
     pub fn resize(&self, id: SessionId, cols: u16, rows: u16) -> Result<(), PtyError> {
         self.with_session(id, |session| session.resize(cols, rows))
+    }
+
+    /// Sends Shift+Enter as the program in front of the user expects it: an AI agent gets its
+    /// own newline sequence, anything else a real Shift+Enter (see `agents.rs`).
+    pub fn shift_enter(&self, id: SessionId) -> Result<ShiftEnterTarget, PtyError> {
+        let shell = self.with_session(id, |session| Ok(session.pid))?;
+        // The process table is inspected without holding the sessions lock.
+        let (target, bytes) = agents::shift_enter_for(shell);
+        self.write(id, bytes.to_vec())?;
+        Ok(target)
     }
 
     /// Process id of the session's shell.

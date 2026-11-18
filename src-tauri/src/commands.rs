@@ -6,7 +6,10 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{State, Webview};
 
-use crate::pty::{self, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId, SpawnOptions};
+use crate::pty::{
+    self, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId, ShiftEnterTarget,
+    SpawnOptions,
+};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +96,16 @@ pub fn close_session(
     session_id: SessionId,
 ) -> Result<(), PtyError> {
     manager.close(session_id)
+}
+
+/// Shift+Enter, translated for whatever runs in the session (newline in AI agents, a real
+/// Shift+Enter elsewhere). Synchronous like `write_to_session`, so keystrokes stay in order.
+#[tauri::command]
+pub fn send_shift_enter(
+    manager: State<'_, PtyManager>,
+    session_id: SessionId,
+) -> Result<ShiftEnterTarget, PtyError> {
+    manager.shift_enter(session_id)
 }
 
 /// Lets xterm adapt to ConPTY (`windowsPty` option). `None` outside Windows.

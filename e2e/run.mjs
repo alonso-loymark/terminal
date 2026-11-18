@@ -395,11 +395,51 @@ const stages = {
       await page.keyboard.press('Control+v');
       await sleep(500);
       await page.keyboard.press('Enter');
-      const s = await waitFor(/SUBMIT "linea uno/, { source: screen });
-      check('agente falso: pegado multilínea llega como un solo input', s.includes('SUBMIT "linea uno\\nlinea dos"'));
+      const pasted = await waitFor('SUBMIT "linea uno\\nlinea dos"', { source: screen, timeout: 8000 })
+        .then(() => true)
+        .catch(() => false);
+      check('agente falso: pegado multilínea llega como un solo input', pasted);
       await shot('06-agent');
     } finally {
       check('agente falso: Ctrl+C dos veces sale al prompt', await exitToPrompt());
+    }
+  },
+
+  async shiftenter() {
+    // PowerShell: Shift+Enter is PSReadLine's AddLine (continuation ">>", one single input).
+    if (!(await waitUntil(atShellPrompt, 5000))) throw new Error('sin prompt de PowerShell');
+    const before = prompts(await text());
+    await page.keyboard.type("'uno'");
+    await page.keyboard.press('Shift+Enter');
+    await page.keyboard.type("'dos'");
+    await page.keyboard.press('Enter');
+    await waitFor((s) => prompts(s) > before, { timeout: 10000 });
+    await sleep(500);
+    const s = await text();
+    check(
+      'Shift+Enter en PowerShell agrega línea (AddLine) y ejecuta todo junto',
+      /^>> 'dos'/m.test(s) && /^uno\ndos$/m.test(s) && prompts(s) === before + 1,
+      `prompts nuevos: ${prompts(s) - before}`,
+    );
+
+    // Fake agents: each gets the newline sequence its own /terminal-setup would install.
+    for (const agent of ['claude', 'gemini']) {
+      await run(`& '${agentExe(agent)}' '${FAKE_AGENT}'`, { waitPrompt: false });
+      try {
+        await waitFor(`FAKE-AGENT ${agent} listo`, { source: screen });
+        await page.keyboard.type('hola');
+        await page.keyboard.press('Shift+Enter');
+        await page.keyboard.type('mundo');
+        await page.keyboard.press('Enter');
+        // Wait for the exact text: older SUBMIT lines may still be on screen.
+        const ok = await waitFor('SUBMIT "hola\\nmundo"', { source: screen, timeout: 8000 })
+          .then(() => true)
+          .catch(() => false);
+        check(`Shift+Enter en ${agent} (falso) inserta salto de línea`, ok);
+        if (agent === 'claude') await shot('07-shift-enter-agent');
+      } finally {
+        await exitToPrompt();
+      }
     }
   },
 
@@ -430,14 +470,35 @@ const stages = {
     const child = Number(
       await value("(Start-Process ping -ArgumentList '-n','300','127.0.0.1' -WindowStyle Hidden -PassThru).Id", 'child'),
     );
-    check('nieto oculto corriendo antes de cerrar', alive(child));
+    // charmap: a classic Win32 app that really is the shell's child. Visible, it stands for
+    // `code .`/`notepad`; hidden, for windowless GUI processes such as headless browsers.
+    const withGui = fs.existsSync('C:\\Windows\\System32\\charmap.exe');
+    let visibleApp = 0;
+    let hiddenApp = 0;
+    if (withGui) {
+      const ids = await value(
+        '$( $v = Start-Process charmap -PassThru; $h = Start-Process charmap -WindowStyle Hidden -PassThru; ' +
+          '$n = 0; while ((Get-Process -Id $v.Id).MainWindowHandle -eq 0 -and $n -lt 100) { Start-Sleep -Milliseconds 100; $n++ }; ' +
+          "[string]$v.Id + ',' + $h.Id )",
+        'gui',
+      );
+      [visibleApp, hiddenApp] = (ids ?? '').split(',').map(Number);
+    } else skip('apps con ventana', 'no está charmap.exe');
+    check('procesos de prueba corriendo antes de cerrar', [child, visibleApp, hiddenApp].every((p) => !p || alive(p)));
+
     win('close', appPid);
     let gone = false;
     for (let i = 0; i < 50 && !gone; i++) {
       await sleep(200);
-      gone = !alive(appPid) && !alive(shell) && !alive(child);
+      gone = [appPid, shell, child, hiddenApp].every((p) => !p || !alive(p));
     }
-    check('cerrar ventana: app, shell y nieto terminados', gone, `app ${alive(appPid)} shell ${alive(shell)} nieto ${alive(child)}`);
+    check('cerrar ventana: app, shell y procesos de consola terminados', gone, `app ${alive(appPid)} shell ${alive(shell)} nieto ${alive(child)}`);
+    if (withGui) {
+      check('cerrar ventana: proceso GUI sin ventana (tipo headless) terminado', !alive(hiddenApp));
+      await sleep(500);
+      check('cerrar ventana: app con ventana visible sobrevive', alive(visibleApp));
+      if (alive(visibleApp)) process.kill(visibleApp);
+    }
   },
 };
 

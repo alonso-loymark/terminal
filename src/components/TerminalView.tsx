@@ -69,7 +69,12 @@ export function TerminalView() {
     fitRef.current = fit;
     searchRef.current = search;
 
+    const session = new TerminalSession(term, {
+      onStatus: (status, exitCode) => useTerminalStore.getState().setStatus(status, exitCode),
+    });
+
     installKeybindings(term, {
+      shiftEnter: () => session.shiftEnter(),
       openSearch: () => useTerminalStore.getState().openSearch(),
       zoomIn: () => useSettings.getState().zoomIn(),
       zoomOut: () => useSettings.getState().zoomOut(),
@@ -89,9 +94,6 @@ export function TerminalView() {
     };
     host.addEventListener('contextmenu', onContextMenu);
 
-    const session = new TerminalSession(term, {
-      onStatus: (status, exitCode) => useTerminalStore.getState().setStatus(status, exitCode),
-    });
     // Tell xterm it is talking to ConPTY before the first byte of output arrives.
     getPtyBackend()
       .then((backend) => {

@@ -1,5 +1,5 @@
 import type { IDisposable, Terminal } from '@xterm/xterm';
-import { closeSession, createSession, resizeSession, writeToSession, type SessionId } from './pty';
+import { closeSession, createSession, resizeSession, sendShiftEnter, writeToSession, type SessionId } from './pty';
 
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'failed';
 
@@ -36,6 +36,16 @@ export class TerminalSession {
 
   start(): void {
     void this.#start();
+  }
+
+  /** Shift+Enter, translated by the backend for whatever runs in the session. */
+  shiftEnter(): void {
+    if (this.#status !== 'running' || this.#id === null) {
+      // Not connected (starting, exited, failed): behave like Enter.
+      this.#handleInput('\r');
+      return;
+    }
+    sendShiftEnter(this.#id).catch(ignore);
   }
 
   dispose(): void {

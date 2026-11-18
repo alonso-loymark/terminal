@@ -44,6 +44,17 @@ export function resizeSession(sessionId: SessionId, cols: number, rows: number):
   return invoke('resize_session', { sessionId, cols, rows });
 }
 
+/** What the backend turned Shift+Enter into for the program currently running. */
+export type ShiftEnterTarget = { mode: 'agent'; agent: string } | { mode: 'native' };
+
+/**
+ * Shift+Enter: a newline for AI agents (each one's own sequence), a real Shift+Enter for
+ * everything else (PowerShell: AddLine). The backend decides from the session's process tree.
+ */
+export function sendShiftEnter(sessionId: SessionId): Promise<ShiftEnterTarget> {
+  return invoke('send_shift_enter', { sessionId });
+}
+
 export function closeSession(sessionId: SessionId): Promise<void> {
   return invoke('close_session', { sessionId });
 }

@@ -47,6 +47,7 @@ pub(crate) struct Session {
     killer: Box<dyn ChildKiller + Send + Sync>,
     #[cfg(windows)]
     job: Option<super::job::Job>,
+    killed: bool,
 }
 
 /// The child process, handed back separately so the manager can start waiting on it only
@@ -96,6 +97,7 @@ impl Session {
             job: contain_in_job(child.as_ref()),
             master: pair.master,
             input: input_tx,
+            killed: false,
         };
         // From here on any early return drops `session`, which kills the shell.
 
@@ -129,11 +131,15 @@ impl Session {
             .map_err(|e| PtyError::Resize(format!("{e:#}")))
     }
 
-    /// Kills the shell and, on Windows, every process it started. Idempotent.
+    /// Kills the shell and, on Windows, every console process it started; apps with a visible
+    /// window survive (see `teardown.rs`). Idempotent.
     pub(crate) fn kill(&mut self) {
+        if std::mem::replace(&mut self.killed, true) {
+            return;
+        }
         #[cfg(windows)]
         if let Some(job) = &self.job {
-            job.terminate();
+            super::teardown::close_job(job, self.pid);
         }
         // Fallback when the job could not be set up; harmless if the process is already gone.
         let _ = self.killer.kill();

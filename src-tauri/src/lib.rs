@@ -15,6 +15,7 @@ pub fn run() -> tauri::Result<()> {
             commands::write_to_session,
             commands::resize_session,
             commands::close_session,
+            commands::send_shift_enter,
             commands::pty_backend,
         ])
         .on_page_load(|webview, payload| {

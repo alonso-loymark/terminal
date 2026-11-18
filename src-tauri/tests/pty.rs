@@ -1,14 +1,25 @@
 //! Integration tests against real PowerShell processes running in ConPTY.
+//!
+//! Rule: no test ever sends input to a real AI agent (claude, codex, gemini). Agent behavior is
+//! exercised with `e2e/fake-agent.mjs` run through a node.exe linked under the agent's name.
 #![cfg(windows)]
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use terminal_lib::pty::{PtyManager, SessionEvents, SessionId, SpawnOptions, default_shell};
+use terminal_lib::pty::{
+    PtyManager, SessionEvents, SessionId, ShiftEnterTarget, SpawnOptions, default_shell,
+    find_on_path,
+};
 use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
 };
+
+const FAKE_AGENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../e2e/fake-agent.mjs");
+const CHARMAP: &str = r"C:\Windows\System32\charmap.exe";
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 const CURSOR_POSITION_REQUEST: &str = "\x1b[6n";
@@ -64,8 +75,12 @@ impl Shell {
             exit: None,
             output_after_exit: false,
         };
-        // Do not type before PowerShell is ready to read input.
+        // Do not type before PowerShell is ready to read input, and let the next prompt finish
+        // drawing so that tests counting prompts start from a clean slate.
         shell.run("'ready' + '-prompt'", "ready-prompt");
+        let ready = shell.output.rfind("ready-prompt").expect("marker");
+        shell.wait_for(ready, "PS ");
+        while shell.pump(Duration::from_millis(150)) {}
         shell
     }
 
@@ -325,4 +340,170 @@ fn unknown_sessions_are_errors() {
     assert!(manager.write(999, b"x".to_vec()).is_err());
     assert!(manager.resize(999, 80, 24).is_err());
     assert!(manager.close(999).is_err());
+}
+
+fn kill_process(pid: u32) {
+    // SAFETY: plain Win32 calls; the handle is closed before returning.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
+/// Comma-separated numbers between `prefix` and the end marker, from the last occurrence.
+fn numbers_after(output: &str, prefix: &str) -> Vec<u32> {
+    let start = output.rfind(prefix).expect("prefix") + prefix.len();
+    output[start..]
+        .split(|c: char| !(c.is_ascii_digit() || c == ','))
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .map(|n| n.parse().expect("number"))
+        .collect()
+}
+
+/// node.exe linked as `<name>.exe`, so the fake agent looks like the real agent to the
+/// terminal's process detection. `None` when node is not installed.
+fn fake_agent_exe(dir: &Path, name: &str) -> Option<PathBuf> {
+    let node = find_on_path("node.exe")?;
+    fs::create_dir_all(dir).ok()?;
+    let exe = dir.join(format!("{name}.exe"));
+    if !exe.exists() && fs::hard_link(&node, &exe).is_err() {
+        fs::copy(&node, &exe).ok()?;
+    }
+    Some(exe)
+}
+
+#[test]
+fn close_spares_windowed_apps_and_kills_console_processes() {
+    if !Path::new(CHARMAP).exists() {
+        eprintln!("skipped: {CHARMAP} not found");
+        return;
+    }
+    let manager = PtyManager::new();
+    let mut shell = Shell::spawn(&manager, "test");
+    let shell_pid = shell.pid();
+
+    // charmap is a classic Win32 app (not a packaged one), so it really is the shell's child.
+    // Hidden, it stands in for windowless GUI processes such as headless browsers.
+    let from = shell.output.len();
+    shell.send(concat!(
+        "$v = Start-Process charmap -PassThru; ",
+        "$h = Start-Process charmap -WindowStyle Hidden -PassThru; ",
+        "$c = Start-Process ping -ArgumentList '-n','300','127.0.0.1' -WindowStyle Hidden -PassThru; ",
+        "$n = 0; while ((Get-Process -Id $v.Id).MainWindowHandle -eq 0 -and $n -lt 100) { Start-Sleep -Milliseconds 100; $n++ }; ",
+        "'ids=' + $v.Id + ',' + $h.Id + ',' + $c.Id + (':do' + 'ne')\r"
+    ));
+    let end = shell.wait_for(from, ":done");
+    let ids = numbers_after(&shell.output[from..end], "ids=");
+    let (visible, hidden, console) = (ids[0], ids[1], ids[2]);
+    for pid in [visible, hidden, console] {
+        assert!(
+            !process_exited_within(pid, Duration::ZERO),
+            "{pid} should be running"
+        );
+    }
+
+    manager.close(shell.id).unwrap();
+    let console_side_dead = [shell_pid, hidden, console]
+        .into_iter()
+        .all(|pid| process_exited_within(pid, Duration::from_secs(5)));
+    let app_alive = !process_exited_within(visible, Duration::from_secs(1));
+    kill_process(visible);
+    assert!(
+        console_side_dead,
+        "shell, hidden GUI process or console grandchild survived"
+    );
+    assert!(app_alive, "the app with a visible window was killed");
+    shell.wait_exit();
+}
+
+#[test]
+fn shift_enter_adds_a_line_in_powershell() {
+    let manager = PtyManager::new();
+    let mut shell = Shell::spawn(&manager, "test");
+    let from = shell.output.len();
+    shell.send("'uno'");
+    let target = manager.shift_enter(shell.id).unwrap();
+    assert_eq!(target, ShiftEnterTarget::Native);
+    shell.send("'dos'\r");
+    shell.wait_for(from, "PS ");
+    while shell.pump(Duration::from_millis(500)) {}
+    let tail = &shell.output[from..];
+    // PSReadLine AddLine: a continuation prompt and both lines run as one input (one new
+    // prompt). A plain Enter would have run 'uno' alone and shown two prompts.
+    assert!(tail.contains(">>"), "no continuation prompt: {tail:?}");
+    assert_eq!(
+        tail.matches("PS ").count(),
+        1,
+        "ran as two inputs: {tail:?}"
+    );
+    assert!(tail.contains("uno") && tail.contains("dos"));
+    manager.close(shell.id).unwrap();
+}
+
+#[test]
+fn shift_enter_inserts_each_agents_own_newline() {
+    let dir = std::env::temp_dir().join(format!("terminal-tests-agents-{}", std::process::id()));
+    let manager = PtyManager::new();
+    let mut shell = Shell::spawn(&manager, "test");
+    for agent in ["claude", "gemini"] {
+        let Some(exe) = fake_agent_exe(&dir, agent) else {
+            eprintln!("skipped: node.exe not found");
+            return;
+        };
+        let from = shell.output.len();
+        shell.send(&format!("& '{}' '{}'\r", exe.display(), FAKE_AGENT));
+        shell.wait_for(from, &format!("FAKE-AGENT {agent} listo"));
+
+        let from = shell.output.len();
+        shell.send("hola");
+        assert_eq!(
+            manager.shift_enter(shell.id).unwrap(),
+            ShiftEnterTarget::Agent {
+                agent: if agent == "claude" {
+                    "claude"
+                } else {
+                    "gemini"
+                }
+            }
+        );
+        shell.send("mundo\r");
+        shell.wait_for(from, r#"SUBMIT "hola\nmundo""#);
+
+        let from = shell.output.len();
+        shell.send("\x03");
+        shell.wait_for(from, "Press Ctrl-C again");
+        shell.send("\x03");
+        shell.wait_for(from, "bye");
+        shell.run("'back' + '-in-ps'", "back-in-ps");
+    }
+    manager.close(shell.id).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shift_enter_is_native_for_programs_that_are_not_agents() {
+    let Some(node) = find_on_path("node.exe") else {
+        eprintln!("skipped: node.exe not found");
+        return;
+    };
+    let manager = PtyManager::new();
+    let mut shell = Shell::spawn(&manager, "test");
+    // Same TUI, but under plain node.exe with an unknown script path: not an agent.
+    let from = shell.output.len();
+    shell.send(&format!("& '{}' '{}' claude\r", node.display(), FAKE_AGENT));
+    shell.wait_for(from, "FAKE-AGENT claude listo");
+    let from = shell.output.len();
+    shell.send("hola");
+    assert_eq!(
+        manager.shift_enter(shell.id).unwrap(),
+        ShiftEnterTarget::Native
+    );
+    // A real Shift+Enter reaches a raw-mode console app as CR: it submits, like in Windows Terminal.
+    shell.wait_for(from, r#"SUBMIT "hola""#);
+    manager.close(shell.id).unwrap();
 }

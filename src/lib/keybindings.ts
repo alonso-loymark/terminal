@@ -2,6 +2,7 @@ import type { Terminal } from '@xterm/xterm';
 import { copyText } from './clipboard';
 
 export interface KeybindingActions {
+  shiftEnter: () => void;
   openSearch: () => void;
   zoomIn: () => void;
   zoomOut: () => void;
@@ -22,6 +23,15 @@ export function copySelection(term: Terminal): void {
  */
 export function installKeybindings(term: Terminal, actions: KeybindingActions): void {
   term.attachCustomKeyEventHandler((event) => {
+    // Shift+Enter is never sent by xterm (it would be a plain CR): the backend translates it.
+    // Swallow keypress/keyup too so no stray CR follows.
+    if (event.key === 'Enter' && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (event.type === 'keydown') {
+        event.preventDefault();
+        actions.shiftEnter();
+      }
+      return false;
+    }
     if (event.type !== 'keydown') return true;
 
     // AltGr arrives as Ctrl+Alt on Windows: never treat it as a Ctrl shortcut.

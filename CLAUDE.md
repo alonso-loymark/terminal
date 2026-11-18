@@ -43,12 +43,21 @@ Reglas de la arquitectura:
 - **Hilos por sesión** (stack chico, nombrados `pty-<id>-*`): `reader` (lee el PTY), `flusher`
   (agrupa y envía), `writer` (escribe el input sin bloquear al IPC), `waiter` (espera al hijo).
 - **Ciclo de vida / nada de zombies**:
-  - Cada shell entra en un **Job Object con `KILL_ON_JOB_CLOSE`** (`pty/job.rs`): cerrar la sesión
-    mata el árbol completo (incluye nietos con consola oculta, p. ej. servidores MCP de un agente),
-    y si la app crashea el SO mata todo al cerrar el handle.
-    Consecuencia buscada pero a tener en cuenta: una app GUI lanzada desde la terminal que no se
-    "separe" del job (p. ej. `code .` sin otra instancia abierta) se cierra con la sesión. Los
-    procesos que piden `CREATE_BREAKAWAY_FROM_JOB` sí pueden escapar.
+  - Cada shell entra en un **Job Object** (`pty/job.rs`) que registra todo su árbol, incluidos
+    nietos con consola oculta (servidores MCP, dev servers). Al cerrar una sesión de forma ordenada
+    el **cierre es selectivo** (`pty/teardown.rs`):
+    - **mueren** la shell y todo lo de consola (node, dev servers, agentes) y los procesos GUI
+      *sin* ventana visible (browsers headless);
+    - **sobreviven** los procesos dueños de una ventana visible y sus descendientes (`code .`,
+      `notepad`, `charmap`…): se desarma `KILL_ON_JOB_CLOSE` antes de cerrar el handle;
+    - cada kill verifica `IsProcessInJob` para no matar un proceso ajeno que reusó el PID.
+  - Si la app **crashea**, `KILL_ON_JOB_CLOSE` sigue armado y el SO mata el árbol completo,
+    incluidas las apps con ventana. Decisión deliberada: cero zombies antes que conservar ventanas.
+  - Límites conocidos: una app que todavía no mostró su ventana (o vive solo en la bandeja) cuenta
+    como proceso de fondo; las ventanas de consola nuevas (`start cmd`) son consola y mueren.
+    Los procesos que piden `CREATE_BREAKAWAY_FROM_JOB` pueden salir del job (`BREAKAWAY_OK`).
+  - Descartado: breakaway del job (los lanzadores no lo piden; `SILENT_BREAKAWAY_OK` vuelve a dejar
+    zombies) y "subsistema GUI" (un proceso no sale de un job y GUI ≠ tener ventana).
   - Cuando el hijo termina solo, el waiter guarda el código de salida y desmonta la sesión. Esto
     cierra el pseudoconsole: **ConPTY no da EOF al reader mientras el HPCON siga abierto**.
   - El flusher manda `onExit` recién después del EOF, así el mensaje de salida nunca se adelanta
@@ -57,9 +66,25 @@ Reglas de la arquitectura:
     recargar la página (`on_page_load` Started) o salir de la app (`RunEvent::Exit`) cierra las
     sesiones de ese dueño.
 - **Ids de sesión**: `u32` incremental asignado por `PtyManager` (único dentro del proceso).
-- **Comandos Tauri**: `create_session`, `write_to_session`, `resize_session`, `close_session` y
-  `pty_backend` (devuelve `{ backend: "conpty", buildNumber }` para la opción `windowsPty` de
-  xterm, que con build ≥ 21376 activa el reflow compatible con ConPTY).
+- **Comandos Tauri**: `create_session`, `write_to_session`, `resize_session`, `close_session`,
+  `send_shift_enter` (ver abajo) y `pty_backend` (devuelve `{ backend: "conpty", buildNumber }`
+  para la opción `windowsPty` de xterm, que con build ≥ 21376 activa el reflow compatible con ConPTY).
+- **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
+  Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
+  salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
+  win32-input-mode. Ninguna secuencia única sirve para todo (verificado a través de ConPTY):
+
+  | Programa | Detección | Se envía | Resultado |
+  |---|---|---|---|
+  | Claude Code | `claude.exe` o node/bun con `@anthropic-ai/claude-code` | `ESC CR` | salto de línea |
+  | Gemini CLI | `gemini.exe` o node/bun con `@google/gemini-cli` | `\` CR LF | salto de línea |
+  | PowerShell y el resto | — | Shift+Enter nativo | PSReadLine: AddLine (`>>`); vim/nano: como en Windows Terminal |
+
+  `ESC CR` en PSReadLine no hace nada y el Shift+Enter nativo le llega a un TUI de Node como CR
+  (enviaría el prompt): por eso la decisión es por contexto. Codex no está en la tabla: usa
+  crossterm, que lee eventos de teclado nativos, así que recibe el Shift+Enter nativo como en
+  Windows Terminal (no verificado: no hay codex instalado y no se prueban agentes reales). El
+  comando es síncrono, como `write_to_session`, para que las teclas no se reordenen.
 - Antes de lanzar cada shell se limpia el flag heredable "ignorar Ctrl+C" del proceso
   (`SetConsoleCtrlHandler(NULL, FALSE)`, ver Gotchas).
 
@@ -84,7 +109,10 @@ src-tauri/
   src/commands.rs           Comandos Tauri finos: validan y delegan en PtyManager
   src/pty/manager.rs        Registro de sesiones (create/write/resize/close/close_owned_by/shutdown)
   src/pty/session.rs        ConPTY + hilos reader/flusher/writer/waiter + batching
-  src/pty/job.rs            Job Object KILL_ON_JOB_CLOSE (solo Windows)
+  src/pty/job.rs            Job Object: miembros, KILL_ON_JOB_CLOSE, kill verificado (solo Windows)
+  src/pty/teardown.rs       Cierre selectivo: consola muere, apps con ventana sobreviven
+  src/pty/agents.rs         Shift+Enter por contexto: detección de agentes de IA y secuencias
+  src/pty/procs.rs          Tabla de procesos (Toolhelp), dueños de ventanas, command lines (Windows)
   src/pty/shell.rs          pwsh → powershell.exe, cwd inicial = %USERPROFILE%
   src/pty/platform.rs       Build de Windows (RtlGetVersion) para `pty_backend`
   tests/pty.rs              Tests de integración con procesos reales (PowerShell/ConPTY)
@@ -108,7 +136,9 @@ npm run e2e -- agent,close              # solo algunas etapas
 ```
 
 `npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
-app y usa el portapapeles (lo restaura al terminar). Capturas en `e2e/artifacts/`.
+app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa el portapapeles
+(lo restaura al terminar). `cargo test` también abre `charmap` brevemente. Capturas en
+`e2e/artifacts/`.
 
 ## Pruebas con agentes de IA (regla obligatoria)
 
@@ -167,7 +197,9 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 - [ ] Redimensionar la ventana: `[Console]::WindowWidth` coincide con las columnas visibles.
 - [ ] Un agente (el falso de `e2e/`) arranca, recibe input y sale con `Ctrl+C` dos veces.
   Probar a mano con un agente real queda a criterio del usuario, nunca automatizado.
-- [ ] Cerrar la ventana no deja `powershell`/`pwsh`/hijos vivos (verificar en el Administrador de tareas).
+- [ ] Cerrar la ventana no deja `powershell`/`pwsh`/hijos de consola vivos (Administrador de
+  tareas), pero una app con ventana lanzada desde la terminal (`notepad`, `code .`) sigue abierta.
+- [ ] `Shift+Enter` en PowerShell agrega una línea (`>>`) en vez de ejecutar.
 
 ## Atajos (MVP)
 
@@ -178,6 +210,7 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 | `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` | Pegar |
 | Clic derecho | Copia si hay selección; si no, pega |
 | `Ctrl+Shift+F` | Buscar (`Enter` siguiente, `Shift+Enter` anterior, `Esc` cerrar) |
+| `Shift+Enter` | Salto de línea en agentes de IA; Shift+Enter nativo en el resto (PowerShell: AddLine) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom de fuente |
 | `Ctrl+clic` en un link | Abrir en el navegador |
 
@@ -226,10 +259,18 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   - Medido en release (arranque limpio, 8 s en reposo): `terminal.exe` 6.4 MB en disco y 5.9 MB de
     memoria privada; app + WebView2 ≈ 216 MB privados, de los cuales **126 MB son el proceso GPU**
     de WebView2 (renderer 42 MB, browser 35 MB). La shell (powershell + conhost) suma ~60 MB aparte.
+- **Pre-Fase 2: completa y verificada (2026-11-18).** Repo en GitHub (`origin/main`), README,
+  `npm run e2e` en el repo, cierre selectivo de procesos (apps con ventana sobreviven), Shift+Enter
+  por contexto y regla de agentes falsos en las pruebas.
+  - `cargo test`: 17 unitarios + 12 de integración (incluye: `charmap` visible sobrevive y el
+    oculto, la shell y un `ping` en consola oculta mueren; AddLine en PowerShell; cada agente falso
+    recibe su salto de línea; un TUI que no es agente recibe Shift+Enter nativo), estables en 6 corridas.
+  - `npm run e2e`: 39/39 (suma Shift+Enter con la tecla real en PowerShell y en los agentes
+    falsos Claude y Gemini, y al cerrar la ventana: app con ventana sobrevive, GUI oculto muere).
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
 - Próximas fases (ideas): pestañas y splits, archivo de configuración (fuente, tema, shell,
   atajos), perfiles de shell, flow control con ACKs para salidas gigantes, `conpty.dll` +
-  `OpenConsole.exe` empaquetados (ConPTY más nuevo que el del sistema), `Shift+Enter` para
-  multilínea en agentes, notificaciones al terminar comandos largos.
+  `OpenConsole.exe` empaquetados (ConPTY más nuevo que el del sistema), lista de agentes y sus
+  secuencias configurable, notificaciones al terminar comandos largos.
