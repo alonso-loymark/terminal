@@ -1,0 +1,98 @@
+:root {
+  color-scheme: dark;
+  --panel: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0d1117;
+}
+
+.terminal-root {
+  position: fixed;
+  inset: 0;
+}
+
+/* The fit addon measures this element; the insets are the margin around the grid. */
+.terminal-host {
+  position: absolute;
+  inset: 6px 4px 4px 10px;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+/* xterm 6 scrolls with its own scrollable element, but the legacy viewport behind it keeps
+   xterm.css's #000 and overflow-y: scroll. The leftover pixels below the last row would show
+   it as a black strip with a native scrollbar arrow. */
+.terminal-host .xterm .xterm-viewport {
+  background-color: transparent;
+  scrollbar-width: none;
+}
+
+.search-bar {
+  position: absolute;
+  top: 8px;
+  right: 18px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
+  font: 12px system-ui, sans-serif;
+  color: var(--text);
+}
+
+.search-bar input {
+  width: 220px;
+  padding: 4px 6px;
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.search-bar input:focus {
+  border-color: var(--accent);
+}
+
+.search-summary {
+  min-width: 72px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.search-bar button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.search-bar button:hover {
+  background: var(--border);
+}
