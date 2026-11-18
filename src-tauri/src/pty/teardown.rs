@@ -12,6 +12,47 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
+
+/// A process that closing the session would kill, besides the shell itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BusyProcess {
+    pub pid: u32,
+    /// Image name, e.g. `node.exe`.
+    pub name: String,
+}
+
+/// Console hosts come and go with their clients; they are never "work" worth warning about.
+fn is_console_host(name: &str) -> bool {
+    name.eq_ignore_ascii_case("conhost.exe") || name.eq_ignore_ascii_case("openconsole.exe")
+}
+
+/// What closing the session would kill besides the shell: the reason to ask before closing a
+/// tab (a dev server, an agent...). Apps that would survive (they own a window) do not count.
+#[cfg(windows)]
+pub(crate) fn busy_processes(job: &super::job::Job, shell: Option<u32>) -> Vec<BusyProcess> {
+    use super::procs;
+
+    let members = job.process_ids();
+    if members.is_empty() {
+        return Vec::new();
+    }
+    let snapshot = procs::snapshot();
+    let parent_of = snapshot.iter().map(|p| (p.pid, p.parent)).collect();
+    let names: HashMap<u32, &str> = snapshot.iter().map(|p| (p.pid, p.exe.as_str())).collect();
+    doomed(&members, &parent_of, &procs::window_owners(), shell)
+        .into_iter()
+        .filter(|&pid| Some(pid) != shell)
+        .filter_map(|pid| {
+            let name = *names.get(&pid)?;
+            (!is_console_host(name)).then(|| BusyProcess {
+                pid,
+                name: name.to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Job members that must be killed, shell first. Pure, so it can be unit-tested.
 pub(crate) fn doomed(
     members: &[u32],

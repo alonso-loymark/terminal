@@ -1,10 +1,13 @@
 import type { IDisposable, Terminal } from '@xterm/xterm';
+import type { SessionStatus } from '../store/workspaceModel';
 import { closeSession, createSession, resizeSession, sendShiftEnter, writeToSession, type SessionId } from './pty';
 
-export type SessionStatus = 'starting' | 'running' | 'exited' | 'failed';
+export type { SessionStatus };
 
 export interface TerminalSessionCallbacks {
   onStatus?: (status: SessionStatus, exitCode: number | null) => void;
+  /** Called for every batch of output (used for the tab activity indicator). */
+  onOutput?: () => void;
 }
 
 const ignore = () => {};
@@ -38,6 +41,11 @@ export class TerminalSession {
     void this.#start();
   }
 
+  /** Backend session id while the shell is running; null before it starts or after it exits. */
+  get sessionId(): SessionId | null {
+    return this.#id;
+  }
+
   /** Shift+Enter, translated by the backend for whatever runs in the session. */
   shiftEnter(): void {
     if (this.#status !== 'running' || this.#id === null) {
@@ -66,7 +74,9 @@ export class TerminalSession {
         cols,
         rows,
         onData: (data) => {
-          if (!this.#disposed) this.#term.write(data);
+          if (this.#disposed) return;
+          this.#term.write(data);
+          this.#callbacks.onOutput?.();
         },
         onExit: ({ exitCode }) => this.#handleExit(generation, exitCode),
       });

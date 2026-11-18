@@ -148,9 +148,13 @@ const atShellPrompt = () =>
     const line = b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? '';
     return b.type === 'normal' && /^PS [A-Za-z]:\\.*>\s*$/.test(line);
   });
+/** The active terminal owns the keyboard (the app focuses it one frame after a tab switch). */
+const terminalFocused = () =>
+  page.evaluate(() => !!window.__terminal && document.activeElement === window.__terminal.textarea);
 /** Types a command at the shell prompt. Refuses to type anywhere else (e.g. into a TUI). */
 async function run(cmd, { waitPrompt = true } = {}) {
   if (!(await waitUntil(atShellPrompt, 5000))) throw new Error(`sin prompt de PowerShell; no se tipea: ${cmd}`);
+  if (!(await waitUntil(terminalFocused, 3000))) throw new Error(`la terminal activa no tiene el foco; no se tipea: ${cmd}`);
   const before = prompts(await text());
   await page.keyboard.type(cmd);
   await page.keyboard.press('Enter');
@@ -170,6 +174,68 @@ async function exitToPrompt(tries = 4) {
   }
   return waitUntil(atShellPrompt, 5000);
 }
+// ---------------------------------------------------------------- tab helpers
+const wsState = () =>
+  page.evaluate(() => {
+    const s = window.__workspace.getState();
+    return { order: s.tabOrder, active: s.activeTabId, tabs: s.tabs, groups: s.groups, panes: s.panes };
+  });
+const tabSel = (id) => `[data-tab-id="${id}"]`;
+const tabLabel = (id) => page.locator(`${tabSel(id)} .tab-title`).textContent({ timeout: 3000 });
+const tabAttr = (id, name) => page.locator(tabSel(id)).getAttribute(name, { timeout: 3000 });
+/** New tab via Ctrl+T, waiting for its shell prompt. Returns its id. */
+async function openTab() {
+  const before = (await wsState()).order.length;
+  await page.keyboard.press('Control+t');
+  await waitUntil(async () => (await wsState()).order.length === before + 1, 5000);
+  await waitUntil(atShellPrompt, 20000);
+  return (await wsState()).active;
+}
+/** Drags with the real pointer (past dnd-kit's 6 px activation distance) and drops on `to`. */
+async function drag(fromSelector, toSelector) {
+  const a = await page.locator(fromSelector).boundingBox();
+  const b = await page.locator(toSelector).boundingBox();
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(a.x + a.width / 2 + 12, a.y + a.height / 2, { steps: 4 });
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 14 });
+  await sleep(150);
+  await page.mouse.up();
+  await sleep(350);
+}
+/**
+ * After a failed stage the terminal may be left anywhere (a half-typed line, vim, an agent).
+ * Instead of sending keys to an unknown program, start over in a fresh tab and close the rest,
+ * which also kills whatever the failed stage left running.
+ */
+async function isolateAfterFailure() {
+  await page.evaluate(() => {
+    const ui = window.__ui.getState();
+    ui.closeMenu();
+    ui.closeConfirm();
+    ui.closeSearch();
+    ui.stopRename();
+    const s = window.__workspace.getState();
+    const fresh = s.newTab();
+    s.closeTabs(s.tabOrder.filter((id) => id !== fresh));
+  });
+  await waitUntil(atShellPrompt, 20000);
+}
+/** Leaves only the active tab, closing the rest without confirmation dialogs. */
+async function closeOtherTabsNow() {
+  await page.evaluate(() => {
+    const s = window.__workspace.getState();
+    s.closeTabs(s.tabOrder.filter((id) => id !== s.activeTabId));
+  });
+  await sleep(300);
+}
+const groupMembers = (st, groupId) => st.order.filter((id) => st.tabs[id].groupId === groupId);
+const contiguous = (st) =>
+  Object.keys(st.groups).every((g) => {
+    const at = st.order.map((id, i) => (st.tabs[id].groupId === g ? i : -1)).filter((i) => i >= 0);
+    return at.length > 0 && at.at(-1) - at[0] + 1 === at.length;
+  });
+
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
 function agentExe(name) {
   const dir = path.join(WORK, 'agents');
@@ -284,7 +350,7 @@ const stages = {
     await pasteWith('Ctrl+V pega lo copiado', () => page.keyboard.press('Control+v'));
     await pasteWith('Shift+Insert pega', () => page.keyboard.press('Shift+Insert'));
     await pasteWith('clic derecho sin selección pega', async () => {
-      const box = await page.locator('.terminal-host').boundingBox();
+      const box = await page.locator('.terminal-pane:not([hidden])').boundingBox();
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: 'right' });
     });
   },
@@ -443,6 +509,242 @@ const stages = {
     }
   },
 
+  async tabs() {
+    await closeOtherTabsNow();
+    const first = (await wsState()).active;
+    await run("'marca-' + 'tab1'");
+    await page.evaluate(() => (window.__terminal.__e2eMark = 'tab1'));
+
+    const second = await openTab();
+    check('Ctrl+T abre una tab nueva y la activa', second !== first && (await wsState()).order.at(-1) === second);
+    await page.click('.tab-new');
+    await waitUntil(async () => (await wsState()).order.length === 3, 5000);
+    await waitUntil(atShellPrompt, 20000);
+    const st = await wsState();
+    const third = st.active;
+    check('el botón + abre otra tab', st.order.length === 3 && third !== second);
+
+    const dom = await page.evaluate(() => ({
+      panes: document.querySelectorAll('.terminal-pane').length,
+      hidden: document.querySelectorAll('.terminal-pane[hidden]').length,
+      xterms: document.querySelectorAll('.terminal-pane .xterm').length,
+    }));
+    check('todas las terminales siguen montadas; las inactivas, ocultas', dom.panes === 3 && dom.xterms === 3 && dom.hidden === 2, JSON.stringify(dom));
+
+    const activeAfter = async (key) => {
+      await page.keyboard.press(key);
+      await sleep(150);
+      return (await wsState()).active;
+    };
+    check('Ctrl+1 salta a la primera tab', (await activeAfter('Control+1')) === first);
+    check('Ctrl+Tab va a la siguiente', (await activeAfter('Control+Tab')) === second);
+    check('Ctrl+Shift+Tab vuelve a la anterior', (await activeAfter('Control+Shift+Tab')) === first);
+    check('Ctrl+Shift+Tab da la vuelta al final', (await activeAfter('Control+Shift+Tab')) === third);
+    check('Ctrl+9 va a la última', (await activeAfter('Control+9')) === third);
+
+    // Same xterm instance and buffer after switching away and back.
+    await activeAfter('Control+1');
+    const kept = await page.evaluate(() => window.__terminal.__e2eMark);
+    check('volver a la tab conserva la instancia y el scrollback', kept === 'tab1' && (await text()).includes('marca-tab1'));
+
+    // A hidden tab is refit when shown again.
+    await activeAfter('Control+9');
+    const big = await termInfo();
+    win('resize', appPid, 900, 560);
+    await sleep(700);
+    await activeAfter('Control+1');
+    await sleep(500);
+    const shown = await termInfo();
+    const pty = await ptySize();
+    check('al mostrarse hace fit() y redimensiona el PTY', shown.cols < big.cols && pty === `${shown.cols}x${shown.rows}`, `${big.cols}x${big.rows} -> ${shown.cols}x${shown.rows}, pty ${pty}`);
+    win('resize', appPid, 1100, 700);
+    await sleep(700);
+
+    // Rename by double click; process titles (OSC 0/2) no longer change it.
+    await page.dblclick(tabSel(first));
+    await page.fill(`${tabSel(first)} .rename-input`, 'Mi tab');
+    await page.keyboard.press('Enter');
+    check('doble clic + Enter renombra', (await tabLabel(first)) === 'Mi tab');
+    await waitUntil(atShellPrompt);
+    await run("$Host.UI.RawUI.WindowTitle = 'titulo-' + 'proceso'");
+    await sleep(300);
+    check('un título del proceso no pisa el nombre puesto a mano', (await tabLabel(first)) === 'Mi tab');
+
+    await activeAfter('Control+2');
+    await run("$Host.UI.RawUI.WindowTitle = 'otro-' + 'titulo'");
+    await waitUntil(async () => (await tabLabel(second)) === 'otro-titulo', 3000);
+    check('sin renombrar, la tab sigue el título OSC del proceso', (await tabLabel(second)) === 'otro-titulo');
+    await page.keyboard.press('F2');
+    await page.keyboard.type('descartado');
+    await page.keyboard.press('Escape');
+    check('F2 + Escape cancela', (await tabLabel(second)) === 'otro-titulo');
+
+    await activeAfter('Control+1');
+    await page.keyboard.press('F2');
+    await page.fill(`${tabSel(first)} .rename-input`, '');
+    await page.keyboard.press('Enter');
+    check('renombrar a vacío vuelve al título del proceso', (await tabLabel(first)) === 'titulo-proceso');
+
+    // Activity: output in a tab that is not visible.
+    await run("Start-Sleep -Milliseconds 1500; 'salida-' + 'tardia'", { waitPrompt: false });
+    await activeAfter('Control+2');
+    const marked = await waitUntil(async () => (await tabAttr(first, 'data-indicator')) === 'activity', 6000);
+    check('salida en una tab oculta muestra el punto de actividad', marked);
+    await activeAfter('Control+1');
+    check('mostrar la tab limpia el indicador', (await tabAttr(first, 'data-indicator')) === null);
+    await waitUntil(atShellPrompt);
+
+    // Exited process: a distinct indicator (red ring for a non-zero code).
+    await activeAfter('Control+9');
+    await run('exit 5', { waitPrompt: false });
+    const exited = await waitUntil(async () => (await tabAttr(third, 'data-indicator')) === 'exited-error', 8000);
+    check('proceso terminado con error: indicador distinto', exited);
+    await page.keyboard.press('Enter'); // restart the shell in that tab
+    await waitUntil(atShellPrompt, 20000);
+    await shot('07-tabs');
+    await closeOtherTabsNow();
+  },
+
+  async tabmenu() {
+    await closeOtherTabsNow();
+    const a = (await wsState()).active;
+    const b = await openTab();
+    const c = await openTab();
+
+    await drag(tabSel(a), tabSel(c));
+    const reordered = (await wsState()).order;
+    check('arrastrar reordena las tabs', JSON.stringify(reordered) === JSON.stringify([b, c, a]), reordered.join(','));
+
+    await page.click(tabSel(b), { button: 'right' });
+    await page.waitForSelector('[role="menu"]');
+    const items = await page.$$eval('[role="menu"] [data-action]', (els) => els.map((e) => e.dataset.action));
+    check('menú contextual con las acciones pedidas', ['rename', 'duplicate', 'new-group', 'close', 'close-others'].every((x) => items.includes(x)) && (await page.$$('[role="menu"] .swatch')).length > 0, items.join(','));
+    await page.click('[role="menu"] .swatch[data-color="green"]');
+    check('cambiar color', (await tabAttr(b, 'data-color')) === 'green');
+
+    await page.click(tabSel(b), { button: 'right' });
+    await page.click('[role="menu"] [data-action="duplicate"]');
+    await waitUntil(atShellPrompt, 20000);
+    const st = await wsState();
+    const dup = st.active;
+    check('duplicar: tab nueva al lado, mismo color', st.order.indexOf(dup) === st.order.indexOf(b) + 1 && st.tabs[dup].color === 'green');
+
+    // Closing a tab with a running program asks first.
+    const ping = Number(await value("(Start-Process ping -ArgumentList '-n','300','127.0.0.1' -WindowStyle Hidden -PassThru).Id", 'ping'));
+    await page.keyboard.press('Control+w');
+    const dialog = await page.waitForSelector('[role="alertdialog"]', { timeout: 5000 }).catch(() => null);
+    const detail = dialog ? await dialog.textContent() : '';
+    check('Ctrl+W con un proceso corriendo pide confirmación', !!dialog && /ping\.exe/i.test(detail), detail.slice(0, 120));
+    await shot('08-confirm');
+    await page.keyboard.press('Escape');
+    await sleep(300);
+    check('cancelar deja la tab y el proceso', (await wsState()).tabs[dup] !== undefined && alive(ping));
+    await page.keyboard.press('Control+w');
+    await page.click('[role="alertdialog"] [data-action="confirm"]');
+    await waitUntil(async () => !alive(ping), 5000);
+    check('confirmar cierra la tab y mata el proceso', (await wsState()).tabs[dup] === undefined && !alive(ping));
+
+    // An idle shell closes without asking (close button).
+    await page.hover(tabSel(c));
+    await page.click(`${tabSel(c)} .tab-close`);
+    await sleep(500);
+    check('tab ociosa se cierra sin preguntar', !(await page.$('[role="alertdialog"]')) && (await wsState()).tabs[c] === undefined);
+
+    // Windowed apps survive closing their tab (selective teardown) and do not trigger the dialog.
+    if (fs.existsSync('C:\\Windows\\System32\\charmap.exe')) {
+      await page.click(tabSel(a));
+      await waitUntil(atShellPrompt);
+      const app = Number(
+        await value(
+          '$( $v = Start-Process charmap -PassThru; $n = 0; while ((Get-Process -Id $v.Id).MainWindowHandle -eq 0 -and $n -lt 100) { Start-Sleep -Milliseconds 100; $n++ }; $v.Id )',
+          'app',
+        ),
+      );
+      const shell = await shellPid();
+      await page.keyboard.press('Control+w');
+      await sleep(1000);
+      const asked = !!(await page.$('[role="alertdialog"]'));
+      check('cerrar tab: sin diálogo si solo hay una app con ventana', !asked && (await wsState()).tabs[a] === undefined);
+      const charmaps = powershell("(Get-Process charmap -ErrorAction SilentlyContinue).Id -join ','");
+      check('cerrar tab: la shell muere y la app con ventana sobrevive', !alive(shell) && alive(app), `shell viva=${alive(shell)} app=${app} viva=${alive(app)} charmaps vivos=[${charmaps}]`);
+      if (alive(app)) process.kill(app);
+    } else skip('apps con ventana', 'no está charmap.exe');
+
+    await openTab();
+    await page.click(tabSel((await wsState()).order[0]), { button: 'right' });
+    await page.click('[role="menu"] [data-action="close-others"]');
+    await sleep(600);
+    check('cerrar las demás', (await wsState()).order.length === 1);
+  },
+
+  async groups() {
+    await closeOtherTabsNow();
+    const a = (await wsState()).active;
+    const b = await openTab();
+    const c = await openTab();
+    const d = await openTab();
+
+    await page.keyboard.press('Control+Shift+G');
+    await page.waitForSelector('.group-chip .rename-input');
+    await page.fill('.group-chip .rename-input', 'Backend');
+    await page.keyboard.press('Enter');
+    let st = await wsState();
+    const g = st.tabs[d].groupId;
+    check('Ctrl+Shift+G crea un grupo con la tab actual', !!g && (await page.textContent(`[data-group-chip="${g}"]`)).includes('Backend'));
+    await shot('09-group');
+
+    await page.click(tabSel(b), { button: 'right' });
+    await page.click(`[role="menu"] [data-action="move-to-group"][data-group-id="${g}"]`);
+    st = await wsState();
+    check('menú: mover a grupo', JSON.stringify(groupMembers(st, g)) === JSON.stringify([d, b]) && contiguous(st), st.order.join(','));
+
+    await drag(tabSel(a), `[data-group-chip="${g}"]`);
+    st = await wsState();
+    check('arrastrar sobre el chip mete la tab en el grupo', st.tabs[a].groupId === g && contiguous(st), st.order.join(','));
+
+    // Out: drop a member over the first tab of the strip, which is not grouped (c).
+    const member = groupMembers(st, g).at(-1);
+    await drag(tabSel(member), tabSel(st.order[0]));
+    st = await wsState();
+    check('arrastrar fuera del grupo la saca', st.tabs[member].groupId === null && contiguous(st), st.order.join(','));
+
+    // In: coming from the left, dropping over the first member lands between the two members.
+    const [m1, m2] = groupMembers(st, g);
+    await drag(tabSel(member), tabSel(m1));
+    st = await wsState();
+    const at = st.order.indexOf(member);
+    check(
+      'arrastrar entre dos tabs del grupo la mete',
+      st.tabs[member].groupId === g && contiguous(st) && st.order.indexOf(m1) < at && at < st.order.indexOf(m2),
+      st.order.join(','),
+    );
+
+    // Collapse / expand with the chip.
+    await page.click(tabSel(c));
+    await page.click(`[data-group-chip="${g}"]`);
+    await sleep(300);
+    st = await wsState();
+    const hiddenTabs = await page.$$eval('[data-tab-id]', (els) => els.map((e) => e.dataset.tabId));
+    check(
+      'colapsar oculta las tabs del grupo y muestra la cantidad',
+      st.groups[g].collapsed && groupMembers(st, g).every((id) => !hiddenTabs.includes(id)) &&
+        (await page.textContent(`[data-group-chip="${g}"] .group-count`)) === String(groupMembers(st, g).length),
+    );
+    await page.keyboard.press(`Control+${st.order.indexOf(groupMembers(st, g)[0]) + 1}`);
+    await sleep(300);
+    st = await wsState();
+    check('saltar a una tab de un grupo colapsado lo expande', !st.groups[g].collapsed && st.tabs[st.active].groupId === g);
+
+    await page.click(`[data-group-chip="${g}"]`, { button: 'right' });
+    await page.click('[role="menu"] .swatch[data-color="red"]');
+    check('cambiar color del grupo', (await page.getAttribute(`[data-group-chip="${g}"]`, 'data-color')) === 'red');
+    await page.click(`[data-group-chip="${g}"]`, { button: 'right' });
+    await page.click('[role="menu"] [data-action="ungroup"]');
+    st = await wsState();
+    check('desagrupar', !st.groups[g] && !(await page.$(`[data-group-chip="${g}"]`)));
+    await closeOtherTabsNow();
+  },
+
   async reload() {
     const pid = await shellPid();
     await page.reload();
@@ -520,6 +822,7 @@ try {
     } catch (error) {
       check(`etapa ${name}`, false, String(error.message ?? error).slice(0, 1500));
       await shot(`fail-${name}`).catch(() => {});
+      await isolateAfterFailure().catch(() => {});
     }
   }
 } finally {

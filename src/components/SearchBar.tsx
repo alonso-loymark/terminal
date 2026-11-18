@@ -1,6 +1,8 @@
-import type { ISearchDecorationOptions, ISearchOptions, SearchAddon } from '@xterm/addon-search';
-import { useEffect, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
-import { useTerminalStore } from '../store/terminal';
+import type { ISearchDecorationOptions, ISearchOptions } from '@xterm/addon-search';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { getPane } from '../lib/terminalRegistry';
+import { useUi } from '../store/ui';
+import type { PaneId } from '../store/workspaceModel';
 
 const decorations: ISearchDecorationOptions = {
   matchBackground: '#3a3f4b',
@@ -10,7 +12,8 @@ const decorations: ISearchDecorationOptions = {
 };
 
 interface SearchBarProps {
-  search: RefObject<SearchAddon | null>;
+  /** Pane to search in (the active one); the bar is remounted when it changes. */
+  paneId: PaneId;
   onClose: () => void;
 }
 
@@ -19,11 +22,11 @@ interface Results {
   count: number;
 }
 
-export function SearchBar({ search, onClose }: SearchBarProps) {
+export function SearchBar({ paneId, onClose }: SearchBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Results | null>(null);
-  const searchRequest = useTerminalStore((s) => s.searchRequest);
+  const searchRequest = useUi((s) => s.searchRequest);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -31,7 +34,7 @@ export function SearchBar({ search, onClose }: SearchBarProps) {
   }, [searchRequest]);
 
   useEffect(() => {
-    const addon = search.current;
+    const addon = getPane(paneId)?.search;
     const subscription = addon?.onDidChangeResults(({ resultIndex, resultCount }) =>
       setResults({ index: resultIndex, count: resultCount }),
     );
@@ -39,10 +42,10 @@ export function SearchBar({ search, onClose }: SearchBarProps) {
       subscription?.dispose();
       addon?.clearDecorations();
     };
-  }, [search]);
+  }, [paneId]);
 
   const find = (term: string, direction: 'next' | 'previous', incremental = false) => {
-    const addon = search.current;
+    const addon = getPane(paneId)?.search;
     if (!addon) return;
     if (!term) {
       addon.clearDecorations();

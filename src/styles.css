@@ -1,10 +1,14 @@
 :root {
   color-scheme: dark;
+  --bg: #0d1117;
+  --chrome: #010409;
   --panel: #161b22;
   --border: #30363d;
   --text: #c9d1d9;
   --muted: #8b949e;
   --accent: #58a6ff;
+  --danger: #f85149;
+  --ui-font: 12px system-ui, 'Segoe UI', sans-serif;
 }
 
 * {
@@ -17,31 +21,247 @@ body,
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: #0d1117;
+  background: var(--bg);
 }
 
-.terminal-root {
+.app {
   position: fixed;
   inset: 0;
+  display: flex;
+  flex-direction: column;
 }
 
-/* The fit addon measures this element; the insets are the margin around the grid. */
-.terminal-host {
+/* ------------------------------------------------------------------ tab bar */
+
+.tab-bar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  padding: 4px 4px 0;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--border);
+  font: var(--ui-font);
+  color: var(--muted);
+  user-select: none;
+}
+
+.tab-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 180px;
+  min-width: 72px;
+  padding: 0 6px 0 12px;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+  cursor: default;
+  outline: none;
+}
+
+.tab:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.tab[data-active] {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.tab[data-dragging] {
+  z-index: 1;
+  opacity: 0.85;
+}
+
+/* Tab color: a stripe on top. Group color: a line under the tab. */
+.tab::before,
+.tab::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 2px;
+}
+
+.tab::before {
+  top: 0;
+  background: var(--tab-color);
+}
+
+.tab::after {
+  bottom: 0;
+  background: var(--group-color);
+}
+
+.tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Activity: filled dot. Exited: hollow ring (red if the exit code was not 0). */
+.tab-indicator {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.tab[data-indicator='activity'] .tab-indicator {
+  background: var(--accent);
+}
+
+.tab[data-indicator='exited'] .tab-indicator {
+  border: 1.5px solid var(--muted);
+}
+
+.tab[data-indicator='exited-error'] .tab-indicator {
+  border: 1.5px solid var(--danger);
+}
+
+.tab[data-indicator^='exited'] .tab-title {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.tab-close {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: 14px/1 system-ui, sans-serif;
+  visibility: hidden;
+  cursor: pointer;
+}
+
+.tab:hover .tab-close,
+.tab[data-active] .tab-close {
+  visibility: visible;
+}
+
+.tab-close:hover {
+  background: var(--border);
+}
+
+.tab-new {
+  flex: none;
+  width: 28px;
+  margin: 2px 0 4px 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 18px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.tab-new:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.group-chip {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 160px;
+  margin: 4px 2px 6px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--group-color);
+  color: var(--chrome);
+  font-weight: 600;
+  cursor: pointer;
+  outline: 2px solid transparent;
+  outline-offset: 1px;
+}
+
+.group-chip[data-drop-target] {
+  outline-color: var(--text);
+}
+
+.group-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.group-name:empty::before {
+  content: '\00a0';
+}
+
+.group-count {
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgb(0 0 0 / 25%);
+  font-size: 11px;
+}
+
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-weight: normal;
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ terminals */
+
+.workspace {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* The fit addon measures this element; the insets are the margin around the grid. Inactive
+   panes stay mounted with display: none (xterm pauses rendering, keeps scrollback). */
+.terminal-pane {
   position: absolute;
   inset: 6px 4px 4px 10px;
 }
 
-.terminal-host .xterm {
+.terminal-pane[hidden] {
+  display: none;
+}
+
+.terminal-pane .xterm {
   height: 100%;
 }
 
 /* xterm 6 scrolls with its own scrollable element, but the legacy viewport behind it keeps
    xterm.css's #000 and overflow-y: scroll. The leftover pixels below the last row would show
    it as a black strip with a native scrollbar arrow. */
-.terminal-host .xterm .xterm-viewport {
+.terminal-pane .xterm .xterm-viewport {
   background-color: transparent;
   scrollbar-width: none;
 }
+
+/* ------------------------------------------------------------------ search */
 
 .search-bar {
   position: absolute;
@@ -56,14 +276,14 @@ body,
   border: 1px solid var(--border);
   border-radius: 6px;
   box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
-  font: 12px system-ui, sans-serif;
+  font: var(--ui-font);
   color: var(--text);
 }
 
 .search-bar input {
   width: 220px;
   padding: 4px 6px;
-  background: #0d1117;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text);
@@ -95,4 +315,171 @@ body,
 
 .search-bar button:hover {
   background: var(--border);
+}
+
+/* ------------------------------------------------------------------ menus */
+
+.menu-backdrop,
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+}
+
+.menu {
+  position: fixed;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
+  font: var(--ui-font);
+  color: var(--text);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  outline: none;
+}
+
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible {
+  background: var(--border);
+}
+
+.menu-item:disabled {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.menu-item-label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+}
+
+.menu-item kbd {
+  color: var(--muted);
+  font: inherit;
+}
+
+.menu-label {
+  padding: 6px 8px 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
+.menu-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.menu-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px 6px;
+}
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  outline: none;
+}
+
+.swatch[data-color='none'] {
+  background: linear-gradient(135deg, transparent 45%, var(--danger) 45% 55%, transparent 55%), var(--bg);
+  border-color: var(--border);
+}
+
+.swatch[aria-checked='true'],
+.swatch:focus-visible {
+  border-color: var(--text);
+}
+
+/* ------------------------------------------------------------------ dialog */
+
+.dialog-backdrop {
+  display: grid;
+  place-items: center;
+  background: rgb(1 4 9 / 60%);
+}
+
+.dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 16px 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 60%);
+  font: 13px system-ui, 'Segoe UI', sans-serif;
+  color: var(--text);
+}
+
+.dialog h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.dialog p {
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.dialog-details {
+  margin: 0 0 14px;
+  padding-left: 18px;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog-actions button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dialog-actions button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.dialog-actions .danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
 }

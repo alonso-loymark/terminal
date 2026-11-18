@@ -55,6 +55,17 @@ export function sendShiftEnter(sessionId: SessionId): Promise<ShiftEnterTarget> 
   return invoke('send_shift_enter', { sessionId });
 }
 
+/** A process that closing the session would kill besides the shell. */
+export interface BusyProcess {
+  pid: number;
+  name: string;
+}
+
+/** What closing the session would kill (dev servers, agents...). Windowed apps are not listed. */
+export function sessionBusy(sessionId: SessionId): Promise<BusyProcess[]> {
+  return invoke('session_busy', { sessionId });
+}
+
 export function closeSession(sessionId: SessionId): Promise<void> {
   return invoke('close_session', { sessionId });
 }

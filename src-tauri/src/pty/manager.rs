@@ -8,6 +8,7 @@ use std::thread;
 use super::agents::{self, ShiftEnterTarget};
 use super::error::PtyError;
 use super::session::{Session, SessionEvents, SpawnOptions};
+use super::teardown::BusyProcess;
 
 /// Unique (per app run) session identifier, assigned by [`PtyManager`].
 pub type SessionId = u32;
@@ -81,6 +82,12 @@ impl PtyManager {
         let (target, bytes) = agents::shift_enter_for(shell);
         self.write(id, bytes.to_vec())?;
         Ok(target)
+    }
+
+    /// What closing the session would kill besides the shell (a dev server, an agent...).
+    /// Apps with a visible window are not listed: they survive the close.
+    pub fn busy_processes(&self, id: SessionId) -> Result<Vec<BusyProcess>, PtyError> {
+        self.with_session(id, |session| Ok(session.busy_processes()))
     }
 
     /// Process id of the session's shell.

@@ -131,6 +131,15 @@ impl Session {
             .map_err(|e| PtyError::Resize(format!("{e:#}")))
     }
 
+    /// Processes that closing this session would kill besides the shell.
+    pub(crate) fn busy_processes(&self) -> Vec<super::teardown::BusyProcess> {
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            return super::teardown::busy_processes(job, self.pid);
+        }
+        Vec::new()
+    }
+
     /// Kills the shell and, on Windows, every console process it started; apps with a visible
     /// window survive (see `teardown.rs`). Idempotent.
     pub(crate) fn kill(&mut self) {

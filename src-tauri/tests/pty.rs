@@ -507,3 +507,53 @@ fn shift_enter_is_native_for_programs_that_are_not_agents() {
     shell.wait_for(from, r#"SUBMIT "hola""#);
     manager.close(shell.id).unwrap();
 }
+
+#[test]
+fn busy_lists_what_closing_would_kill_but_not_windowed_apps() {
+    let manager = PtyManager::new();
+    let mut shell = Shell::spawn(&manager, "test");
+    assert!(
+        manager.busy_processes(shell.id).unwrap().is_empty(),
+        "an idle shell is not busy"
+    );
+
+    let from = shell.output.len();
+    shell.send("ping -n 60 127.0.0.1\r");
+    let pinging = shell.wait_for(from, "TTL=");
+    let busy = manager.busy_processes(shell.id).unwrap();
+    assert!(
+        busy.iter().any(|p| p.name.eq_ignore_ascii_case("ping.exe")),
+        "{busy:?}"
+    );
+    assert!(
+        !busy
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case("conhost.exe")),
+        "{busy:?}"
+    );
+    shell.send("\x03");
+    shell.wait_for(pinging, "PS ");
+    assert!(
+        wait_until(Duration::from_secs(5), || manager
+            .busy_processes(shell.id)
+            .unwrap()
+            .is_empty()),
+        "still busy after ping ended"
+    );
+
+    if Path::new(CHARMAP).exists() {
+        // A windowed app survives closing the tab, so it must not trigger a confirmation.
+        let from = shell.output.len();
+        shell.send(concat!(
+            "$v = Start-Process charmap -PassThru; ",
+            "$n = 0; while ((Get-Process -Id $v.Id).MainWindowHandle -eq 0 -and $n -lt 100) { Start-Sleep -Milliseconds 100; $n++ }; ",
+            "'ids=' + $v.Id + (':do' + 'ne')\r"
+        ));
+        let end = shell.wait_for(from, ":done");
+        let app = numbers_after(&shell.output[from..end], "ids=")[0];
+        let busy = manager.busy_processes(shell.id).unwrap();
+        kill_process(app);
+        assert!(busy.is_empty(), "a windowed app counted as busy: {busy:?}");
+    }
+    manager.close(shell.id).unwrap();
+}

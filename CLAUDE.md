@@ -13,6 +13,7 @@ Warp** (binario chico, poca RAM, arranque rápido). Cada dependencia nueva tiene
 | Emulador | **@xterm/xterm** + `@xterm/addon-fit`, `@xterm/addon-webgl` (con fallback al renderer DOM), `@xterm/addon-web-links`, `@xterm/addon-search` |
 | PTY | **portable-pty** (ConPTY en Windows) |
 | Estado frontend | **zustand** |
+| Drag & drop de tabs | **@dnd-kit** (`core` 6, `sortable` 10, `utilities` 3; la API estable, no `@dnd-kit/react` 0.x) |
 
 ## Arquitectura
 
@@ -87,6 +88,38 @@ Reglas de la arquitectura:
   comando es síncrono, como `write_to_session`, para que las teclas no se reordenen.
 - Antes de lanzar cada shell se limpia el flag heredable "ignorar Ctrl+C" del proceso
   (`SetConsoleCtrlHandler(NULL, FALSE)`, ver Gotchas).
+- `session_busy` devuelve lo que cerrar una sesión **mataría** además de la shell (misma lógica que
+  el cierre selectivo: las apps con ventana no cuentan; `conhost` tampoco). Lo usa la confirmación
+  de cierre de tabs.
+
+## Tabs, grupos y panes
+
+- **Modelo** (`store/workspaceModel.ts`, puro y sin imports en runtime → se testea con
+  `node --test`): `tabs`, `tabOrder`, `groups`, `panes`, `activeTabId`. Cada **Tab** tiene un
+  `layout` (árbol de panes; hoy siempre `{ type: 'pane' }`) y `activePaneId`: la fase de paneles
+  divididos agrega nodos `split` sin tocar tabs ni grupos. Cada **Pane** guarda la metadata de su
+  sesión: título OSC, estado, código de salida, actividad.
+- **Grupos estilo Chrome**: un grupo es un tramo **contiguo** de `tabOrder` con el mismo `groupId`.
+  `normalize()` restaura la contigüidad y borra grupos vacíos después de cada cambio.
+- **Arrastre** (`moveTab`): soltar *estrictamente entre* dos tabs de un grupo la mete; en el borde
+  de su propio grupo, se queda; si es la única tab del grupo, el grupo se mueve con ella; en
+  cualquier otro lado, sale. Soltar *sobre el chip* la agrega al final del grupo (la colisión
+  prefiere el chip solo si el puntero está encima).
+- **La tab activa nunca queda oculta**: colapsar un grupo que la contiene activa la tab visible más
+  cercana afuera (si no hay, no colapsa); activar una tab de un grupo colapsado lo expande.
+  `Ctrl+Tab` salta las tabs colapsadas.
+- **Terminales siempre montadas**: `Workspace` renderiza un `TerminalPane` por pane, en orden de
+  creación (reordenar tabs nunca mueve DOM de xterm). Las inactivas usan `display: none` (xterm
+  pausa el render y conserva scrollback y modos); al mostrarse, `fit()` + foco. Las instancias
+  viven en `lib/terminalRegistry.ts`, nunca en zustand.
+- **Cerrar** (`lib/tabActions.ts`): si alguna tab tiene algo más que la shell (`session_busy`), se
+  pide confirmación (foco en *Cancelar*). Desmontar el pane cierra la sesión con el cierre
+  selectivo. Cerrar la última tab cierra la ventana.
+- **Duplicar** abre una shell nueva con el mismo nombre, color y grupo, pero en el directorio por
+  defecto: el directorio de PowerShell (`$PWD`) no es el del proceso y no se puede leer desde afuera
+  sin *shell integration* (pendiente).
+- **Actividad**: la salida de un pane cuya tab no está activa lo marca (punto); activar la tab lo
+  limpia. Proceso terminado: anillo gris (código 0) o rojo (error).
 
 ## Estructura
 
@@ -94,16 +127,26 @@ Reglas de la arquitectura:
 CLAUDE.md
 index.html, vite.config.ts, tsconfig.json, package.json
 src/                        Frontend (solo render + input)
-  main.tsx, App.tsx (título de ventana vía OSC), styles.css
-  components/               TerminalView (xterm + addons), SearchBar
+  main.tsx, App.tsx (título de ventana = tab activa), styles.css
+  components/TabBar.tsx     Barra de tabs + DndContext (TabItem, GroupChip, RenameInput)
+  components/ContextMenus.tsx  Menús de tab y de grupo (primitivas en Menu.tsx)
+  components/ConfirmDialog.tsx Confirmación al cerrar tabs con procesos
+  components/Workspace.tsx  Todos los TerminalPane montados + SearchBar de la tab activa
+  components/TerminalPane.tsx  Una instancia xterm + addons + sesión por pane
   lib/pty.ts                ÚNICO punto que llama a invoke(); wrappers tipados de los comandos
   lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (buffer de input, restart)
-  lib/keybindings.ts        Copiar/pegar, búsqueda, zoom
+  lib/terminalRegistry.ts   PaneId → { term, fit, search, session } (objetos imperativos)
+  lib/tabActions.ts         Cerrar con confirmación, cerrar ventana con la última tab, foco
+  lib/appShortcuts.ts       Atajos de tabs/grupos (listener en captura sobre window)
+  lib/keybindings.ts        Atajos de terminal: copiar/pegar, búsqueda, zoom, Shift+Enter
   lib/clipboard.ts          navigator.clipboard con fallback
   lib/renderer.ts           WebGL con fallback al renderer DOM (también ante pérdida de contexto)
+  lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui para e2e
+  store/workspaceModel.ts   Modelo puro de tabs/grupos/panes (+ workspaceModel.test.ts)
+  store/workspace.ts        zustand sobre el modelo (ids, acciones)
+  store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda (estado efímero)
   store/settings.ts         zustand: fuente, cursor, scrollback, tema, zoom
-  store/terminal.ts         zustand: título, estado de la sesión, renderer, búsqueda
-  config/theme.ts           Tema por defecto
+  config/theme.ts, colors.ts  Tema y paleta de colores de tabs/grupos
 src-tauri/
   src/lib.rs                Builder de Tauri, ciclo de vida de ventanas/página/app
   src/commands.rs           Comandos Tauri finos: validan y delegan en PtyManager
@@ -129,11 +172,17 @@ e2e/
 npm install
 npm run tauri dev                       # app en modo desarrollo (Vite + cargo run)
 npm run build                           # typecheck (tsc) + build del frontend
+npm test                                # tests unitarios del frontend (node --test, sin dependencias)
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
 npm run e2e                             # lanza `tauri dev`, corre todas las etapas y cierra la app
-npm run e2e -- agent,close              # solo algunas etapas
+npm run e2e -- tabs,groups              # solo algunas etapas
+E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en el puerto 9223
 ```
+
+Los tests unitarios de TypeScript (`*.test.ts`) corren con el type stripping nativo de Node 24:
+solo sintaxis borrable (`erasableSyntaxOnly`), imports con extensión `.ts` y quedan fuera del
+`tsconfig` de la app.
 
 `npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
 app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa el portapapeles
@@ -150,7 +199,8 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
   salir". Se ejecuta con un `node.exe` enlazado como `claude.exe` / `gemini.exe`, así la
   detección de agentes de la terminal se prueba con el mismo nombre de imagen que el real.
 - `run()` en `e2e/run.mjs` se niega a tipear si el cursor no está en un prompt de PowerShell
-  libre: un fallo nunca debe terminar mandando texto a un programa ajeno.
+  libre o si la terminal activa no tiene el foco: un fallo nunca debe terminar mandando texto a
+  un programa ajeno (ni perder teclas).
 
 ## Convenciones
 
@@ -170,9 +220,13 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
 **TypeScript / React**
 - `strict` + `noUncheckedIndexedAccess`; prohibido `any`.
 - Todo IPC pasa por `src/lib/pty.ts`. Los componentes no llaman a `invoke` directamente.
-- Las instancias de `Terminal` (xterm) y addons viven en refs, **nunca** en zustand ni en estado de
-  React (son imperativas y no serializables). zustand guarda solo estado serializable.
-- Componentes funcionales, uno por archivo, PascalCase.
+- Las instancias de `Terminal` (xterm) y addons viven en `lib/terminalRegistry.ts`, **nunca** en
+  zustand ni en estado de React (son imperativas y no serializables). zustand guarda solo estado
+  serializable: `workspace` (tabs/grupos/panes), `ui` (efímero) y `settings`.
+- Las reglas de tabs y grupos van en `store/workspaceModel.ts` como funciones puras con tests;
+  el store solo las envuelve. Devolver el mismo objeto si nada cambió (evita re-renders).
+- Componentes funcionales, uno por archivo, PascalCase. Excepción: piezas chicas y privadas de un
+  mismo widget (`Menu`/`MenuItem`, `ContextMenus` con sus dos menús).
 - Todo efecto que crea recursos (terminal, sesión, observers) los libera en el cleanup y es seguro
   ante el doble montaje de `StrictMode` en dev.
 
@@ -181,7 +235,7 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
 **Cada fase tiene que compilar y funcionar antes de empezar la siguiente.** Una fase está
 terminada solo si:
 
-1. `npm run build` pasa sin errores.
+1. `npm run build` y `npm test` pasan sin errores.
 2. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` y `cargo test` pasan.
 3. `npm run e2e` pasa completo (cubre automáticamente casi todo el smoke test de abajo).
 
@@ -200,11 +254,22 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 - [ ] Cerrar la ventana no deja `powershell`/`pwsh`/hijos de consola vivos (Administrador de
   tareas), pero una app con ventana lanzada desde la terminal (`notepad`, `code .`) sigue abierta.
 - [ ] `Shift+Enter` en PowerShell agrega una línea (`>>`) en vez de ejecutar.
+- [ ] Tabs: abrir, cambiar, renombrar, arrastrar y agrupar; al volver a una tab, el scrollback
+  sigue ahí y el tamaño es el correcto. Cerrar una tab con un dev server pide confirmación.
 
-## Atajos (MVP)
+## Atajos
 
 | Atajo | Acción |
 |---|---|
+| `Ctrl+T` / botón `+` | Nueva tab |
+| `Ctrl+W` | Cerrar tab (pide confirmación si hay procesos además de la shell) |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Tab siguiente / anterior (salta las de grupos colapsados) |
+| `Ctrl+1`…`Ctrl+8` / `Ctrl+9` | Ir a la tab N / a la última (expande su grupo si está colapsado) |
+| `F2`, doble clic en la tab | Renombrar (`Enter` guarda, `Escape` cancela, vacío vuelve al título del proceso) |
+| `Ctrl+Shift+G` | Nuevo grupo con la tab actual |
+| Clic derecho en una tab | Renombrar, color, duplicar, mover a grupo, cerrar, cerrar las demás |
+| Clic en el chip del grupo | Colapsar / expandir (clic derecho: renombrar, color, desagrupar, cerrar grupo) |
+| Clic del medio en una tab | Cerrar |
 | `Ctrl+C` | Copia si hay selección; si no, envía `^C` |
 | `Ctrl+Shift+C`, `Ctrl+Insert` | Copiar |
 | `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` | Pegar |
@@ -213,6 +278,10 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 | `Shift+Enter` | Salto de línea en agentes de IA; Shift+Enter nativo en el resto (PowerShell: AddLine) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom de fuente |
 | `Ctrl+clic` en un link | Abrir en el navegador |
+
+Los atajos de tabs se escuchan en fase de captura sobre `window`: ganan sobre xterm y el programa
+nunca los recibe. Costo aceptado: `Ctrl+T`/`Ctrl+W` dejan de llegar a readline (transponer /
+borrar palabra), `Ctrl+W` a nano (buscar) y `F2` a los TUI que lo usan.
 
 ## Gotchas conocidos
 
@@ -234,7 +303,7 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   silencio y `tauri dev` lo reporta como error. Hoy `rust-version = "1.90"` (lo que pide tauri 2.12).
 - **xterm 6**: las decoraciones del search addon requieren `allowProposedApi: true`. El
   `.xterm-viewport` legado conserva `#000` y `overflow-y: scroll` de `xterm.css`; por eso el margen
-  se da con `inset` en `.terminal-host` (no con padding en `.xterm`) y el viewport es transparente
+  se da con `inset` en `.terminal-pane` (no con padding en `.xterm`) y el viewport es transparente
   y sin scrollbar nativa (ver `styles.css`).
 - vim/nano de Git for Windows no están en el `PATH` de PowerShell: usar la ruta completa. El nano
   de MSYS2 se confunde con rutas Windows absolutas al guardar ("Save under DIFFERENT NAME?");
@@ -243,6 +312,14 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   fallar en silencio (visto 1 vez en 24 ciclos durante las pruebas). Si aparece en uso real, mover
   el portapapeles a un comando Rust con reintentos.
 - `onBinary` de xterm (reportes de mouse X10 no UTF-8) no se reenvía todavía.
+- **@dnd-kit y `aria-disabled`**: `useSortable({ disabled })` marca la tab y todo su contenido como
+  `aria-disabled` (lectores de pantalla, y Playwright no deja escribir en el input). Mientras se
+  renombra, en vez de deshabilitar, simplemente no se enganchan los `listeners`.
+- **Foco al cambiar de tab**: el pane recién mostrado recibe el foco un frame después (antes era
+  `display: none`). `focusActiveTerminal()` no lo roba si hay un renombrado, menú o diálogo abierto
+  (si no, el doble clic para renombrar cerraba el input al instante).
+- **Límite de contextos WebGL**: Chromium mantiene unos 16 contextos WebGL por página. Con más tabs,
+  los más viejos pierden el contexto y caen al renderer DOM (ya manejado en `lib/renderer.ts`).
 
 ## Estado
 
@@ -267,10 +344,24 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
     recibe su salto de línea; un TUI que no es agente recibe Shift+Enter nativo), estables en 6 corridas.
   - `npm run e2e`: 39/39 (suma Shift+Enter con la tecla real en PowerShell y en los agentes
     falsos Claude y Gemini, y al cerrar la ventana: app con ventana sobrevive, GUI oculto muere).
+- **Fase 2 — tabs y grupos: completa y verificada (2026-11-18).** Barra de tabs con atajos,
+  renombrar (doble clic/F2) con título OSC automático, reordenar con @dnd-kit, menú contextual,
+  grupos estilo Chrome (nombre, color, colapsar, arrastrar dentro/fuera), indicadores de actividad
+  y de proceso terminado, terminales siempre montadas con `fit()` al mostrarse, confirmación al
+  cerrar tabs con procesos, `.gitattributes` (LF).
+  - `npm test`: 18 tests del modelo (reglas de arrastre y grupos, contigüidad, colapsar con la tab
+    activa adentro, a qué tab se pasa al cerrar, navegación, títulos, indicadores).
+  - `cargo test`: 17 unitarios + 13 de integración (suma `session_busy`: shell ociosa → nada,
+    `ping` → listado, app con ventana → no cuenta).
+  - `npm run e2e`: etapas `tabs`, `tabmenu` y `groups` (38 checks) sobre la app real, con mouse y
+    teclado reales vía CDP: incluye que volver a una tab conserva la misma instancia xterm y su
+    scrollback, que una tab oculta se re-ajusta al mostrarse tras un resize, que cerrar una tab con
+    un proceso pide confirmación y que una app con ventana sobrevive al cerrar su tab.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
-- Próximas fases (ideas): pestañas y splits, archivo de configuración (fuente, tema, shell,
+- Próximas fases (ideas): paneles divididos dentro de cada tab, *shell integration* (cwd para
+  duplicar, límites de comandos), persistir tabs/grupos entre sesiones, archivo de configuración (fuente, tema, shell,
   atajos), perfiles de shell, flow control con ACKs para salidas gigantes, `conpty.dll` +
   `OpenConsole.exe` empaquetados (ConPTY más nuevo que el del sistema), lista de agentes y sus
   secuencias configurable, notificaciones al terminar comandos largos.

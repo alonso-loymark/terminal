@@ -1,0 +1,11 @@
+# Finales de línea normalizados: LF en el repo y en el working tree (silencia los avisos
+# "LF will be replaced by CRLF" de core.autocrlf=true). Los scripts de Windows van en CRLF.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binarios
+*.png binary
+*.ico binary
+*.icns binary

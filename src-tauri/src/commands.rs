@@ -7,8 +7,8 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{State, Webview};
 
 use crate::pty::{
-    self, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId, ShiftEnterTarget,
-    SpawnOptions,
+    self, BusyProcess, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId,
+    ShiftEnterTarget, SpawnOptions,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +106,20 @@ pub fn send_shift_enter(
     session_id: SessionId,
 ) -> Result<ShiftEnterTarget, PtyError> {
     manager.shift_enter(session_id)
+}
+
+/// Processes that closing the session would kill besides the shell, so the UI can ask before
+/// closing a tab that runs a dev server or an agent.
+#[tauri::command]
+pub async fn session_busy(
+    manager: State<'_, PtyManager>,
+    session_id: SessionId,
+) -> Result<Vec<BusyProcess>, PtyError> {
+    let manager = manager.inner().clone();
+    // Walks the process table: keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || manager.busy_processes(session_id))
+        .await
+        .map_err(|e| PtyError::Io(format!("busy check failed: {e}")))?
 }
 
 /// Lets xterm adapt to ConPTY (`windowsPty` option). `None` outside Windows.

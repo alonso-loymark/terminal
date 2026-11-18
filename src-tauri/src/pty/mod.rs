@@ -19,3 +19,4 @@ pub use manager::{PtyManager, SessionId};
 pub use platform::{PtyBackend, backend};
 pub use session::{FLUSH_INTERVAL, MAX_BATCH_BYTES, SessionEvents, SpawnOptions};
 pub use shell::{ShellCommand, default_cwd, default_shell, find_on_path};
+pub use teardown::BusyProcess;
