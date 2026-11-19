@@ -7,7 +7,7 @@
 //   OSC 133 ; A / B / C / D;<exit code>               prompt start / end, command start / end
 //   OSC 633 ; E ; <command line, VS Code escaping>    the command about to run
 //   OSC 633 ; P ; Shell=<name> | IntegrationError=<message>   loaded / failed to load
-import type { IDisposable, Terminal } from '@xterm/xterm';
+import type { IDisposable, IMarker, Terminal } from '@xterm/xterm';
 import type { ShellEvent } from '../store/workspaceModel';
 
 export type { ShellEvent };
@@ -75,8 +75,23 @@ export function parseOsc633(data: string): ShellEvent | null {
   return null;
 }
 
+export interface ShellIntegrationHandle extends IDisposable {
+  /**
+   * What is typed after the current prompt (from the 133;B mark to the end of the input), or
+   * null when unknown (no mark yet, a command is running). Lets the app refuse to type a
+   * command over something the user left half-written.
+   */
+  promptInput(): string | null;
+}
+
 /** Registers the OSC handlers on a terminal; events go to `emit`. */
-export function registerShellIntegration(term: Terminal, emit: (event: ShellEvent) => void): IDisposable {
+export function registerShellIntegration(term: Terminal, emit: (event: ShellEvent) => void): ShellIntegrationHandle {
+  // Where the input starts: the cursor when the prompt-end mark arrives.
+  let inputStart: { marker: IMarker; x: number } | null = null;
+  const clearInput = () => {
+    inputStart?.marker.dispose();
+    inputStart = null;
+  };
   const handle = (parse: (data: string) => ShellEvent | null) => (data: string) => {
     const event = parse(data);
     if (event) emit(event);
@@ -87,8 +102,33 @@ export function registerShellIntegration(term: Terminal, emit: (event: ShellEven
       const cwd = cwdFromFileUri(data);
       return cwd ? { type: 'cwd', cwd } : null;
     })),
-    term.parser.registerOscHandler(133, handle(parseOsc133)),
+    term.parser.registerOscHandler(133, (data) => {
+      if (data === 'B') {
+        clearInput();
+        const marker = term.registerMarker(0);
+        if (marker) inputStart = { marker, x: term.buffer.active.cursorX };
+      } else if (data === 'C' || data.startsWith('D')) {
+        clearInput();
+      }
+      return handle(parseOsc133)(data);
+    }),
     term.parser.registerOscHandler(633, handle(parseOsc633)),
   ];
-  return { dispose: () => disposables.forEach((d) => d.dispose()) };
+  return {
+    promptInput() {
+      const buffer = term.buffer.active;
+      if (!inputStart || inputStart.marker.isDisposed || inputStart.marker.line < 0 || buffer.type !== 'normal') return null;
+      const lastLine = buffer.baseY + buffer.cursorY;
+      let text = '';
+      for (let y = inputStart.marker.line; y <= lastLine; y++) {
+        const line = buffer.getLine(y)?.translateToString(true) ?? '';
+        text += y === inputStart.marker.line ? line.slice(inputStart.x) : line;
+      }
+      return text;
+    },
+    dispose() {
+      clearInput();
+      disposables.forEach((d) => d.dispose());
+    },
+  };
 }

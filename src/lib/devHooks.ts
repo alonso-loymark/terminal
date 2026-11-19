@@ -1,5 +1,7 @@
 // Dev builds only (loaded with a dynamic import from main.tsx): handles for debugging and for
 // the end-to-end checks in e2e/run.mjs.
+import { useExplorer } from '../store/explorer';
+import { useGit } from '../store/git';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
@@ -13,5 +15,7 @@ export function installDevHooks(): void {
   window.__workspace = useWorkspace;
   window.__ui = useUi;
   window.__system = useSystem;
+  window.__explorer = useExplorer;
+  window.__git = useGit;
   window.__paneTerminal = (paneId) => getPane(paneId)?.term;
 }

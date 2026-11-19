@@ -1,6 +1,17 @@
 import { useShallow } from 'zustand/react/shallow';
 import { TAB_COLORS } from '../config/colors';
+import {
+  copyPath,
+  openInEditor,
+  openInWindowsExplorer,
+  openTabAt,
+  requestTrash,
+  splitAt,
+  startCreate,
+} from '../lib/explorerActions';
+import { parentDir } from '../lib/explorerModel';
 import { closeOtherTabs, focusActiveTerminal, groupTab, requestClosePane, requestCloseTabs } from '../lib/tabActions';
+import { useExplorer } from '../store/explorer';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
@@ -25,7 +36,55 @@ export function ContextMenus() {
   if (menu.kind === 'tab') return <TabMenu tabId={menu.tabId} x={menu.x} y={menu.y} />;
   if (menu.kind === 'group') return <GroupMenu groupId={menu.groupId} x={menu.x} y={menu.y} />;
   if (menu.kind === 'shells') return <ShellMenu x={menu.x} y={menu.y} />;
+  if (menu.kind === 'explorer') return <ExplorerMenu path={menu.path} isDir={menu.isDir} isRoot={menu.isRoot} x={menu.x} y={menu.y} />;
   return <PaneMenu paneId={menu.paneId} x={menu.x} y={menu.y} />;
+}
+
+/** Right click in the file explorer (an entry, or the empty area for the root folder). */
+function ExplorerMenu({ path, isDir, isRoot, x, y }: { path: string; isDir: boolean; isRoot: boolean; x: number; y: number }) {
+  // New files and folders go inside a folder, or next to a file.
+  const folder = isDir ? path : (parentDir(path) ?? path);
+  return (
+    <Menu x={x} y={y} label={isDir ? 'Acciones de la carpeta' : 'Acciones del archivo'} onClose={dismiss}>
+      <MenuItem action="open-vscode" onSelect={run(() => openInEditor(path))}>
+        Abrir en VS Code
+      </MenuItem>
+      <MenuItem action="open-file-manager" onSelect={run(() => openInWindowsExplorer(path))}>
+        Abrir en el Explorador de Windows
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem action="tab-here" onSelect={run(() => openTabAt(path, isDir))}>
+        Abrir una tab nueva aquí
+      </MenuItem>
+      <MenuItem action="split-here" onSelect={run(() => splitAt(path, isDir))}>
+        Dividir panel aquí
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem action="copy-path" onSelect={run(() => void copyPath(path))}>
+        Copiar ruta
+      </MenuItem>
+      <MenuItem action="copy-relative-path" onSelect={run(() => void copyPath(path, true))}>
+        Copiar ruta relativa
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem action="new-file" onSelect={run(() => startCreate(folder, 'file'))}>
+        Nuevo archivo
+      </MenuItem>
+      <MenuItem action="new-folder" onSelect={run(() => startCreate(folder, 'dir'))}>
+        Nueva carpeta
+      </MenuItem>
+      {!isRoot && (
+        <>
+          <MenuItem action="rename-entry" onSelect={run(() => useExplorer.getState().setEditing({ kind: 'rename', path }))}>
+            Renombrar
+          </MenuItem>
+          <MenuItem action="trash" onSelect={run(() => requestTrash(path))}>
+            Eliminar
+          </MenuItem>
+        </>
+      )}
+    </Menu>
+  );
 }
 
 /** "▾" next to "+": a new tab with any of the available shells, in the active pane's folder. */

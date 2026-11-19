@@ -258,12 +258,326 @@ body,
   outline: none;
 }
 
+/* ------------------------------------------------------------------ explorer */
+
+/* Sidebar and terminals side by side, between the tab bar and the status bar. */
+.main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.sidebar {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--chrome);
+  border-right: 1px solid var(--border);
+  font: var(--ui-font);
+  color: var(--text);
+  user-select: none;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 5;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer[data-dragging]::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: var(--accent);
+}
+
+.explorer-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Scrolled to the end by the header, so long paths show their last folders. */
+.breadcrumbs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.crumb-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.crumb {
+  padding: 2px 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.crumb:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.crumb-wrap:last-child .crumb {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.crumb-sep {
+  padding: 0 1px;
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.explorer-button {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.explorer-button svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.explorer-button:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.explorer-button[aria-pressed='true'] {
+  background: var(--panel);
+  color: var(--accent);
+}
+
+.file-tree {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.file-tree-canvas {
+  position: relative;
+  min-width: 100%;
+}
+
+.tree-row,
+.tree-message {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding-right: 8px;
+  white-space: nowrap;
+}
+
+.tree-row:hover {
+  background: var(--panel);
+}
+
+.tree-row[data-selected] {
+  background: rgb(56 139 253 / 16%);
+}
+
+.tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-message {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.tree-message[data-error] {
+  color: var(--danger);
+}
+
+.tree-twisty,
+.tree-twisty-space {
+  position: relative;
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
+.tree-twisty {
+  cursor: pointer;
+}
+
+.tree-twisty::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  left: 3px;
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+}
+
+.tree-twisty[data-open]::before {
+  top: 2px;
+  left: 4px;
+  transform: rotate(45deg);
+}
+
+.tree-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+
+.tree-icon[data-kind='dir'] {
+  height: 9px;
+  background: #c69c45;
+  box-shadow: inset 0 2px 0 #e0b95e;
+}
+
+.tree-icon[data-kind='file'] {
+  width: 9px;
+  border: 1.5px solid var(--muted);
+  border-radius: 1px;
+}
+
+.tree-icon[data-link] {
+  outline: 1px dashed var(--muted);
+  outline-offset: 1px;
+}
+
+.tree-row .rename-input {
+  height: 19px;
+}
+
+/* Git: modified, new, renamed, deleted/conflict. Ignored and hidden entries are dimmed. */
+.tree-row[data-git='modified'] .tree-name {
+  color: #d29922;
+}
+
+.tree-row[data-git='added'] .tree-name,
+.tree-row[data-git='untracked'] .tree-name {
+  color: #3fb950;
+}
+
+.tree-row[data-git='renamed'] .tree-name {
+  color: var(--accent);
+}
+
+.tree-row[data-git='deleted'] .tree-name,
+.tree-row[data-git='conflict'] .tree-name {
+  color: var(--danger);
+}
+
+.tree-row[data-hidden] {
+  opacity: 0.5;
+}
+
+.drag-ghost {
+  position: fixed;
+  z-index: 200;
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font: var(--ui-font);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.explorer-notice {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.explorer-notice[data-error] {
+  border-color: var(--danger);
+}
+
+.explorer-notice-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.explorer-notice button {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.explorer-notice .explorer-notice-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
 /* ------------------------------------------------------------------ terminals */
 
 .workspace {
   position: relative;
   flex: 1;
+  min-width: 0;
   min-height: 0;
+}
+
+/* A path dragged from the explorer or from Windows Explorer will be typed in this pane. */
+.terminal-pane[data-drop-target] {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
 }
 
 /* Margin around the panes. Panes are positioned inside it from the layout tree (inline
@@ -409,6 +723,23 @@ body,
 
 .status-shell {
   flex: none;
+}
+
+.status-git {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.status-git svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+
+.status-git-dirty {
+  color: #d29922;
 }
 
 /* ------------------------------------------------------------------ search */

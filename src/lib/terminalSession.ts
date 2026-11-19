@@ -58,6 +58,16 @@ export class TerminalSession {
     return this.#id;
   }
 
+  /**
+   * Types `text` into the running shell as if from the keyboard (used to run `cd` from the
+   * explorer). Callers check first that the shell is idle at an empty prompt.
+   */
+  sendText(text: string): boolean {
+    if (this.#status !== 'running' || this.#id === null) return false;
+    this.#send(this.#id, text);
+    return true;
+  }
+
   /** Shift+Enter, translated by the backend for whatever runs in the session. */
   shiftEnter(): void {
     if (this.#status !== 'running' || this.#id === null) {
@@ -132,8 +142,13 @@ export class TerminalSession {
   }
 
   #send(id: SessionId, data: string): void {
-    // Rejects only if the session is already gone; its exit notice is on the way.
-    writeToSession(id, data).catch(ignore);
+    // Rejects when the session is already gone (its exit notice is on the way). Anything else
+    // means lost input: say so.
+    writeToSession(id, data).catch((error: unknown) => {
+      if (this.#id === id && this.#status === 'running') {
+        console.warn('[terminal] no se pudo escribir en la sesión', id, JSON.stringify(data), error);
+      }
+    });
   }
 
   #handleResize(cols: number, rows: number): void {

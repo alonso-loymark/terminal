@@ -3,6 +3,7 @@ import type { SearchAddon } from '@xterm/addon-search';
 import type { Terminal } from '@xterm/xterm';
 import type { PaneId } from '../store/workspaceModel';
 import type { GpuRenderer } from './renderer';
+import type { ShellIntegrationHandle } from './shellIntegration';
 import type { TerminalSession } from './terminalSession';
 
 /** The imperative objects behind a pane. Never stored in zustand (not serializable). */
@@ -13,6 +14,8 @@ export interface PaneHandle {
   session: TerminalSession;
   host: HTMLElement;
   gpu: GpuRenderer;
+  /** Shell integration marks of this terminal (what is typed at the prompt). */
+  integration: ShellIntegrationHandle;
 }
 
 const handles = new Map<PaneId, PaneHandle>();

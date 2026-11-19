@@ -106,8 +106,8 @@ export function closeTabsNow(tabIds: TabId[]): void {
   afterClose();
 }
 
-/** What the confirmation dialog closes when accepted. */
-export function closeTarget(target: CloseTarget): void {
+/** What the confirmation dialog closes when accepted (file deletions are the explorer's). */
+export function closeTarget(target: Exclude<CloseTarget, { kind: 'trash' }>): void {
   if (target.kind === 'pane') closePaneNow(target.paneId);
   else closeTabsNow(target.tabIds);
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent } from 'react';
+import { trashNow } from '../lib/explorerActions';
 import { closeTarget, focusActiveTerminal } from '../lib/tabActions';
 import { useUi } from '../store/ui';
 
@@ -20,7 +21,12 @@ export function ConfirmDialog() {
   };
   const accept = () => {
     useUi.getState().closeConfirm();
-    closeTarget(confirm.target);
+    if (confirm.target.kind === 'trash') {
+      void trashNow(confirm.target.paths);
+      focusActiveTerminal();
+    } else {
+      closeTarget(confirm.target);
+    }
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key === 'Escape') {

@@ -29,7 +29,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 const check = (name, ok, detail = '') => {
   results.push({ name, ok });
-  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
+  const time = new Date().toTimeString().slice(0, 8);
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}${ok ? '' : ` [${time}]`}`);
 };
 const skip = (name, why) => console.log(`SKIP ${name} — ${why}`);
 const alive = (pid) => {
@@ -86,6 +87,15 @@ const consoleLog = [];
 page.on('console', (message) => {
   if (['warning', 'error'].includes(message.type())) consoleLog.push(message.text());
 });
+// If the page goes away mid-run, say how (renderer crash, window closed, CDP lost) and when.
+const stamp = () => new Date().toTimeString().slice(0, 8);
+page.on('crash', () => console.log(`!! ${stamp()} la página crasheó (renderer)`));
+page.on('close', () => {
+  console.log(`!! ${stamp()} la página se cerró (app viva: ${alive(appPid)})`);
+  for (const line of consoleLog.slice(-6)) console.log(`!!   consola: ${line.slice(0, 300)}`);
+});
+page.on('pageerror', (error) => console.log(`!! ${stamp()} error no atrapado en la página: ${String(error).slice(0, 300)}`));
+browser.on('disconnected', () => console.log(`!! ${stamp()} CDP desconectado`));
 await page.waitForFunction(() => window.__terminal, null, { timeout: 60000 });
 // The user may keep working in other windows while the suite runs. Chromium does not fire
 // focus events in an unfocused window, which made focus checks flaky; CDP's focus emulation
@@ -327,10 +337,14 @@ async function waitPanes(count) {
 // ---------------------------------------------------------------- shell integration helpers
 const paneState = (id) => page.evaluate((id) => window.__workspace.getState().panes[id] ?? null, id);
 const homeDir = () => page.evaluate(() => window.__system.getState().homeDir);
-/** The pane's shell reported its integration and sits at its prompt (no command running). */
+/**
+ * The pane's shell reported its integration and sits at its prompt (no command running). The
+ * "loaded" mark comes before the first prompt (sometimes in another batch): the folder that
+ * prompt reports (OSC 7) is the sign that the prompt is there.
+ */
 const idle = async (id) => {
   const p = await paneState(id);
-  return !!p && p.status === 'running' && p.integration === 'ok' && !p.commandRunning;
+  return !!p && p.status === 'running' && p.integration === 'ok' && !p.commandRunning && p.cwd !== null;
 };
 /**
  * Records the raw marks a terminal receives. Handlers added later run first; returning false
@@ -350,12 +364,21 @@ const spy = (id) =>
     });
   }, id);
 const spied = (id) => page.evaluate((id) => window.__paneTerminal(id)?.__e2eSpy ?? null, id);
-/** Text of the line the cursor is on (the prompt plus whatever is being typed). */
-const cursorLine = () =>
-  page.evaluate(() => {
-    const b = window.__terminal.buffer.active;
-    return b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? '';
-  });
+/**
+ * The logical line the cursor is on (the prompt plus whatever is being typed), with the rows it
+ * wraps over joined back. `id`: a pane; default the active one.
+ */
+const paneCursorLine = (id = null) =>
+  page.evaluate((id) => {
+    const b = (id ? window.__paneTerminal(id) : window.__terminal).buffer.active;
+    const end = b.baseY + b.cursorY;
+    let start = end;
+    while (start > 0 && b.getLine(start)?.isWrapped) start--;
+    let line = '';
+    for (let y = start; y <= end; y++) line += b.getLine(y)?.translateToString(y === end) ?? '';
+    return line.trimEnd();
+  }, id);
+const cursorLine = () => paneCursorLine();
 /** The cursor line matches (waits a little: the prompt is drawn right after the end mark). */
 const lineMatches = (re) => waitUntil(async () => re.test(await cursorLine()), 3000);
 /**
@@ -415,14 +438,111 @@ const statusBar = () =>
       notice: q('.status-notice')?.textContent ?? null,
       noticeTitle: q('.status-notice')?.getAttribute('title') ?? null,
       shell: q('.status-shell')?.textContent ?? null,
+      git: q('.status-git')?.textContent ?? null,
     };
   });
 const tabSubtitle = (id) =>
   page.evaluate((sel) => document.querySelector(sel)?.textContent ?? null, `${tabSel(id)} .tab-subtitle`);
+/** A pane's buffer for failed checks: non-empty rows with their number, cursor, buffer kind. */
+const paneText = (id, lines = 8) =>
+  page.evaluate(
+    ({ id, lines }) => {
+      const t = window.__paneTerminal(id);
+      const b = t?.buffer.active;
+      if (!b) return '(sin terminal)';
+      const rows = [];
+      for (let y = 0; y < b.length && rows.length < lines; y++) {
+        const text = b.getLine(y)?.translateToString(true) ?? '';
+        if (text.trim()) rows.push(`${y}:${text}`);
+      }
+      return `${b.type} ${t.cols}x${t.rows} cursor ${b.cursorX},${b.baseY + b.cursorY} largo ${b.length} | ${rows.join(' ⏎ ')}`;
+    },
+    { id, lines },
+  );
 /** The pane's folder once its shell reported it. */
 async function paneCwd(id, timeout = 20000) {
   await waitUntil(() => idle(id), timeout);
   return (await paneState(id))?.cwd ?? null;
+}
+
+// ---------------------------------------------------------------- explorer helpers
+const RECYCLE = path.join(ROOT, 'e2e', 'recycle.ps1');
+const explorerState = () =>
+  page.evaluate(() => {
+    const e = window.__explorer.getState();
+    const sidebar = document.querySelector('.sidebar');
+    return {
+      visible: e.visible,
+      width: e.width,
+      pinned: e.pinned,
+      showHidden: e.showHidden,
+      watched: e.watched,
+      notice: e.notice,
+      root: sidebar?.dataset.root ?? null,
+    };
+  });
+/** A value for a CSS attribute selector in double quotes (paths have backslashes). */
+const attrValue = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+const rowSel = (p) => `.tree-row[data-path="${attrValue(p)}"]`;
+const hasRow = async (p) => (await page.locator(rowSel(p)).count()) > 0;
+const rowAttr = (p, name) => page.locator(rowSel(p)).getAttribute(name, { timeout: 1000 }).catch(() => null);
+const waitRow = (p, present = true, timeout = 8000) => waitUntil(async () => (await hasRow(p)) === present, timeout);
+const waitRoot = (dir, timeout = 8000) =>
+  waitUntil(async () => (await explorerState()).root?.toLowerCase() === dir.toLowerCase(), timeout);
+const rowCount = async () => Number(await page.getAttribute('.file-tree', 'data-row-count'));
+async function showExplorer() {
+  if (!(await explorerState()).visible) await page.evaluate(() => window.__explorer.getState().toggleVisible());
+  await page.waitForSelector('.sidebar', { timeout: 3000 });
+}
+/** Clicks a row's name (not the twisty): a folder means cd, a file means insert its path. */
+async function clickRow(p) {
+  const box = await page.locator(`${rowSel(p)} .tree-name`).boundingBox();
+  await page.mouse.click(box.x + Math.min(8, box.width / 2), box.y + box.height / 2);
+}
+const toggleRow = (p) => page.click(`${rowSel(p)} .tree-twisty`);
+const atEmptyPrompt = async (id) => /^PS [A-Za-z]:\\.*>\s*$/.test(await paneCursorLine(id));
+/** Opens the explorer's context menu on a row and returns the actions it offers. */
+async function rowMenu(p) {
+  await page.click(rowSel(p), { button: 'right' });
+  await page.waitForSelector('[role="menu"]', { timeout: 3000 });
+  return page.$$eval('[role="menu"] [data-action]', (items) => items.map((item) => item.dataset.action));
+}
+/** Files inside TRICKY_DIR for the explorer stages (each stage can run on its own). */
+function explorerFixture() {
+  const dir = trickyDir(...TRICKY_DIR);
+  const sub = path.join(dir, 'sub carpeta');
+  const fixture = {
+    dir,
+    parent: trickyDir(...PARENT_DIR),
+    file: path.join(dir, 'archivo con espacios.txt'),
+    accented: path.join(dir, 'ñandú.md'),
+    sub,
+    inner: path.join(sub, 'dentro.txt'),
+  };
+  fs.mkdirSync(sub, { recursive: true });
+  for (const file of [fixture.file, fixture.accented, fixture.inner]) fs.writeFileSync(file, 'x');
+  return fixture;
+}
+/** Private memory (MB) of the app and its WebView2 processes, by role. */
+function appMemory() {
+  const script = `
+$all = Get-CimInstance Win32_Process
+$kids = @{}
+foreach ($p in $all) { $kids[[int]$p.ParentProcessId] += ,$p }
+function Get-Tree([int]$id) { foreach ($c in $kids[$id]) { $c; Get-Tree ([int]$c.ProcessId) } }
+$out = @{ app = 0; renderer = 0; gpu = 0; browser = 0; otros = 0 }
+foreach ($p in @($all | Where-Object ProcessId -eq ${appPid}) + @(Get-Tree ${appPid})) {
+  $cmd = [string]$p.CommandLine
+  $role = if ([int]$p.ProcessId -eq ${appPid}) { 'app' }
+    elseif ($p.Name -ne 'msedgewebview2.exe') { $null }
+    elseif ($cmd -match '--type=renderer') { 'renderer' }
+    elseif ($cmd -match '--type=gpu-process') { 'gpu' }
+    elseif ($cmd -notmatch '--type=') { 'browser' }
+    else { 'otros' }
+  if ($role) { $out[$role] += [math]::Round($p.PrivatePageCount / 1MB, 1) }
+}
+$out | ConvertTo-Json -Compress`;
+  return JSON.parse(powershell(script));
 }
 
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
@@ -1245,7 +1365,9 @@ const stages = {
     }
     const dup = (await wsState()).active;
     const dupPane = (await wsState()).tabs[dup].activePaneId;
-    check('duplicar la tab: mismo cwd', dup !== tabId && (await paneCwd(dupPane)) === dir, String(await paneCwd(dupPane)));
+    const dupCwd = await paneCwd(dupPane);
+    if (dupCwd !== dir) await shot('fail-inherit-duplicate-cwd');
+    check('duplicar la tab: mismo cwd', dup !== tabId && dupCwd === dir, `${dupCwd} | ${JSON.stringify(await paneState(dupPane))} | ${await paneText(dupPane)}`);
     await waitUntil(atShellPrompt, 20000);
     const fresh = await openTab();
     const freshPane = (await wsState()).tabs[fresh].activePaneId;
@@ -1315,6 +1437,453 @@ const stages = {
     st = await paneState(second);
     check('dividir Git Bash: Git Bash en el mismo cwd', ready2 && st.shell === 'gitbash' && st.cwd === parent, JSON.stringify({ shell: st.shell, cwd: st.cwd }));
     await shot('24-gitbash');
+    await freshTab();
+  },
+
+  // ------------------------------------------------------------ explorer (Fase 5)
+  async explorer() {
+    await freshTab();
+    await showExplorer();
+    const home = await homeDir();
+    check('el explorador muestra el cwd del panel activo', await waitRoot(home), (await explorerState()).root);
+
+    // Ctrl+B hides it: the terminal takes the space and the PTY follows.
+    const id = await activePane();
+    const narrow = await paneSize(id);
+    await page.keyboard.press('Control+b');
+    await waitUntil(async () => !(await page.$('.sidebar')), 3000);
+    await waitUntil(async () => (await paneSize(id)) !== narrow, 3000);
+    const wide = await paneSize(id);
+    check('Ctrl+B oculta el explorador y la terminal gana el ancho', Number(wide.split('x')[0]) > Number(narrow.split('x')[0]), `${narrow} -> ${wide}`);
+    const pty = await ptyMatches(id);
+    check('... y el PTY sigue al ancho nuevo', pty.ok, pty.detail);
+    await page.keyboard.press('Control+b');
+    await page.waitForSelector('.sidebar', { timeout: 3000 });
+
+    // Holding a shortcut down repeats keydown: the action runs once.
+    const tabsBefore = (await wsState()).order.length;
+    await page.keyboard.down('Control');
+    await page.keyboard.down('Shift');
+    for (let i = 0; i < 4; i++) await page.keyboard.down('T');
+    await page.keyboard.up('T');
+    await page.keyboard.up('Shift');
+    await page.keyboard.up('Control');
+    await sleep(600);
+    check('mantener Ctrl+Shift+T apretado abre una sola tab', (await wsState()).order.length === tabsBefore + 1, `${tabsBefore} -> ${(await wsState()).order.length}`);
+    await page.keyboard.down('Control');
+    for (let i = 0; i < 3; i++) await page.keyboard.down('b');
+    await page.keyboard.up('b');
+    await page.keyboard.up('Control');
+    await sleep(300);
+    check('mantener Ctrl+B apretado alterna una sola vez', !(await explorerState()).visible);
+    await showExplorer();
+    await freshTab();
+
+    // Width: drag the edge; width and visibility survive a reload.
+    const w0 = (await explorerState()).width;
+    const edge = await page.locator('.sidebar-resizer').boundingBox();
+    await page.mouse.move(edge.x + edge.width / 2, edge.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(edge.x + edge.width / 2 + 90, edge.y + 200, { steps: 6 });
+    await page.mouse.up();
+    await sleep(300);
+    const w1 = (await explorerState()).width;
+    check('arrastrar el borde cambia el ancho', Math.abs(w1 - w0 - 90) <= 3, `${w0} -> ${w1}`);
+    await page.reload();
+    await page.waitForFunction(() => window.__terminal, null, { timeout: 30000 });
+    await emulateFocus();
+    await waitFor(/PS [A-Za-z]:\\.*>/, { timeout: 30000 });
+    const after = await explorerState();
+    check('ancho y visibilidad se recuerdan al recargar', after.visible && after.width === w1, JSON.stringify({ visible: after.visible, width: after.width }));
+    await page.evaluate((w) => window.__explorer.getState().setWidth(w), w0);
+    await waitUntil(terminalFocused, 3000);
+
+    // Follows the cwd, with spaces, accents and ñ; folders are read lazily.
+    const { dir, parent, file, accented, sub, inner } = explorerFixture();
+    await cdTricky();
+    check('cd a una ruta con espacios, tildes y ñ: el explorador la sigue', await waitRoot(dir), (await explorerState()).root);
+    check('breadcrumbs: la última es la carpeta actual', (await page.locator('.breadcrumbs .crumb').last().textContent()) === 'Ñandú áéíóú');
+    check('el árbol lista sus archivos', (await waitRow(file)) && (await hasRow(accented)) && (await hasRow(sub)));
+    const listed = await page.evaluate((key) => !!window.__explorer.getState().listings[key], sub.toLowerCase());
+    check('carga perezosa: una subcarpeta no se lee hasta expandirla', !(await hasRow(inner)) && !listed);
+    await toggleRow(sub);
+    check('expandir la lee', await waitRow(inner));
+
+    // Another pane, another cwd: the explorer shows the active one.
+    const first = await activePane();
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    await runIdle('Set-Location ..');
+    check('cd en el panel activo: el explorador lo sigue', await waitRoot(parent), (await explorerState()).root);
+    await page.keyboard.press('Alt+ArrowLeft');
+    await waitUntil(async () => (await activePane()) === first, 3000);
+    check('cambiar de panel: muestra el cwd del otro panel', await waitRoot(dir), (await explorerState()).root);
+    await openTab();
+    await runIdle(`Set-Location -LiteralPath ${psQuote(home)}`);
+    check('otra tab: su cwd', await waitRoot(home), (await explorerState()).root);
+    await page.keyboard.press('Control+1');
+    check('volver a la primera tab: el cwd de su panel activo', await waitRoot(dir), (await explorerState()).root);
+
+    // Pinned: it stays; unpinned: it follows again.
+    await page.click('[data-action="pin"]');
+    check('fijar deja el explorador en esa carpeta', (await explorerState()).pinned?.toLowerCase() === dir.toLowerCase());
+    await waitUntil(terminalFocused, 3000);
+    await runIdle('Set-Location ..');
+    await sleep(500);
+    check('fijado: no sigue el cd', (await explorerState()).root?.toLowerCase() === dir.toLowerCase(), (await explorerState()).root);
+    await page.click('[data-action="pin"]');
+    check('desfijar: vuelve a seguir el cwd', await waitRoot(parent), (await explorerState()).root);
+    await shot('25-explorer');
+    await freshTab();
+  },
+
+  async explorercd() {
+    await freshTab();
+    await showExplorer();
+    const { dir, sub, file } = explorerFixture();
+    await cdTricky();
+    await waitRoot(dir);
+    await waitRow(sub);
+    const id = await activePane();
+
+    // A folder: cd in the active pane (idle shell, empty prompt).
+    await clickRow(sub);
+    const moved = await waitUntil(async () => (await paneState(id)).cwd === sub, 8000);
+    check('clic en una carpeta: cd en el panel activo', moved && (await waitRoot(sub)), (await paneState(id)).cwd);
+    check('... con la ruta entre comillas', (await text()).includes(`Set-Location -LiteralPath '${sub}'`));
+    await page.click(`.breadcrumbs .crumb[data-path="${attrValue(dir)}"]`);
+    check('clic en un breadcrumb: cd ahí', await waitUntil(async () => (await paneState(id)).cwd === dir, 8000));
+    await waitRow(file);
+    await waitUntil(() => idle(id), 5000);
+
+    // A file: its path at the prompt, quoted for PowerShell, not run.
+    await clickRow(file);
+    const inserted = await waitUntil(async () => (await cursorLine()).endsWith(`> '${file}'`), 3000);
+    check('clic en un archivo: inserta la ruta con comillas sin ejecutarla', inserted && !(await paneState(id)).commandRunning, await cursorLine());
+    await page.keyboard.press('Escape');
+    await waitUntil(() => atEmptyPrompt(id), 3000);
+
+    // Something typed at the prompt: nothing is typed over it.
+    await page.keyboard.type('abc');
+    await waitUntil(async () => (await cursorLine()).endsWith('abc'), 3000);
+    let before = await text();
+    await clickRow(sub);
+    await sleep(600);
+    let notice = (await explorerState()).notice?.message ?? '';
+    check('con texto en el prompt no se escribe nada', (await text()) === before && /texto escrito/.test(notice), notice);
+    await waitUntil(terminalFocused, 3000);
+    await page.keyboard.press('Escape');
+    await waitUntil(() => atEmptyPrompt(id), 3000);
+
+    // A command running: nothing is typed into that terminal; a new tab is offered.
+    await runIdle('Start-Sleep -Seconds 30', { wait: false });
+    await waitUntil(async () => (await paneState(id)).commandRunning, 5000);
+    before = await text();
+    await clickRow(sub);
+    await sleep(600);
+    notice = (await explorerState()).notice?.message ?? '';
+    check('con un comando corriendo, clic en carpeta no escribe nada', (await text()) === before && /ejecutando/.test(notice), notice);
+    await page.click('[data-action="notice-open-tab"]');
+    await waitUntil(async () => (await wsState()).order.length === 2, 5000);
+    const opened = await activePane();
+    const openedCwd = await paneCwd(opened);
+    check('... y "Abrir tab aquí" abre una tab en esa carpeta', openedCwd === sub, `${JSON.stringify(await paneState(opened))} | ${await paneText(opened)}`);
+    await page.keyboard.press('Control+1');
+    await waitUntil(async () => (await activePane()) === id, 3000);
+    await waitUntil(terminalFocused, 3000);
+    await page.keyboard.press('Control+c');
+    await waitUntil(() => idle(id), 8000);
+    await closeOtherTabsNow();
+    await waitRoot(dir);
+    await waitRow(file);
+
+    // Dragging a row onto a terminal types its path in THAT pane, not in the active one. The
+    // target is the new pane: the old one's long prompt was just reflowed by the split, which
+    // PSReadLine 2.0 redraws badly (not the explorer's doing).
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const right = await activePane();
+    await waitUntil(() => idle(right), 10000);
+    await page.keyboard.press('Alt+ArrowLeft');
+    await waitUntil(async () => (await activePane()) === id, 3000);
+    const leftBefore = await paneText(id, 200);
+    const from = await page.locator(`${rowSel(file)} .tree-name`).boundingBox();
+    const to = await paneBox(right);
+    await page.mouse.move(from.x + 6, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(from.x + 40, from.y + from.height / 2, { steps: 4 });
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
+    const highlighted = !!(await page.$(`${paneSel(right)}[data-drop-target]`));
+    await page.mouse.up();
+    const dropped = await waitUntil(async () => (await paneCursorLine(right)).endsWith(`> '${file}'`), 3000);
+    const leftUntouched = (await paneText(id, 200)) === leftBefore;
+    check(
+      'arrastrar un archivo a un panel: su ruta entre comillas en ESE panel (no en el activo)',
+      dropped && highlighted && leftUntouched,
+      `${await paneCursorLine(right)} | resaltado ${highlighted} | activo intacto ${leftUntouched}`,
+    );
+    await waitUntil(async () => (await activePane()) === right, 3000);
+    await page.keyboard.press('Escape');
+    await waitUntil(() => atEmptyPrompt(right), 3000);
+    await page.keyboard.press('Alt+ArrowLeft');
+    await waitUntil(async () => (await activePane()) === id, 3000);
+
+    // Files dropped from Windows Explorer: the same native event Tauri emits.
+    const box = await paneBox(right);
+    const emitted = await page.evaluate(
+      async ({ paths, x, y }) => {
+        const ratio = window.devicePixelRatio;
+        try {
+          await window.__TAURI_INTERNALS__.invoke('plugin:event|emit_to', {
+            target: { kind: 'Webview', label: 'main' },
+            event: 'tauri://drag-drop',
+            payload: { paths, position: { x: x * ratio, y: y * ratio } },
+          });
+          return 'ok';
+        } catch (error) {
+          return String(error);
+        }
+      },
+      { paths: [file, sub], x: box.x + box.width / 2, y: box.y + box.height / 2 },
+    );
+    const osDrop = await waitUntil(async () => (await paneCursorLine(right)).endsWith(`> '${file}' '${sub}'`), 3000);
+    check('soltar archivos del Explorador de Windows en un panel: rutas entre comillas', osDrop, `${emitted} | ${await paneCursorLine(right)}`);
+    await waitUntil(async () => (await activePane()) === right, 3000);
+    await page.keyboard.press('Escape');
+    await waitUntil(() => atEmptyPrompt(right), 3000);
+
+    // Git Bash quotes its own way.
+    const shells = await page.evaluate(() => window.__system.getState().shells);
+    if (shells.some((s) => s.kind === 'gitbash')) {
+      await page.click('.tab-new-menu');
+      await page.click('[role="menu"] [data-shell="gitbash"]');
+      const bash = await activePane();
+      await waitUntil(() => idle(bash), 30000);
+      await waitRow(file);
+      await clickRow(file);
+      const msys = `/c${file.slice(2).replace(/\\/g, '/')}`;
+      const bashLine = await waitUntil(async () => (await paneCursorLine(bash)).endsWith(`'${msys}'`), 3000);
+      check('en Git Bash la ruta va en formato MSYS y con comillas', bashLine, await paneCursorLine(bash));
+      await page.keyboard.press('Control+u');
+    }
+    await shot('26-explorer-cd');
+    await freshTab();
+  },
+
+  async watcher() {
+    await freshTab();
+    await showExplorer();
+    const dir = trickyDir('vigilada');
+    await runIdle(`Set-Location -LiteralPath ${psQuote(dir)}`);
+    await waitRoot(dir);
+    const watching = async (...dirs) => {
+      const want = dirs.map((d) => d.toLowerCase()).sort().join('|');
+      return waitUntil(async () => (await explorerState()).watched.join('|') === want, 3000);
+    };
+    check('vigila la carpeta visible', await watching(dir), (await explorerState()).watched.join(', '));
+    const a = path.join(dir, 'creado afuera.txt');
+    fs.writeFileSync(a, 'x');
+    check('watcher: un archivo creado afuera aparece', await waitRow(a, true, 5000));
+    const b = path.join(dir, 'renombrado ñ.txt');
+    fs.renameSync(a, b);
+    check('watcher: un renombre se refleja', (await waitRow(b, true, 5000)) && (await waitRow(a, false, 5000)));
+    fs.rmSync(b);
+    check('watcher: un borrado se refleja', await waitRow(b, false, 5000));
+
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub);
+    await waitRow(sub, true, 5000);
+    await toggleRow(sub);
+    check('expandir: vigila la raíz y la subcarpeta', await watching(dir, sub), (await explorerState()).watched.join(', '));
+    const inner = path.join(sub, 'adentro.txt');
+    fs.writeFileSync(inner, 'x');
+    check('watcher en la subcarpeta expandida', await waitRow(inner, true, 5000));
+    await toggleRow(sub);
+    check('colapsar libera su watcher', await watching(dir), (await explorerState()).watched.join(', '));
+    await page.keyboard.press('Control+b');
+    check('ocultar el explorador libera todos los watchers', await watching());
+    await page.keyboard.press('Control+b');
+    await watching(dir);
+
+    // A burst (like npm install or git checkout): debounced, and the tree catches up.
+    for (let i = 0; i < 200; i++) fs.writeFileSync(path.join(dir, `rafaga ${i}.txt`), '');
+    check('ráfaga de 200 archivos: el árbol se pone al día', await waitUntil(async () => (await rowCount()) === 201, 8000), String(await rowCount()));
+    await freshTab();
+  },
+
+  async gitexplorer() {
+    await freshTab();
+    await showExplorer();
+    const repo = trickyDir('repo con espacios');
+    const git = (...args) =>
+      execFileSync('git', ['-C', repo, '-c', 'user.name=e2e', '-c', 'user.email=e2e@example.invalid', ...args], { stdio: 'ignore' });
+    git('init', '-q', '-b', 'principal');
+    fs.writeFileSync(path.join(repo, 'versionado.txt'), 'uno');
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'secreto.log\nsalida/\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'inicial');
+    fs.writeFileSync(path.join(repo, 'versionado.txt'), 'dos');
+    fs.writeFileSync(path.join(repo, 'nuevo.txt'), 'x');
+    fs.writeFileSync(path.join(repo, 'secreto.log'), 'x');
+    fs.mkdirSync(path.join(repo, 'node_modules', 'pkg'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'salida'));
+    const p = (name) => path.join(repo, name);
+
+    await runIdle(`Set-Location -LiteralPath ${psQuote(repo)}`);
+    await waitRoot(repo);
+    check('git: la rama en la barra de estado', await waitUntil(async () => !!(await statusBar()).git?.includes('principal'), 8000), JSON.stringify((await statusBar()).git));
+    const colored = await waitUntil(
+      async () => (await rowAttr(p('versionado.txt'), 'data-git')) === 'modified' && (await rowAttr(p('nuevo.txt'), 'data-git')) === 'untracked',
+      8000,
+    );
+    check('git: modificados y nuevos con su color', colored, `${await rowAttr(p('versionado.txt'), 'data-git')} / ${await rowAttr(p('nuevo.txt'), 'data-git')}`);
+    const hiddenByDefault = !(await hasRow(p('secreto.log'))) && !(await hasRow(p('node_modules'))) && !(await hasRow(p('.git'))) && !(await hasRow(p('salida')));
+    check('ocultos por defecto: .gitignore, node_modules y .git', hiddenByDefault);
+    await page.click('[data-action="toggle-hidden"]');
+    await waitRow(p('secreto.log'), true, 3000);
+    const reasons = [
+      await rowAttr(p('secreto.log'), 'data-hidden'),
+      await rowAttr(p('salida'), 'data-hidden'),
+      await rowAttr(p('node_modules'), 'data-hidden'),
+      await rowAttr(p('.git'), 'data-hidden'),
+    ];
+    check('el toggle los muestra atenuados (ignorados por .gitignore / por defecto)', JSON.stringify(reasons) === JSON.stringify(['ignored', 'ignored', 'default', 'default']), reasons.join(','));
+    await page.click('[data-action="toggle-hidden"]');
+    await waitRow(p('secreto.log'), false, 3000);
+
+    // Git commands in the terminal: the colors and the branch refresh when they end.
+    await waitUntil(terminalFocused, 3000);
+    await runIdle('git add nuevo.txt');
+    check('al terminar un comando git se actualizan los colores', await waitUntil(async () => (await rowAttr(p('nuevo.txt'), 'data-git')) === 'added', 8000), await rowAttr(p('nuevo.txt'), 'data-git'));
+    await runIdle('git checkout -q -b otra-rama');
+    check('... y la rama', await waitUntil(async () => !!(await statusBar()).git?.includes('otra-rama'), 8000), JSON.stringify((await statusBar()).git));
+    await shot('27-git');
+    await freshTab();
+  },
+
+  async bigfolder() {
+    await freshTab();
+    await showExplorer();
+    const big = trickyDir('carpeta grande');
+    for (let i = 0; i < 5000; i++) fs.writeFileSync(path.join(big, `archivo ${String(i).padStart(5, '0')}.txt`), '');
+    const samples = [];
+    const measure = async (label) => {
+      await cdp.send('HeapProfiler.collectGarbage');
+      await sleep(500);
+      const heap = await page.evaluate(() => performance.memory.usedJSHeapSize);
+      samples.push({ label, heapMB: Math.round((heap / 1048576) * 10) / 10, ...appMemory() });
+    };
+    await page.keyboard.press('Control+b');
+    await waitUntil(async () => !(await page.$('.sidebar')), 3000);
+    await sleep(500);
+    await measure('explorador oculto');
+    await page.keyboard.press('Control+b');
+    await waitUntil(async () => (await rowCount()) > 0, 5000);
+    await sleep(500);
+    await measure('explorador en home');
+
+    // Long tasks while 5000 entries arrive: the UI must not freeze.
+    await page.evaluate(() => {
+      window.__longTasks = [];
+      new PerformanceObserver((list) => window.__longTasks.push(...list.getEntries().map((e) => e.duration))).observe({ type: 'longtask' });
+    });
+    const started = Date.now();
+    await runIdle(`Set-Location -LiteralPath ${psQuote(big)}`);
+    const loaded = await waitUntil(async () => (await rowCount()) === 5000, 10000);
+    const elapsed = Date.now() - started;
+    const domRows = await page.$$eval('.tree-row', (rows) => rows.length);
+    check('carpeta con 5000 archivos: lista completa, solo se dibujan las filas visibles', loaded && domRows < 120, `${elapsed} ms hasta listar, ${domRows} filas en el DOM`);
+    const longTasks = await page.evaluate(() => window.__longTasks);
+    const worst = Math.round(Math.max(0, ...longTasks));
+    check('la UI no se congela (ninguna tarea larga > 250 ms)', worst < 250, `${longTasks.length} tareas largas, la peor ${worst} ms`);
+    await page.evaluate(() => {
+      const tree = document.querySelector('.file-tree');
+      tree.scrollTop = tree.scrollHeight;
+    });
+    check('scroll al final: aparece el último archivo', await waitRow(path.join(big, 'archivo 04999.txt'), true, 3000));
+    await sleep(500);
+    await measure('5000 archivos');
+    await page.keyboard.press('Control+b');
+    await waitUntil(async () => !(await page.$('.sidebar')), 3000);
+    await sleep(500);
+    await measure('oculto otra vez');
+    await page.keyboard.press('Control+b');
+    fs.writeFileSync(path.join(ARTIFACTS, 'explorer-memory.json'), JSON.stringify(samples, null, 2));
+    const table = samples.map((s) => `${s.label}: heap ${s.heapMB}, renderer ${s.renderer}, gpu ${s.gpu}, browser ${s.browser}, app ${s.app}`).join(' | ');
+    check('memoria medida (MB privados)', samples.length === 4, table);
+    await freshTab();
+  },
+
+  async explorermenu() {
+    await freshTab();
+    await showExplorer();
+    const dir = trickyDir('menu contextual');
+    const file = path.join(dir, 'original.txt');
+    fs.writeFileSync(file, 'x');
+    await runIdle(`Set-Location -LiteralPath ${psQuote(dir)}`);
+    await waitRoot(dir);
+    await waitRow(file);
+
+    const actions = await rowMenu(file);
+    const expected = ['open-vscode', 'open-file-manager', 'tab-here', 'split-here', 'copy-path', 'copy-relative-path', 'new-file', 'new-folder', 'rename-entry', 'trash'];
+    check('menú contextual con todas las acciones', expected.every((a) => actions.includes(a)), actions.join(','));
+    await page.click('[role="menu"] [data-action="copy-path"]');
+    check('copiar ruta', await waitUntil(async () => (await getClipboard()) === file, 3000), await getClipboard());
+    await rowMenu(file);
+    await page.click('[role="menu"] [data-action="copy-relative-path"]');
+    check('copiar ruta relativa (a la carpeta del explorador)', await waitUntil(async () => (await getClipboard()) === 'original.txt', 3000), await getClipboard());
+
+    await rowMenu(file);
+    await page.click('[role="menu"] [data-action="new-file"]');
+    await page.waitForSelector('.tree-row[data-editing] input', { timeout: 3000 });
+    await page.keyboard.type('nuevo desde el menu.txt');
+    await page.keyboard.press('Enter');
+    const created = path.join(dir, 'nuevo desde el menu.txt');
+    check('nuevo archivo', (await waitRow(created)) && fs.existsSync(created));
+    await rowMenu(file);
+    await page.click('[role="menu"] [data-action="new-folder"]');
+    await page.waitForSelector('.tree-row[data-editing] input', { timeout: 3000 });
+    await page.keyboard.type('carpeta nueva');
+    await page.keyboard.press('Enter');
+    const folder = path.join(dir, 'carpeta nueva');
+    check('nueva carpeta', (await waitRow(folder)) && fs.statSync(folder).isDirectory());
+
+    await rowMenu(file);
+    await page.click('[role="menu"] [data-action="rename-entry"]');
+    await page.waitForSelector(`${rowSel(file)} input`, { timeout: 3000 });
+    await page.fill(`${rowSel(file)} input`, 'renombrado.txt');
+    await page.keyboard.press('Enter');
+    const renamed = path.join(dir, 'renombrado.txt');
+    check('renombrar', (await waitRow(renamed)) && fs.existsSync(renamed) && !fs.existsSync(file));
+
+    await rowMenu(renamed);
+    await page.click('[role="menu"] [data-action="trash"]');
+    const dialog = await page.waitForSelector('[role="alertdialog"]', { timeout: 3000 }).catch(() => null);
+    check('eliminar pide confirmación', !!dialog && (await page.textContent('#confirm-title')).includes('papelera'));
+    await page.keyboard.press('Escape');
+    check('Cancelar no borra', fs.existsSync(renamed));
+    await rowMenu(renamed);
+    await page.click('[role="menu"] [data-action="trash"]');
+    await page.waitForSelector('[role="alertdialog"]', { timeout: 3000 });
+    await page.click('[role="alertdialog"] [data-action="confirm"]');
+    check('confirmar lo borra', (await waitRow(renamed, false)) && !fs.existsSync(renamed));
+    const inBin = Number(
+      execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', RECYCLE, '-Folder', dir, '-Purge'], { encoding: 'utf8' }).trim(),
+    );
+    check('... a la Papelera de reciclaje (la prueba lo saca de ahí)', inBin === 1, `${inBin} en la papelera`);
+
+    await rowMenu(folder);
+    await page.click('[role="menu"] [data-action="tab-here"]');
+    await waitUntil(async () => (await wsState()).order.length === 2, 5000);
+    check('abrir una tab nueva aquí', (await paneCwd(await activePane())) === folder, String(await paneCwd(await activePane())));
+    await page.keyboard.press('Control+1');
+    await waitRoot(dir);
+    await waitRow(folder);
+    await rowMenu(folder);
+    await page.click('[role="menu"] [data-action="split-here"]');
+    await waitPanes(2);
+    check('dividir panel aquí', (await paneCwd(await activePane())) === folder, String(await paneCwd(await activePane())));
+    await shot('28-explorer-menu');
     await freshTab();
   },
 

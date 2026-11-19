@@ -14,6 +14,7 @@ Warp** (binario chico, poca RAM, arranque rápido). Cada dependencia nueva tiene
 | PTY | **portable-pty** (ConPTY en Windows) |
 | Estado frontend | **zustand** |
 | Drag & drop de tabs | **@dnd-kit** (`core` 6, `sortable` 10, `utilities` 3; la API estable, no `@dnd-kit/react` 0.x) |
+| Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
 
 ## Arquitectura
 
@@ -72,7 +73,9 @@ Reglas de la arquitectura:
   `write_to_session`, `resize_session`, `close_session`, `send_shift_enter` (ver abajo),
   `session_busy`, `system_info` (`{ homeDir, shells }`, una vez al arrancar) y `pty_backend`
   (devuelve `{ backend: "conpty", buildNumber }` para la opción `windowsPty` de xterm, que con
-  build ≥ 21376 activa el reflow compatible con ConPTY).
+  build ≥ 21376 activa el reflow compatible con ConPTY). Explorador (`explorer_commands.rs`):
+  `list_dir`, `watch_start` / `watch_set` / `watch_stop`, `git_status`, `create_entry`,
+  `rename_entry`, `trash_entries`, `open_in_vscode`, `open_in_file_manager`.
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -238,6 +241,75 @@ que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
   6. Tests: como `git_bash_integration_loads_the_users_profile_and_reports_commands`, con skip si
      no hay WSL.
 
+## Explorador de archivos
+
+Barra lateral a la izquierda (`Ctrl+B`), entre la barra de tabs y la de estado. Sigue el cwd del
+panel activo (el de la shell integration; si no hay, la carpeta de arranque; si no, home) al
+cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
+
+- **Backend** (`src-tauri/src/explorer/`, sin Tauri como `pty/`; comandos finos en
+  `explorer_commands.rs`, todo en `spawn_blocking`):
+  - `list.rs`: un nivel por vez (carga perezosa: se lee al expandir). Cada entrada dice por qué
+    estaría oculta: `default` (`DEFAULT_HIDDEN`: node_modules, .git, bin, obj, target, .vs,
+    .venv…; solo carpetas), `ignored` (`.gitignore`, `.git/info/exclude`, excludes global; con el
+    crate `ignore`, solo dentro de un repo) o `system` (atributo oculto/sistema). El frontend
+    filtra con el toggle "ver ocultos" sin volver a leer; los hijos de una carpeta oculta heredan.
+    Orden: carpetas primero, nombre natural (`a2` antes que `a10`).
+  - `watch.rs`: un watcher de `notify` por página, **no recursivo**, solo sobre las carpetas
+    visibles (raíz + expandidas). `watch_set` recibe el conjunto completo, libera el resto y
+    devuelve lo que vigila; el explorador oculto vigila cero. Debounce de 150 ms (máx. 600 ms con
+    cambios continuos); se reporta qué carpetas cambiaron y el frontend re-lista solo esas.
+    Cambios dentro de `.git` se ignoran. Máximo 256 carpetas. Al empezar a vigilar una carpeta
+    se la vuelve a listar: un cambio entre el primer listado y el watch se perdía (lo encontró la
+    e2e).
+  - `git.rs`: `git rev-parse --show-toplevel` + `git --no-optional-locks status --porcelain=v2
+    --branch -z --untracked-files=normal`, con `GIT_OPTIONAL_LOCKS=0`, sin ventana y timeout de
+    15 s (repos enormes: se abandona, no se apilan procesos). Rama, ahead/behind y cambios.
+  - `ops.rs`: crear archivo/carpeta (nunca sobrescribe), renombrar (valida nombres de Windows:
+    caracteres, `CON`/`NUL`…, punto o espacio final), papelera con `SHFileOperationW`
+    (`FOF_ALLOWUNDO` + `FOF_WANTNUKEWARNING`: si no hay papelera, Windows pregunta en vez de
+    borrar en silencio), abrir en VS Code (`code.cmd` del PATH o instalaciones habituales) y en el
+    Explorador (`explorer /select,"…"` con `raw_arg`).
+  - Los watchers pertenecen a la página (label) como las sesiones: recargar, cerrar la ventana o
+    salir los libera.
+- **Frontend**: lógica pura en `lib/explorerModel.ts` (rutas, comillas por shell, árbol aplanado,
+  decoraciones de git; con tests). Estado en `store/explorer.ts` (visible, ancho, ver ocultos,
+  fijado, expandidas, listados de lo visible) y `store/git.ts` (estado por repo). Carga y watcher
+  en `lib/explorerData.ts`; acciones en `lib/explorerActions.ts`.
+- **Árbol virtualizado** (`FileTree.tsx`): filas de 22 px absolutas, solo las visibles más un
+  margen. 5000 archivos = ~40 filas en el DOM y ninguna tarea larga (medido en e2e).
+- **Clic en una carpeta** → `cd` en el panel activo **solo si** la integración dice que la shell
+  está libre (sin comando en ejecución, OSC 133) y el prompt está vacío (lo escrito desde la
+  marca 133;B, `ShellIntegrationHandle.promptInput()`). Si no, no se escribe nada en esa
+  terminal: aviso discreto con "Abrir tab aquí". Sin integración tampoco se escribe.
+  PowerShell: `Set-Location -LiteralPath '…'`; Git Bash: `cd -- '/c/…'`. Un breadcrumb hace lo
+  mismo (fijado: navega la carpeta fijada).
+- **Clic en un archivo** → su ruta en el prompt del panel activo, sin ejecutar, vía `term.paste`
+  (bracketed paste si el programa lo pidió: los agentes lo reciben como pegado). PowerShell:
+  comillas simples, duplicando `'` y sus variantes tipográficas (PowerShell también las toma como
+  comillas). Git Bash: ruta MSYS entre comillas simples (`'\''` para una comilla). Siempre con
+  comillas y un espacio al final.
+- **Arrastrar** una fila a una terminal pega la ruta en **ese** panel (lo resalta mientras tanto).
+  Con `dragDropEnabled` (default de Tauri) el drag & drop HTML5 no funciona en Windows: el
+  arrastre interno usa pointer events (`lib/dropTarget.ts`, `paneAt` con `elementFromPoint`).
+  Archivos desde el Explorador de Windows: evento nativo `onDragDropEvent` de Tauri (posición en
+  píxeles físicos → CSS) → mismo `insertPaths`. La e2e emite ese mismo evento con
+  `plugin:event|emit_to`.
+- **Git**: rama (↑/↓ y • si hay cambios) en la barra de estado para el cwd del panel activo;
+  colores en el árbol (modificado amarillo, nuevo/sin seguir verde, renombrado azul,
+  conflicto/borrado rojo; las carpetas toman el cambio más fuerte de adentro; ignorados y ocultos
+  atenuados). Se refresca al cambiar la raíz, cuando el watcher ve cambios (400 ms) y al
+  terminar cualquier comando en un panel (OSC 133: `git commit`/`checkout` desde la terminal).
+  Un solo proceso git por carpeta a la vez; un pedido durante una corrida la repite una vez.
+- **Menú contextual**: abrir en VS Code, en el Explorador de Windows, tab nueva aquí, dividir
+  aquí, copiar ruta, copiar ruta relativa (a la raíz del explorador), nuevo archivo, nueva
+  carpeta (input en línea), renombrar (`F2` con el árbol enfocado) y eliminar (`Supr`; a la
+  papelera, con confirmación con foco en Cancelar).
+- **Preferencias**: visible, ancho y "ver ocultos" en `localStorage` (`terminal.explorer`)
+  hasta la Fase 6.
+- **RAM** (números en "Estado"): el árbol cuesta poco porque solo se guarda lo visible; al
+  colapsar u ocultar se descartan listados y watchers.
+
 ## Estructura
 
 ```
@@ -251,8 +323,15 @@ src/                        Frontend (solo render + input)
   components/Workspace.tsx  Todos los TerminalPane montados y posicionados + divisores + SearchBar
   components/TerminalPane.tsx  Una instancia xterm + addons + sesión por pane (memo, nunca se recrea)
   components/PaneDivider.tsx   Divisor arrastrable (doble clic: igualar)
-  components/StatusBar.tsx  cwd del panel activo, estado del último comando, aviso de integración
-  lib/pty.ts                ÚNICO punto que llama a invoke(); wrappers tipados de los comandos
+  components/StatusBar.tsx  cwd del panel activo, rama de git, último comando, aviso de integración
+  components/Sidebar.tsx    Explorador: breadcrumbs, fijar, ver ocultos, aviso, ancho redimensionable
+  components/FileTree.tsx   Árbol virtualizado: clic (cd / insertar), arrastrar a un panel, renombrar
+  lib/pty.ts                Punto de IPC de las terminales; wrappers tipados de los comandos
+  lib/fsApi.ts              Punto de IPC del explorador (listar, watcher, git, operaciones, drop nativo)
+  lib/explorerModel.ts      Lógica pura del explorador (+ explorerModel.test.ts)
+  lib/explorerData.ts       Listados perezosos con generación, watcher de lo visible, refresco de git
+  lib/explorerActions.ts    cd con guardas, insertar rutas, acciones del menú contextual
+  lib/dropTarget.ts         Panel bajo el puntero, resaltado, archivos soltados desde otras apps
   lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (buffer de input, restart)
   lib/shellIntegration.ts   Handlers OSC 7/133/633 → ShellEvent (parsers puros + shellIntegration.test.ts)
   lib/paths.ts              Nombre de carpeta y acortado de rutas (~, …) para la UI
@@ -268,11 +347,15 @@ src/                        Frontend (solo render + input)
   store/workspace.ts        zustand sobre el modelo (ids, acciones)
   store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda (estado efímero)
   store/system.ts           zustand: carpeta del usuario y shells disponibles (system_info)
+  store/explorer.ts         zustand: estado del explorador (persistencia simple en localStorage)
+  store/git.ts              zustand: estado de git por repositorio + refreshGit (un proceso a la vez)
   store/settings.ts         zustand: fuente, cursor, scrollback, tema, zoom
   config/theme.ts, colors.ts  Tema y paleta de colores de tabs/grupos
 src-tauri/
   src/lib.rs                Builder de Tauri, ciclo de vida de ventanas/página/app
   src/commands.rs           Comandos Tauri finos: validan y delegan en PtyManager
+  src/explorer_commands.rs  Comandos del explorador (spawn_blocking) y su canal del watcher
+  src/explorer/             list.rs, watch.rs, git.rs, ops.rs (sin Tauri; tests unitarios)
   src/pty/manager.rs        Registro de sesiones (create/write/resize/close/close_owned_by/shutdown)
   src/pty/session.rs        ConPTY + hilos reader/flusher/writer/waiter + batching
   src/pty/job.rs            Job Object: miembros, KILL_ON_JOB_CLOSE, kill verificado (solo Windows)
@@ -284,10 +367,12 @@ src-tauri/
   src/pty/platform.rs       Build de Windows (RtlGetVersion) para `pty_backend`
   resources/shell-integration/  powershell.ps1 y bash.sh (recursos del bundle)
   tests/pty.rs              Tests de integración con procesos reales (PowerShell/Git Bash/ConPTY)
+  tests/explorer.rs         Listado (.gitignore, ocultos, 5000 archivos) y git real
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
   fake-agent.mjs            Agente de IA falso para pruebas (ver "Pruebas con agentes")
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
+  recycle.ps1               Verifica que lo borrado por la e2e está en la papelera y lo saca de ahí
   artifacts/                Capturas y log de `tauri dev` (ignorado por git)
 ```
 
@@ -345,10 +430,13 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
 
 **TypeScript / React**
 - `strict` + `noUncheckedIndexedAccess`; prohibido `any`.
-- Todo IPC pasa por `src/lib/pty.ts`. Los componentes no llaman a `invoke` directamente.
+- Todo IPC pasa por `src/lib/pty.ts` (terminales) y `src/lib/fsApi.ts` (explorador). Los
+  componentes no llaman a `invoke` directamente.
 - Las instancias de `Terminal` (xterm) y addons viven en `lib/terminalRegistry.ts`, **nunca** en
   zustand ni en estado de React (son imperativas y no serializables). zustand guarda solo estado
-  serializable: `workspace` (tabs/grupos/panes), `ui` (efímero) y `settings`.
+  serializable: `workspace` (tabs/grupos/panes), `ui` (efímero), `settings`, `system`,
+  `explorer` y `git`. Lo imperativo del explorador (id del watcher, generaciones de pedidos,
+  timers) vive en módulos de `lib/`.
 - Las reglas de tabs y grupos van en `store/workspaceModel.ts` como funciones puras con tests;
   el store solo las envuelve. Devolver el mismo objeto si nada cambió (evita re-renders).
 - Componentes funcionales, uno por archivo, PascalCase. Excepción: piezas chicas y privadas de un
@@ -388,6 +476,10 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   ruta completa) y el subtítulo de la tab la muestran; dividir, duplicar y nueva tab abren ahí.
   `cmd /c exit 3` muestra ✗ 3; cerrar la tab durante `Start-Sleep 30` pide confirmación. Con el
   prompt de oh-my-posh/starship (si se usan) todo sigue igual.
+- [ ] Explorador: `Ctrl+B` lo muestra/oculta; sigue al panel activo; clic en carpeta hace `cd`
+  (no si hay un comando corriendo); clic en archivo inserta la ruta. **A mano** (la e2e no abre
+  apps externas ni hace un arrastre real del sistema): "Abrir en VS Code", "Abrir en el
+  Explorador de Windows" y arrastrar un archivo desde el Explorador de Windows a un panel.
 
 ## Atajos
 
@@ -395,6 +487,10 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 |---|---|
 | `Ctrl+Shift+T` / botón `+` | Nueva tab (en la carpeta del panel activo) |
 | Botón `▾` junto al `+` | Nueva tab con otra shell (Git Bash) |
+| `Ctrl+B` | Mostrar / ocultar el explorador de archivos |
+| Clic en carpeta / archivo del explorador | `cd` en el panel activo (si está libre) / insertar la ruta |
+| Arrastrar del explorador (o del Explorador de Windows) a un panel | Pegar la ruta con comillas en ese panel |
+| `F2` / `Supr` con el árbol enfocado | Renombrar / mover a la papelera |
 | `Ctrl+Shift+W` | Cerrar el panel activo; si es el último, la tab (confirma si hay procesos además de la shell) |
 | `Alt+Shift+D` / `Alt+Shift+-` | Dividir el panel a la derecha / hacia abajo |
 | `Alt+←↑→↓` | Mover el foco al panel en esa dirección |
@@ -421,7 +517,10 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 Los atajos de tabs y paneles se escuchan en fase de captura sobre `window`: ganan sobre xterm y el
 programa nunca los recibe. Por eso siguen el estilo de Windows Terminal (`Ctrl+Shift+…`,
 `Alt+Shift+…`): `Ctrl+T` y `Ctrl+W` llegan al programa (readline, nano; verificado en e2e). Siguen
-tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab` y `Alt+flechas`.
+tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab`, `Alt+flechas` y `Ctrl+B` (como en VS Code;
+readline pierde su "carácter atrás", que tiene la flecha, y tmux su prefijo por defecto).
+Mantener apretado un atajo no repite la acción (`event.repeat` se ignora salvo para moverse
+entre tabs y paneles), y la tecla igual no llega al programa.
 
 ## Gotchas conocidos
 
@@ -565,11 +664,56 @@ tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab` y `Alt+flechas`.
     bloqueado), oh-my-posh y starship reales. Lo de PSReadLine 2.2 está cubierto con una función
     equivalente en `tests/pty.rs`. Para verificarlo: instalar pwsh 7 (`cargo test` y la app lo
     eligen solos) y correr `cargo test` + `npm run e2e`.
+- **Fase 5 — explorador de archivos: completa y verificada (2026-11-19).** Barra lateral
+  (`Ctrl+B`, ancho y visibilidad recordados) que sigue el cwd del panel activo, con fijar y
+  breadcrumbs; árbol perezoso y virtualizado; watcher de lo visible con debounce; `.gitignore` y
+  carpetas ocultas por defecto con toggle; `cd` por clic solo con la shell libre (OSC 133) y el
+  prompt vacío; insertar rutas con comillas por shell (clic, arrastre interno y desde el
+  Explorador de Windows, en el panel donde se suelta); menú contextual completo; rama y colores de
+  git en segundo plano. Antes: los atajos de acciones ignoran `keydown` con `repeat`.
+  - `npm test`: 47 (6 nuevos del explorador: rutas, breadcrumbs, comillas PowerShell/Git Bash,
+    árbol con ocultos heredados y 20 000 entradas, decoraciones de git).
+  - `cargo test`: 28 unitarios (validación de nombres, crear/renombrar, porcelain v2, orden
+    natural, watcher con ráfagas y liberación) + 3 de integración del explorador (listado con
+    `.gitignore`/ocultos/atributo oculto, 5000 archivos en < 2 s, git real con rama y cambios) +
+    16 de PTY.
+  - `npm run e2e`: 213/213 con el código final. La corrida siguiente dio 209/213 por dos fallas ya conocidas del entorno de prueba, ajenas al explorador: el arrastre de una tab al chip de grupo (visto en la Fase 4) y el cierre de la ventana por PID con `win.ps1` cuando la ventana queda en otro tamaño o monitor (capturas a 1629×995 en vez de 1650×1050, igual que en la Fase 4). Etapas nuevas `explorer`, `explorercd`, `watcher`,
+    `gitexplorer`, `bigfolder`, `explorermenu` (60 checks): mantener `Ctrl+Shift+T`/`Ctrl+B`
+    apretado actúa una vez; ancho persistido tras recargar; seguir cwd al cambiar de panel y
+    tab; fijar; carga perezosa; `cd` bloqueado con texto en el prompt y con `Start-Sleep`
+    corriendo (no se escribe nada, "Abrir tab aquí" funciona); rutas con espacios, tildes y ñ;
+    arrastre a un panel que no es el activo; drop nativo (`tauri://drag-drop` emitido por la
+    prueba); Git Bash con ruta MSYS; watcher (crear/renombrar/borrar, subcarpeta, liberar al
+    colapsar y al ocultar, ráfaga de 200); git (colores, `.gitignore`, rama, refresco tras
+    `git add`/`checkout`); 5000 archivos (~40 filas en el DOM, sin tareas largas); menú
+    (copiar rutas, crear, renombrar, papelera verificada y limpiada, tab y split aquí).
+  - **RAM del explorador, release** (`terminal.exe` + WebView2, MB privados, GC forzado):
+    visible en home vs oculto: sin diferencia medible (heap JS 7.0 vs 7.2, ruido). Con 5000
+    archivos en pantalla: heap JS +4.7 (11.7), renderer +15 (58.7); al ocultarlo el heap vuelve
+    a 8.7 (Chromium devuelve el resto al SO de a poco). Proceso Rust: 6.5 → 6.6. El proceso GPU
+    oscila 134–165 sin relación con el explorador. Binario: 6.8 → 8.6 MB (`ignore` trae
+    `regex`/`globset`; `notify` es chico).
+  - Bugs encontrados por la e2e: un archivo creado entre el primer listado y el registro del
+    watcher se perdía (ahora se re-lista al empezar a vigilar). En la prueba: "shell libre"
+    exige ver el primer prompt (la marca de integración llega antes, a veces en otro lote).
+  - Sin explicar todavía (vistos en 2 de ~7 corridas completas, nunca en las parciales ni en las
+    dos últimas completas): (a) dos caracteres seguidos perdidos al tipear rápido (en `tabs`,
+    justo después de que el agente falso sale con Ctrl+C, y en `explorercd`): el comando queda
+    incompleto (`>>`) y la etapa espera de más; (b) dos veces, la página se cerró a mitad de una
+    corrida con la app viva (después de cerrar tabs con `freshTab`). La primera coincidió con el
+    límite de 600 s de la herramienta que corría la e2e; la segunda fue en segundo plano, así
+    que no está explicada. Quedó instrumentado para la próxima: el log de `tauri dev` registra
+    cargas de página y `CloseRequested`/`Destroyed`/`Exit` (solo debug), `TerminalSession` avisa
+    por consola si una escritura a la sesión falla (antes se descartaba en silencio) y la e2e
+    imprime los últimos mensajes de consola si la página se cierra. La e2e completa ya dura
+    ~11 min: correrla en segundo plano.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
-- Próximas fases (ideas): arrastrar paneles a otra tab o a una tab nueva (modelo listo:
-  `movePane`), WSL (ver "Shell integration"), saltar entre comandos y seleccionar la salida de
+- Próximas fases (ideas): Fase 6 (persistencia completa: tabs, grupos, cwd y las preferencias del
+  explorador que hoy van en `localStorage`), navegación por teclado en el árbol del explorador,
+  arrastrar paneles a otra tab o a una tab nueva (modelo listo: `movePane`), WSL (ver "Shell
+  integration"), saltar entre comandos y seleccionar la salida de
   uno (marcas 133 ya disponibles), notificaciones al terminar comandos largos (133;D),
   persistir tabs/grupos (y su cwd) entre sesiones, archivo de configuración (fuente, tema, shell,
   atajos), perfiles de shell configurables, flow control con ACKs para salidas gigantes,

@@ -48,8 +48,11 @@ interface WorkspaceActions {
   /** A shell integration mark (OSC 7 / 133 / 633) from the pane's terminal. */
   applyShellEvent: (paneId: PaneId, event: ShellEvent) => void;
   markActivity: (paneId: PaneId) => void;
-  /** Splits the pane (default: the active one); the new pane gets the focus. Returns its id. */
-  splitPane: (direction: SplitDirection, paneId?: PaneId) => PaneId | null;
+  /**
+   * Splits the pane (default: the active one); the new pane gets the focus and, unless `spawn`
+   * says otherwise, the same shell and folder. Returns its id.
+   */
+  splitPane: (direction: SplitDirection, paneId?: PaneId, spawn?: Partial<model.PaneSpawn>) => PaneId | null;
   /** Removes a pane from its tab (unmounting its terminal closes the session); last pane closes the tab. */
   closePane: (paneId: PaneId) => void;
   focusPane: (paneId: PaneId) => void;
@@ -114,11 +117,11 @@ export const useWorkspace = create<WorkspaceStore>()((set, get) => {
     setPaneSession: (paneId, info) => update((ws) => model.setPaneSession(ws, paneId, info)),
     applyShellEvent: (paneId, event) => update((ws) => model.applyShellEvent(ws, paneId, event)),
     markActivity: (paneId) => update((ws) => model.markActivity(ws, paneId)),
-    splitPane: (direction, paneId) => {
+    splitPane: (direction, paneId, spawn) => {
       const target = paneId ?? selectActivePaneId(get());
       if (!target) return null;
       const ids = { paneId: nextId('pane'), splitId: nextId('split') };
-      update((ws) => model.splitPane(ws, target, direction, ids));
+      update((ws) => model.splitPane(ws, target, direction, ids, { ...model.spawnOf(ws, target), ...spawn }));
       return get().panes[ids.paneId] ? ids.paneId : null;
     },
     closePane: (paneId) => update((ws) => model.closePane(ws, paneId)),

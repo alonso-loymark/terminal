@@ -116,7 +116,7 @@ export const TerminalPane = memo(
         },
         onOutput: () => workspace().markActivity(paneId),
       });
-      const handle: PaneHandle = { term, fit, search, session, host, gpu };
+      const handle: PaneHandle = { term, fit, search, session, host, gpu, integration };
       registerPane(paneId, handle);
 
       installKeybindings(term, {

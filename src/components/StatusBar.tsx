@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { folderName, shortenPath } from '../lib/paths';
+import { refreshGit, selectGitFor, useGit } from '../store/git';
 import { useSystem } from '../store/system';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { Pane } from '../store/workspaceModel';
@@ -53,6 +54,32 @@ function IntegrationNotice({ pane }: { pane: Pane }) {
   );
 }
 
+/** Branch of the repository the active pane is in (git runs in the background). */
+function GitBranch({ cwd }: { cwd: string }) {
+  const git = useGit(selectGitFor(cwd));
+  useEffect(() => refreshGit(cwd), [cwd]);
+  if (!git) return null;
+  const name = git.branch ?? (git.commit ? `HEAD ${git.commit}` : 'sin commits');
+  const sync = `${git.ahead ? ` ↑${git.ahead}` : ''}${git.behind ? ` ↓${git.behind}` : ''}`;
+  const changes = git.changes.length;
+  return (
+    <span
+      className="status-git"
+      data-branch={git.branch ?? undefined}
+      title={`Rama: ${name}${sync}
+${changes ? `${changes} cambio${changes === 1 ? '' : 's'} sin confirmar` : 'Sin cambios'}
+${git.root}`}
+    >
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path d="M5 3.3a1.8 1.8 0 1 0-1.5 1.8v5.8a1.8 1.8 0 1 0 1.5 0V9.4c.6.4 1.4.6 2.3.6h1.4a1.3 1.3 0 0 1 1.3 1.1 1.8 1.8 0 1 0 1.5-.1A2.8 2.8 0 0 0 8.7 8.5H7.3C6 8.5 5 7.7 5 6.6V5.1a1.8 1.8 0 0 0 0-1.8z" />
+      </svg>
+      {name}
+      {sync}
+      {changes > 0 && <span className="status-git-dirty">•</span>}
+    </span>
+  );
+}
+
 /** Below the panes: the active pane's folder (shortened; full path in the tooltip), last command and shell. */
 export function StatusBar() {
   const pane = useWorkspace((s) => {
@@ -81,6 +108,7 @@ export function StatusBar() {
           {shortenPath(pane.cwd, home, maxChars) || folderName(pane.cwd)}
         </span>
       )}
+      {pane?.cwd && <GitBranch cwd={pane.cwd} />}
       {pane && <CommandStatus pane={pane} />}
       <span className="status-spacer" />
       {pane && <IntegrationNotice pane={pane} />}

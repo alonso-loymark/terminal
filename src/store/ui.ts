@@ -6,10 +6,15 @@ export type MenuState =
   | { kind: 'group'; groupId: GroupId; x: number; y: number }
   | { kind: 'pane'; paneId: PaneId; x: number; y: number }
   /** "▾" next to "+": a new tab with another shell. */
-  | { kind: 'shells'; x: number; y: number };
+  | { kind: 'shells'; x: number; y: number }
+  /** Right click in the explorer: on an entry, or on the empty area (the root folder). */
+  | { kind: 'explorer'; path: string; isDir: boolean; isRoot: boolean; x: number; y: number };
 
-/** What a confirmed close acts on. */
-export type CloseTarget = { kind: 'tabs'; tabIds: TabId[] } | { kind: 'pane'; paneId: PaneId };
+/** What the confirmation dialog acts on when accepted. */
+export type CloseTarget =
+  | { kind: 'tabs'; tabIds: TabId[] }
+  | { kind: 'pane'; paneId: PaneId }
+  | { kind: 'trash'; paths: string[] };
 
 export interface ConfirmState {
   title: string;
