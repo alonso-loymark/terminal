@@ -21,7 +21,14 @@ const FAKE_AGENT = path.join(ROOT, 'e2e', 'fake-agent.mjs');
 const GIT_BIN = 'C:\\Program Files\\Git\\usr\\bin';
 const CDP_PORT = Number(process.env.E2E_CDP_PORT ?? 9223);
 const ATTACH = process.env.E2E_ATTACH === '1';
-const only = process.argv[2]?.split(',').filter(Boolean);
+const STARTED = Date.now();
+/**
+ * `npm run e2e:smoke`: the essentials in under 2 minutes, for every change. `npm run e2e`: all
+ * stages, to close a phase (CLAUDE.md, "Regla de fases").
+ */
+const SMOKE = process.argv.includes('--smoke');
+const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'close'];
+const only = SMOKE ? SMOKE_STAGES : process.argv[2]?.split(',').filter(Boolean);
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-e2e-'));
 fs.mkdirSync(ARTIFACTS, { recursive: true });
 
@@ -1440,6 +1447,166 @@ const stages = {
     await freshTab();
   },
 
+  // ------------------------------------------------------------ input integrity
+  async typing() {
+    // Thousands of keys typed fast into three raw-mode recorders (e2e/sink.mjs), with pane,
+    // tab and layout changes in between and no waiting after them. Byte for byte, each program
+    // must get exactly what was typed while its pane was the active one. Two checkpoints tell
+    // where something got lost: what xterm emitted (before the app) and what the program got.
+    await freshTab();
+    const dir = trickyDir('sink');
+    const panes = {};
+    const startSink = async (id) => {
+      const file = path.join(dir, `${id}.txt`);
+      await run(`node ${psQuote(path.join(ROOT, 'e2e', 'sink.mjs'))} ${psQuote(file)}`, { waitPrompt: false });
+      await waitFor((s) => s.includes('SINK listo'), { source: () => paneText(id, 500) });
+      await page.evaluate((id) => {
+        const t = window.__paneTerminal(id);
+        t.__e2eEmitted = '';
+        t.onData((data) => (t.__e2eEmitted += data));
+      }, id);
+      panes[id] = { file, expected: '' };
+      // Passive counters (no effect on timing): keys that reach this pane's textarea, and IME
+      // composition events, to tell "never reached xterm" from "xterm got it and kept it".
+      await page.evaluate((id) => {
+        const t = window.__paneTerminal(id);
+        t.__e2eStats = { keydown: 0, compositionstart: 0, compositionend: 0, input: 0 };
+        for (const type of Object.keys(t.__e2eStats)) {
+          t.textarea.addEventListener(type, () => t.__e2eStats[type]++, true);
+        }
+      }, id);
+    };
+    const left = await activePane();
+    await startSink(left);
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const right = await activePane();
+    await startSink(right);
+    await openTab();
+    const other = await activePane();
+    await startSink(other);
+    const tabs = (await wsState()).order;
+    // Where the keyboard goes: per tab, its active pane.
+    let tab = 1;
+    const activeIn = { 1: right, 2: other };
+    await page.keyboard.press('Control+1');
+    await waitUntil(terminalFocused, 3000);
+
+    let seed = 20261119;
+    const random = (n) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 '\"\\-_.,;:!?()[]{}<>/|@#$%^&*+=~`áéñ";
+    const actions = [
+      ['Alt+ArrowLeft', () => tab === 1 && (activeIn[1] = left)],
+      ['Alt+ArrowRight', () => tab === 1 && (activeIn[1] = right)],
+      ['Control+Tab', () => (tab = tab === 1 ? 2 : 1)],
+      ['click', null],
+      ['Control+b', () => {}],
+      ['none', () => {}],
+    ];
+    // Diagnostics: keys that reach no terminal, and where the focus was at each segment.
+    await page.evaluate(() => {
+      window.__strayKeys = [];
+      window.addEventListener(
+        'keydown',
+        (event) => {
+          const target = event.target;
+          if (target instanceof HTMLTextAreaElement && target.classList.contains('xterm-helper-textarea')) return;
+          window.__strayKeys.push(`${event.key}→${target?.tagName ?? '?'}.${String(target?.className ?? '').slice(0, 24)}`);
+        },
+        true,
+      );
+    });
+    const segments = [];
+    let typed = 0;
+    let lastAction = 'inicio';
+    const SEGMENTS = Number(process.env.E2E_TYPING_SEGMENTS ?? (SMOKE ? 10 : 24));
+    for (let segment = 0; segment < SEGMENTS; segment++) {
+      let text = '';
+      const length = 60 + random(140);
+      for (let i = 0; i < length; i++) text += alphabet[random(alphabet.length)];
+      const target = activeIn[tab];
+      segments.push({ segment, after: lastAction, pane: target, at: panes[target].expected.length, length });
+      panes[target].expected += text;
+      await page.keyboard.type(text);
+      typed += text.length;
+      const [key, apply] = actions[random(actions.length)];
+      lastAction = key;
+      if (key === 'click') {
+        // Click a pane of the visible tab (by the pointer, like a user).
+        const target = tab === 1 ? (random(2) ? left : right) : other;
+        const box = await paneBox(target);
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        activeIn[tab] = target;
+      } else if (key !== 'none') {
+        await page.keyboard.press(key);
+        apply();
+      }
+    }
+    // Close every recorder (Ctrl+D) and compare.
+    for (const [index, id] of [left, right, other].entries()) {
+      const tabIndex = index < 2 ? 1 : 2;
+      await page.keyboard.press(`Control+${tabIndex}`);
+      if (tabIndex === 1) await clickPane(id);
+      await waitUntil(async () => (await activePane()) === id && (await terminalFocused()), 3000);
+      await page.keyboard.press('Control+d');
+      await waitFor((s) => s.includes('SINK fin'), { source: () => paneText(id, 500), timeout: 10000 }).catch(() => null);
+    }
+    void tabs;
+    const report = [];
+    let ok = true;
+    for (const id of [left, right, other]) {
+      const { file, expected } = panes[id];
+      const received = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '(sin archivo)';
+      // ConPTY asks for focus reports (DECSET 1004): xterm sends ESC[I / ESC[O on focus changes
+      // and ConPTY consumes them (they never reach the program). Not typed text: left out.
+      const raw = (await page.evaluate((id) => window.__paneTerminal(id).__e2eEmitted, id)).replace(/\x04$/, '');
+      let emitted = '';
+      const rawIndex = [];
+      for (let i = 0; i < raw.length; ) {
+        if (raw.startsWith('\x1b[I', i) || raw.startsWith('\x1b[O', i)) {
+          i += 3;
+          continue;
+        }
+        rawIndex.push(i);
+        emitted += raw[i];
+        i++;
+      }
+      emitted = emitted.replace(/\x04$/, ''); // the Ctrl+D that closed the recorder
+      const diff = (a, b) => {
+        if (a === b) return 'igual';
+        let at = 0;
+        while (at < a.length && a[at] === b[at]) at++;
+        return `${a.length} esperados, ${b.length} recibidos; primera diferencia en ${at}: ${JSON.stringify(a.slice(at, at + 12))} vs ${JSON.stringify(b.slice(at, at + 12))}`;
+      };
+      const xterm = diff(expected, emitted);
+      const program = diff(expected, received);
+      ok &&= received === expected;
+      report.push(`${id}: xterm ${xterm} | programa ${program}`);
+      if (emitted !== expected) {
+        // Where xterm diverged, raw: a focus out/in (ESC[O ESC[I) there means focus left it.
+        let at = 0;
+        while (at < expected.length && expected[at] === emitted[at]) at++;
+        const r = rawIndex[at] ?? raw.length;
+        report.push(`${id} crudo en la diferencia: ${JSON.stringify(raw.slice(Math.max(0, r - 24), r + 24))}`);
+      }
+    }
+    if (!ok) {
+      const stray = await page.evaluate(() => window.__strayKeys);
+      report.push(`teclas sin terminal: ${stray.length} ${stray.slice(0, 6).join(' ')}`);
+      for (const id of [left, right, other]) {
+        report.push(`${id} contadores: ${JSON.stringify(await page.evaluate((id) => window.__paneTerminal(id).__e2eStats, id))}`);
+      }
+      report.push(`tramos: ${segments.map((s) => `#${s.segment} ${s.after}→${s.pane}@${s.at}+${s.length}`).join('; ')}`);
+    }
+    check(`${typed} teclas rápidas con cambios de panel, tab y layout: cada programa recibe exactamente lo suyo`, ok, report.join(' || '));
+    await shot('29-typing');
+    await showExplorer(); // as found: an odd number of Ctrl+B leaves it hidden
+    await freshTab();
+  },
+
   // ------------------------------------------------------------ explorer (Fase 5)
   async explorer() {
     await freshTab();
@@ -1449,7 +1616,14 @@ const stages = {
 
     // Ctrl+B hides it: the terminal takes the space and the PTY follows.
     const id = await activePane();
-    const narrow = await paneSize(id);
+    // The explorer may have just been shown: measure once the terminal has refitted.
+    let narrow = await paneSize(id);
+    for (let i = 0; i < 20; i++) {
+      await sleep(150);
+      const now = await paneSize(id);
+      if (now === narrow) break;
+      narrow = now;
+    }
     await page.keyboard.press('Control+b');
     await waitUntil(async () => !(await page.$('.sidebar')), 3000);
     await waitUntil(async () => (await paneSize(id)) !== narrow, 3000);
@@ -2022,6 +2196,7 @@ try {
     if (only && !only.includes(name)) continue;
     // The app is gone after "close": give the user's clipboard back while we still can.
     if (name === 'close') await restoreClipboard();
+    const stageStarted = Date.now();
     try {
       await stage();
     } catch (error) {
@@ -2029,6 +2204,7 @@ try {
       await shot(`fail-${name}`).catch(() => {});
       await isolateAfterFailure().catch(() => {});
     }
+    console.log(`== ${name}: ${((Date.now() - stageStarted) / 1000).toFixed(1)} s`);
   }
 } finally {
   if (alive(appPid)) {
@@ -2046,5 +2222,7 @@ try {
   fs.rmSync(WORK, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 const failed = results.filter((r) => !r.ok).length;
-console.log(`\n${results.length - failed}/${results.length} checks OK`);
+console.log(
+  `\n${results.length - failed}/${results.length} checks OK en ${Math.round((Date.now() - STARTED) / 1000)} s${SMOKE ? ' (smoke)' : ''}`,
+);
 process.exit(failed ? 1 : 0);

@@ -1,6 +1,7 @@
 // Tab and pane operations that involve more than state: asking before closing busy tabs or
 // panes, closing the window with the last tab, focusing the terminal afterwards.
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useExplorer } from '../store/explorer';
 import { useUi, type CloseTarget } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { panesOf, tabOfPane, tabTitle, type PaneId, type TabId } from '../store/workspaceModel';
@@ -8,16 +9,29 @@ import { sessionBusy } from './pty';
 import { getPane } from './terminalRegistry';
 
 /**
- * Gives the keyboard back to the visible terminal (after menus, dialogs, renames...). Checked
- * when the frame runs: a click that also starts a rename (double click) must not steal the
- * focus from the rename input, or its blur would commit and close it at once.
+ * Gives the keyboard to the active terminal (after a switch, a menu, a dialog...) **before the
+ * next keystroke**. Until focus moves, keys keep going to the previously focused terminal, even
+ * if it was just hidden: they would land in the wrong pane (the stress test in the e2e `typing`
+ * stage caught exactly that while focus waited for the next frame). So: now if the pane is
+ * already on screen (pane switch), else in a microtask, which runs after React commits the
+ * switch (React queued its own microtask when the store changed) and before any new input
+ * event. A frame later only as a last resort.
  */
 export function focusActiveTerminal(): void {
-  requestAnimationFrame(() => {
-    const ui = useUi.getState();
-    if (ui.renamingTabId || ui.renamingGroupId || ui.menu || ui.confirm) return;
-    getPane(selectActivePaneId(useWorkspace.getState()))?.term.focus();
+  if (focusNow()) return;
+  queueMicrotask(() => {
+    if (!focusNow()) requestAnimationFrame(() => void focusNow());
   });
+}
+
+/** True when done: focused, or another widget (rename, menu, dialog) owns the keyboard. */
+function focusNow(): boolean {
+  const ui = useUi.getState();
+  if (ui.renamingTabId || ui.renamingGroupId || ui.menu || ui.confirm || useExplorer.getState().editing) return true;
+  const pane = getPane(selectActivePaneId(useWorkspace.getState()));
+  if (!pane || pane.host.hidden || !pane.host.isConnected) return false;
+  pane.term.focus();
+  return document.activeElement === pane.term.textarea;
 }
 
 const MAX_COMMAND = 80;

@@ -19,6 +19,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 const FAKE_AGENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../e2e/fake-agent.mjs");
+const SINK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../e2e/sink.mjs");
 const INTEGRATION_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/shell-integration");
 const CHARMAP: &str = r"C:\Windows\System32\charmap.exe";
 
@@ -812,4 +813,73 @@ fn git_bash_integration_loads_the_users_profile_and_reports_commands() {
         shell.wait_for(at, "\x1b]133;B\x07");
     }
     manager.close(shell.id).unwrap();
+}
+
+// ---------------------------------------------------------------- input integrity
+
+/// What a program in the terminal received, compared byte by byte with what was sent.
+fn first_difference(expected: &str, got: &str) -> Option<String> {
+    if expected == got {
+        return None;
+    }
+    let (e, g): (Vec<char>, Vec<char>) = (expected.chars().collect(), got.chars().collect());
+    let at = e
+        .iter()
+        .zip(&g)
+        .position(|(a, b)| a != b)
+        .unwrap_or(e.len().min(g.len()));
+    let around = |s: &[char]| {
+        s[at.saturating_sub(10)..(at + 10).min(s.len())]
+            .iter()
+            .collect::<String>()
+    };
+    Some(format!(
+        "{} chars expected, {} received; first difference at {at}: expected {:?}, got {:?}",
+        e.len(),
+        g.len(),
+        around(&e),
+        around(&g)
+    ))
+}
+
+#[test]
+fn every_keystroke_reaches_the_program_byte_for_byte() {
+    // Thousands of one-character writes as fast as possible (each keystroke in the app is one
+    // write_to_session), into a raw-mode program that records what it gets.
+    let Some(node) = find_on_path("node.exe") else {
+        eprintln!("skipped: node not found");
+        return;
+    };
+    let out = std::env::temp_dir().join(format!("terminal-sink-{}.txt", std::process::id()));
+    let manager = PtyManager::new();
+    let options = SpawnOptions {
+        program: node,
+        args: vec![SINK.into(), out.display().to_string()],
+        cwd: None,
+        env: vec![],
+        cols: 120,
+        rows: 30,
+    };
+    let mut sink = Shell::start(&manager, options, "SINK listo");
+    let alphabet: Vec<char> =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 '\"\\-_.,;:!?()[]{}<>/|@#$%^&*+=~`áéíóúñÑü€"
+            .chars()
+            .collect();
+    let mut seed = 20_261_119_u32;
+    let mut expected = String::new();
+    for _ in 0..5000 {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let c = alphabet[(seed >> 16) as usize % alphabet.len()];
+        expected.push(c);
+        sink.send(&c.to_string());
+    }
+    let from = sink.output.len();
+    sink.send("\x04");
+    sink.wait_for(from, "SINK fin");
+    let got = fs::read_to_string(&out).unwrap();
+    fs::remove_file(&out).ok();
+    if let Some(diff) = first_difference(&expected, &got) {
+        panic!("input lost or reordered: {diff}");
+    }
+    manager.close(sink.id).ok();
 }

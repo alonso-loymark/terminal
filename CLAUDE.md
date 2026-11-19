@@ -29,7 +29,8 @@ vive en el frontend.
                               onData: Channel,                        │ (con shell integration),
                               onExit: Channel}                        │ la mete en un Job Object
                                                                       ▼
- xterm.onData ───── invoke write_to_session ──────► mpsc ──► hilo writer ──► stdin del PTY
+ xterm.onData ─► InputQueue ─ invoke write_to_session ─► mpsc ──► hilo writer ──► stdin del PTY
+                 (un envío a la vez, en orden, reintenta; nunca descarta)
  ResizeObserver+fit ─ invoke resize_session ──────► MasterPty::resize (ResizePseudoConsole)
  term.write(bytes) ◄─ Channel onData (bytes crudos) ◄─ hilo flusher ◄─ mpsc ◄─ hilo reader ◄─ salida PTY
                          (lotes de ≤5 ms / ≤256 KB)
@@ -41,6 +42,13 @@ Reglas de la arquitectura:
 - **IPC por Tauri Channels por sesión, nunca eventos globales (`emit`/`listen`).** La salida viaja
   como bytes crudos (`InvokeResponseBody::Raw` → `ArrayBuffer`); Rust no decodifica UTF-8, xterm
   maneja las secuencias multibyte partidas entre lotes.
+- **Entrada (lo que tipea el usuario)**: `lib/inputQueue.ts`, una cola por sesión. Un solo
+  `write_to_session` en vuelo a la vez (cada `invoke` es un request independiente: sin cola, el
+  orden no estaba garantizado y un error se descartaba), lo que llega mientras tanto se junta en
+  el próximo envío, y un envío que falla se reintenta en su lugar (10 ms … 1 s). Antes de que la
+  sesión exista (respuesta al `ESC[6n` de ConPTY) espera; Shift+Enter es un elemento más de la
+  misma cola, así conserva su lugar. Solo se descarta lo que ya no tiene destino: si el proceso
+  terminó, la cola se vacía (con la sesión terminada, solo `Enter` hace algo: reinicia).
 - **Batching**: el hilo flusher junta todo lo que llega en una ventana de 5 ms (o hasta 256 KB) y
   manda un solo mensaje. Constantes en `src-tauri/src/pty/session.rs`.
 - **Hilos por sesión** (stack chico, nombrados `pty-<id>-*`): `reader` (lee el PTY), `flusher`
@@ -91,7 +99,7 @@ Reglas de la arquitectura:
   (enviaría el prompt): por eso la decisión es por contexto. Codex no está en la tabla: usa
   crossterm, que lee eventos de teclado nativos, así que recibe el Shift+Enter nativo como en
   Windows Terminal (no verificado: no hay codex instalado y no se prueban agentes reales). El
-  comando es síncrono, como `write_to_session`, para que las teclas no se reordenen.
+  pedido viaja por la misma cola que las teclas (`InputQueue`), así no se reordena con ellas.
 - Antes de lanzar cada shell se limpia el flag heredable "ignorar Ctrl+C" del proceso
   (`SetConsoleCtrlHandler(NULL, FALSE)`, ver Gotchas).
 - `session_busy` devuelve lo que cerrar una sesión **mataría** además de la shell (misma lógica que
@@ -332,7 +340,8 @@ src/                        Frontend (solo render + input)
   lib/explorerData.ts       Listados perezosos con generación, watcher de lo visible, refresco de git
   lib/explorerActions.ts    cd con guardas, insertar rutas, acciones del menú contextual
   lib/dropTarget.ts         Panel bajo el puntero, resaltado, archivos soltados desde otras apps
-  lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (buffer de input, restart)
+  lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (entrada en cola, restart)
+  lib/inputQueue.ts         Cola de entrada por sesión: orden, un envío a la vez, reintentos (+ test)
   lib/shellIntegration.ts   Handlers OSC 7/133/633 → ShellEvent (parsers puros + shellIntegration.test.ts)
   lib/paths.ts              Nombre de carpeta y acortado de rutas (~, …) para la UI
   lib/terminalRegistry.ts   PaneId → { term, fit, search, session } (objetos imperativos)
@@ -371,6 +380,7 @@ src-tauri/
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
   fake-agent.mjs            Agente de IA falso para pruebas (ver "Pruebas con agentes")
+  sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
   recycle.ps1               Verifica que lo borrado por la e2e está en la papelera y lo saca de ahí
   artifacts/                Capturas y log de `tauri dev` (ignorado por git)
@@ -385,7 +395,8 @@ npm run build                           # typecheck (tsc) + build del frontend
 npm test                                # tests unitarios del frontend (node --test, sin dependencias)
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
-npm run e2e                             # lanza `tauri dev`, corre todas las etapas y cierra la app
+npm run e2e:smoke                       # lo esencial (~80 s): en cada cambio
+npm run e2e                             # todas las etapas (~4,5 min): para cerrar una fase
 npm run e2e -- tabs,groups              # solo algunas etapas
 E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en el puerto 9223
 ```
@@ -452,6 +463,13 @@ terminada solo si:
 1. `npm run build` y `npm test` pasan sin errores.
 2. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` y `cargo test` pasan.
 3. `npm run e2e` pasa completo (cubre automáticamente casi todo el smoke test de abajo).
+
+Durante el trabajo, después de **cada cambio**: `npm run e2e:smoke` (arranque, Ctrl+C,
+Shift+Enter con agentes falsos, tabs, paneles, shell integration, estrés de entrada, explorador
+y cierre; ~80 s, tiene que quedar por debajo de 2 min). La suite completa (`npm run e2e`,
+~4,5 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
+ni `src-tauri/`: el HMR de Vite o el rebuild de `tauri dev` reinician la app a mitad de camino.
+Cada etapa imprime su duración (`== etapa: N s`).
 
 Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fases sobre una rota.
 
@@ -557,9 +575,19 @@ entre tabs y paneles), y la tecla igual no llega al programa.
 - **@dnd-kit y `aria-disabled`**: `useSortable({ disabled })` marca la tab y todo su contenido como
   `aria-disabled` (lectores de pantalla, y Playwright no deja escribir en el input). Mientras se
   renombra, en vez de deshabilitar, simplemente no se enganchan los `listeners`.
-- **Foco al cambiar de tab**: el pane recién mostrado recibe el foco un frame después (antes era
-  `display: none`). `focusActiveTerminal()` no lo roba si hay un renombrado, menú o diálogo abierto
-  (si no, el doble clic para renombrar cerraba el input al instante).
+- **Foco al cambiar de panel o tab (teclas en el panel equivocado)**: hasta que el foco se
+  mueve, las teclas siguen yendo a la terminal que lo tenía, aunque ya esté oculta. Cuando
+  `focusActiveTerminal()` esperaba al siguiente frame, lo tipeado justo después de `Alt+→`,
+  `Ctrl+Tab` o un clic llegaba al panel anterior (el estrés de la etapa `typing` lo mostró: 1 y
+  2 caracteres de un panel en otro). Ahora enfoca en el acto si el panel ya se ve, o en una
+  microtarea, que corre después de que React aplica el cambio (React encola la suya al cambiar
+  el store) y antes de cualquier tecla nueva; un frame después solo como último recurso. No
+  roba el foco si hay un renombrado, menú, diálogo o edición en el explorador abiertos. Además,
+  si la terminal activa pierde el foco hacia la nada (`<body>`), lo recupera en una microtarea:
+  una tecla sin destino se pierde.
+- **ConPTY pide reportes de foco** (DECSET 1004): xterm manda `ESC[I` / `ESC[O` al ganar o
+  perder el foco y ConPTY los consume (no llegan al programa). En un volcado de lo que emite
+  xterm, su presencia en medio de lo tipeado indica que el foco se fue.
 - **Límite de contextos WebGL**: Chromium mantiene unos 16 contextos WebGL por página. Resuelto con
   WebGL solo en lo visible + `loseContext()` explícito al ocultar (ver "Tabs, grupos y panes").
 - **Eventos de foco con la ventana sin foco**: Chromium no dispara `focus` mientras la ventana no
@@ -705,8 +733,31 @@ entre tabs y paneles), y la tecla igual no llega al programa.
     que no está explicada. Quedó instrumentado para la próxima: el log de `tauri dev` registra
     cargas de página y `CloseRequested`/`Destroyed`/`Exit` (solo debug), `TerminalSession` avisa
     por consola si una escritura a la sesión falla (antes se descartaba en silencio) y la e2e
-    imprime los últimos mensajes de consola si la página se cierra. La e2e completa ya dura
-    ~11 min: correrla en segundo plano.
+    imprime los últimos mensajes de consola si la página se cierra. (a) quedó explicado en la
+    estabilización de abajo: teclas que iban al panel anterior por un foco que llegaba tarde.
+- **Estabilización de la entrada (2026-11-19).** Causa encontrada de las teclas "perdidas": el
+  foco se movía un frame después de cambiar de panel o tab, y lo tipeado en ese hueco iba al
+  panel anterior (con la prueba vieja, que tipea en una sola terminal, se veía como 1–2
+  caracteres de menos). Corregido (ver Gotchas). Además, la entrada pasa por una cola ordenada
+  con reintentos (`InputQueue`): antes cada tecla era un `invoke` independiente, sin orden
+  garantizado y con los errores descartados; y el foco que cae a `<body>` se recupera solo.
+  - El backend no pierde nada: test `every_keystroke_reaches_the_program_byte_for_byte` (5000
+    escrituras de un carácter, ASCII, comillas, `\`, tildes, ñ, €, hacia `e2e/sink.mjs` en modo
+    raw), 6/6 corridas iguales byte a byte.
+  - E2E `typing`: tres terminales con `sink.mjs`, tramos al azar (semilla fija) con cambios de
+    panel, tab, clic y `Ctrl+B` en el medio **sin esperar**; compara por panel lo que emitió
+    xterm y lo que recibió el programa. Antes del arreglo falló en la primera corrida (3
+    caracteres en el panel equivocado); después, ~71 000 teclas en 13 corridas: 1 falla, al
+    principio (62 caracteres que no llegaron a ninguna xterm, en medio de un tramo, sin acción
+    de la prueba cerca), no reproducida en 7 corridas pesadas más con contadores pasivos. Si
+    vuelve, la prueba imprime el flujo crudo de xterm en el punto (con `ESC[O`/`ESC[I` si el foco
+    se fue) y cuántas teclas recibió cada textarea.
+  - `npm test`: 53 (6 de `InputQueue`: orden, un envío en vuelo, fusión, reintentos sin perder,
+    Shift+Enter en su lugar, sesión terminada).
+  - E2E dividida: `npm run e2e:smoke` (< 2 min) y `npm run e2e` (completa). `npm run e2e:smoke`: 80/80 en 82 s; `npm run e2e`: 214/214 en 321 s con el
+    código final (antes de este arreglo la completa tardaba ~11 min: esperas de foco).
+  - Ventana que se cierra a mitad de corrida: no se encontró la causa; queda el registro de la
+    Fase 5 (log de ciclo de vida en `tauri dev`, consola al cerrarse la página).
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".

@@ -154,6 +154,20 @@ export const TerminalPane = memo(
       term.textarea?.addEventListener('focus', onFocus);
       host.addEventListener('pointerdown', onFocus);
 
+      // Keys typed while nothing has the focus (it fell to <body>, e.g. because the focused
+      // element was hidden) reach no terminal and are lost. If the active terminal loses the
+      // focus to nothing, take it back before the next keystroke. Focus moving to another
+      // element (the explorer, an input, a menu) is left alone, and so is the window losing
+      // the system focus (activeElement stays on the textarea then).
+      const onBlur = (event: FocusEvent) => {
+        if (event.relatedTarget || selectActivePaneId(workspace()) !== paneId) return;
+        queueMicrotask(() => {
+          const now = document.activeElement;
+          if (!now || now === document.body) focusActiveTerminal();
+        });
+      };
+      term.textarea?.addEventListener('blur', onBlur);
+
       // Tell xterm it is talking to ConPTY before the first byte of output arrives.
       void ptyBackend().then((info) => {
         if (info) term.options.windowsPty = { backend: info.backend, buildNumber: info.buildNumber ?? undefined };
@@ -181,6 +195,7 @@ export const TerminalPane = memo(
         unsubscribeSettings();
         host.removeEventListener('contextmenu', onContextMenu);
         term.textarea?.removeEventListener('focus', onFocus);
+        term.textarea?.removeEventListener('blur', onBlur);
         host.removeEventListener('pointerdown', onFocus);
         titleSubscription.dispose();
         window.clearTimeout(integrationTimer);

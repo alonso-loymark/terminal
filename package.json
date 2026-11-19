@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "e2e": "node e2e/run.mjs",
+    "e2e:smoke": "node e2e/run.mjs --smoke",
     "test": "node --test \"src/**/*.test.ts\""
   },
   "dependencies": {

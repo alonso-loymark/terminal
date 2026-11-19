@@ -1,5 +1,6 @@
 import type { IDisposable, Terminal } from '@xterm/xterm';
 import type { PaneSpawn, SessionStatus } from '../store/workspaceModel';
+import { InputQueue, type InputItem } from './inputQueue';
 import {
   closeSession,
   createSession,
@@ -34,8 +35,18 @@ export class TerminalSession {
   readonly #subscriptions: IDisposable[];
   #id: SessionId | null = null;
   #status: SessionStatus = 'starting';
-  /** Input produced before the session id is known (see `#start`). */
-  #pendingInput: string[] = [];
+  /**
+   * Everything typed, pasted or answered by xterm, in order and never dropped: it waits while
+   * the session starts and is retried if a delivery fails (see `inputQueue.ts`).
+   */
+  readonly #input = new InputQueue(
+    (id, item: InputItem) =>
+      item.kind === 'text' ? writeToSession(id, item.data) : sendShiftEnter(id).then(() => undefined),
+    {
+      onRetry: (item, error) =>
+        console.warn('[terminal] reintentando una escritura a la sesión', item.kind, String(error)),
+    },
+  );
   /** Distinguishes the current session from earlier ones after a restart. */
   #generation = 0;
   #disposed = false;
@@ -63,25 +74,28 @@ export class TerminalSession {
    * explorer). Callers check first that the shell is idle at an empty prompt.
    */
   sendText(text: string): boolean {
-    if (this.#status !== 'running' || this.#id === null) return false;
-    this.#send(this.#id, text);
+    if (this.#status !== 'running') return false;
+    this.#input.push({ kind: 'text', data: text });
     return true;
   }
 
   /** Shift+Enter, translated by the backend for whatever runs in the session. */
   shiftEnter(): void {
-    if (this.#status !== 'running' || this.#id === null) {
-      // Not connected (starting, exited, failed): behave like Enter.
+    if (this.#status === 'exited' || this.#status === 'failed') {
+      // No process: behave like Enter (which starts a new session).
       this.#handleInput('\r');
       return;
     }
-    sendShiftEnter(this.#id).catch(ignore);
+    // Queued like any key, so it keeps its place among them (also while starting).
+    this.#input.push({ kind: 'shiftEnter' });
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
     for (const subscription of this.#subscriptions) subscription.dispose();
+    this.#input.setTarget(null);
+    this.#input.clear();
     if (this.#id !== null) closeSession(this.#id).catch(ignore);
     this.#id = null;
   }
@@ -114,10 +128,9 @@ export class TerminalSession {
       this.#callbacks.onStarted?.(info);
       this.#setStatus('running');
       // ConPTY asks for the cursor position (ESC[6n) as soon as it starts and renders nothing
-      // until it gets an answer. xterm may answer before we knew the id: deliver it now.
-      const pending = this.#pendingInput;
-      this.#pendingInput = [];
-      for (const data of pending) this.#send(id, data);
+      // until it gets an answer. xterm may answer before we knew the id: it waited in the
+      // queue, which delivers from now on.
+      this.#input.setTarget(id);
       if (this.#term.cols !== cols || this.#term.rows !== rows) {
         this.#handleResize(this.#term.cols, this.#term.rows);
       }
@@ -131,24 +144,11 @@ export class TerminalSession {
 
   #handleInput(data: string): void {
     if (this.#status === 'exited' || this.#status === 'failed') {
+      // No process to type into: Enter starts a new session, other keys have nowhere to go.
       if (data === '\r') this.start();
       return;
     }
-    if (this.#id === null) {
-      this.#pendingInput.push(data);
-      return;
-    }
-    this.#send(this.#id, data);
-  }
-
-  #send(id: SessionId, data: string): void {
-    // Rejects when the session is already gone (its exit notice is on the way). Anything else
-    // means lost input: say so.
-    writeToSession(id, data).catch((error: unknown) => {
-      if (this.#id === id && this.#status === 'running') {
-        console.warn('[terminal] no se pudo escribir en la sesión', id, JSON.stringify(data), error);
-      }
-    });
+    this.#input.push({ kind: 'text', data });
   }
 
   #handleResize(cols: number, rows: number): void {
@@ -158,7 +158,9 @@ export class TerminalSession {
   #handleExit(generation: number, exitCode: number | null): void {
     if (this.#disposed || generation !== this.#generation) return;
     this.#id = null;
-    this.#pendingInput = [];
+    // The process is gone: input still queued for it has nowhere to go.
+    this.#input.setTarget(null);
+    this.#input.clear();
     this.#setStatus('exited', exitCode);
     const code = exitCode === null ? '' : ` con código ${exitCode}`;
     // Soft reset (DECSTR) so modes left behind by the dead process don't leak into the next one.
