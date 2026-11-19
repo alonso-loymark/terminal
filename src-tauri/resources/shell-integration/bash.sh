@@ -1,7 +1,8 @@
-# Shell integration for Git Bash (bash 5.1+). The terminal starts it as
+# Shell integration for Git Bash and WSL's bash (bash 5.1+). The terminal starts it as
 #     bash.exe --rcfile <this file> -i      (with CHERE_INVOKING=1 to keep the start directory)
-# and this file first reads the startup files a login shell would (Git Bash's default), so the
-# user's configuration loads as usual and is never modified.
+# (in WSL, through the launcher in src-tauri/src/pty/shell.rs) and this file first reads the
+# startup files a login shell would (both start login shells), so the user's configuration
+# loads as usual and is never modified.
 #
 # Sequences: OSC 7 (cwd as a Windows path, percent-encoded UTF-8), OSC 133 A/B/C/D, OSC 633 E
 # (command line) and OSC 633 P;Shell=bash (loaded). No DEBUG trap: a user's own (bash-preexec,
@@ -47,7 +48,17 @@ __term_escape() {
 # file://<host>/<windows path> for $PWD into __term_uri.
 __term_cwd_uri() {
   local win host="${COMPUTERNAME:-localhost}"
-  if [[ "$PWD" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
+  if [ -n "${WSL_DISTRO_NAME:-}" ]; then
+    # WSL: Windows drives are mounted under /mnt; anything else lives in the distribution,
+    # which Windows reaches as \\wsl.localhost\<distro>\...
+    if [[ "$PWD" =~ ^/mnt/([a-zA-Z])(/.*)?$ ]]; then
+      win="${BASH_REMATCH[1]^^}:${BASH_REMATCH[2]:-/}"
+    else
+      __term_encode "$WSL_DISTRO_NAME$PWD"
+      __term_uri="file://wsl.localhost/$__term_encoded"
+      return 0
+    fi
+  elif [[ "$PWD" =~ ^/([a-zA-Z])(/.*)?$ ]]; then
     win="${BASH_REMATCH[1]^^}:${BASH_REMATCH[2]:-/}"
   else
     # Outside a drive mount (/usr, /tmp...): ask MSYS for the Windows path.

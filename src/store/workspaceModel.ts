@@ -15,13 +15,19 @@ export type PaneId = string;
 export type GroupId = string;
 export type SplitId = string;
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'failed';
-/** Shell profiles known to the backend (src-tauri/src/pty/shell.rs). */
-export type ShellKind = 'powershell' | 'gitbash';
+/** Shells the backend knows (src-tauri/src/pty/shell.rs); `other` runs without integration. */
+export type ShellKind = 'powershell' | 'pwsh' | 'cmd' | 'gitbash' | 'wsl' | 'other';
+/** Profile ids (config/profiles.ts): `pwsh`, `cmd`, `wsl-Ubuntu`, `custom-node`... */
+export type ProfileId = string;
 /**
  * pending: the integration script was injected and has not reported yet; ok: loaded;
- * unavailable: not injected (script missing); error: it failed to load (e.g. execution policy).
+ * unavailable: the shell supports it but the script is missing; error: it failed to load (e.g.
+ * execution policy); cwd: the shell only reports its folder (cmd); none: nothing to report (a
+ * custom program, or arguments that rule the injection out).
  */
-export type IntegrationState = 'pending' | 'ok' | 'unavailable' | 'error';
+export type IntegrationState = 'pending' | 'ok' | 'unavailable' | 'error' | 'cwd' | 'none';
+/** What the backend says the started shell will report. */
+export type IntegrationLevel = 'full' | 'cwd' | 'none' | 'missing';
 
 /** What the shell integration reports through OSC 7 / 133 / 633 (see lib/shellIntegration.ts). */
 export type ShellEvent =
@@ -41,8 +47,8 @@ export type ShellEvent =
 
 /** Where and with what a pane's session starts. */
 export interface PaneSpawn {
-  /** null: the default shell. */
-  shell: ShellKind | null;
+  /** null: the default profile. */
+  profile: ProfileId | null;
   /** null: the user's home. The backend also falls back to home if the folder is gone. */
   cwd: string | null;
 }
@@ -102,7 +108,9 @@ export interface Pane {
   exitCode: number | null;
   /** New output arrived while the pane was not on screen. */
   activity: boolean;
-  /** Shell profile: requested, then the one actually started. null = default. */
+  /** Profile: requested, then the one actually started. null = the default one. */
+  profile: ProfileId | null;
+  /** Kind of shell the session runs (how to quote paths, what `cd` looks like). */
   shell: ShellKind | null;
   /** Folder the session was asked to start in (inherited from another pane); null = home. */
   startCwd: string | null;
@@ -218,7 +226,7 @@ export interface NewTab {
   customTitle?: string | null;
   color?: TabColor | null;
   activate?: boolean;
-  shell?: ShellKind | null;
+  profile?: ProfileId | null;
   cwd?: string | null;
 }
 
@@ -233,7 +241,7 @@ export function addTab(ws: Workspace, spec: NewTab): Workspace {
     activePaneId: spec.paneId,
     zoomedPaneId: null,
   };
-  const pane = newPane(spec.paneId, { shell: spec.shell ?? null, cwd: spec.cwd ?? null });
+  const pane = newPane(spec.paneId, { profile: spec.profile ?? null, cwd: spec.cwd ?? null });
   const at = spec.after ? ws.tabOrder.indexOf(spec.after) : -1;
   const tabOrder = [...ws.tabOrder];
   tabOrder.splice(at >= 0 ? at + 1 : tabOrder.length, 0, tab.id);
@@ -294,14 +302,15 @@ function clearActivity(panes: Record<PaneId, Pane>, ids: PaneId[]): Record<PaneI
   return next;
 }
 
-const newPane = (id: PaneId, spawn: PaneSpawn = { shell: null, cwd: null }): Pane => ({
+const newPane = (id: PaneId, spawn: PaneSpawn = { profile: null, cwd: null }): Pane => ({
   id,
   sessionId: null,
   title: '',
   status: 'starting',
   exitCode: null,
   activity: false,
-  shell: spawn.shell,
+  profile: spawn.profile,
+  shell: null,
   startCwd: spawn.cwd,
   cwd: null,
   lastCommand: null,
@@ -312,12 +321,12 @@ const newPane = (id: PaneId, spawn: PaneSpawn = { shell: null, cwd: null }): Pan
 });
 
 /**
- * How to start a session like this pane's: same shell, in its current folder (the last one the
- * shell reported, else the one it started in). Used by split, duplicate, new tab and restart.
+ * How to start a session like this pane's: same profile, in its current folder (the last one
+ * the shell reported, else the one it started in). Used by split, duplicate, new tab and restart.
  */
 export function spawnOf(ws: Workspace, paneId: PaneId | null | undefined): PaneSpawn {
   const pane = paneId ? ws.panes[paneId] : undefined;
-  return { shell: pane?.shell ?? null, cwd: pane?.cwd ?? pane?.startCwd ?? null };
+  return { profile: pane?.profile ?? null, cwd: pane?.cwd ?? pane?.startCwd ?? null };
 }
 
 /** Next/previous visible tab, wrapping around (Ctrl+Tab / Ctrl+Shift+Tab). */
@@ -502,22 +511,23 @@ export function setPaneStatus(
   return { ...ws, panes: { ...ws.panes, [paneId]: next } };
 }
 
-/** The backend started the session: which shell, and whether the integration was injected. */
+/** The backend started the session: which profile and shell, and what it will report. */
 export function setPaneSession(
   ws: Workspace,
   paneId: PaneId,
-  info: { shell: ShellKind; integration: boolean },
+  info: { profile?: ProfileId | null; shell: ShellKind; integration: IntegrationLevel },
 ): Workspace {
   const pane = ws.panes[paneId];
   if (!pane) return ws;
+  const profile = info.profile === undefined ? pane.profile : info.profile;
+  let integration: IntegrationState;
+  if (info.integration === 'missing') integration = 'unavailable';
+  else if (info.integration === 'cwd') integration = 'cwd';
+  else if (info.integration === 'none') integration = 'none';
   // Never downgrade an 'ok' or 'error' that the shell already reported.
-  const integration: IntegrationState = !info.integration
-    ? 'unavailable'
-    : pane.integration === 'unavailable'
-      ? 'pending'
-      : pane.integration;
-  if (pane.shell === info.shell && pane.integration === integration) return ws;
-  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, shell: info.shell, integration } } };
+  else integration = pane.integration === 'ok' || pane.integration === 'error' ? pane.integration : 'pending';
+  if (pane.shell === info.shell && pane.integration === integration && pane.profile === profile) return ws;
+  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, profile, shell: info.shell, integration } } };
 }
 
 /** Applies one shell integration mark to the pane. Same object back if nothing changed. */

@@ -2,6 +2,8 @@
 import type { Terminal } from '@xterm/xterm';
 import type { useExplorer } from './store/explorer';
 import type { useGit } from './store/git';
+import type { currentProfiles } from './store/profiles';
+import type { useSettings } from './store/settings';
 import type { useSystem } from './store/system';
 import type { useUi } from './store/ui';
 import type { useWorkspace } from './store/workspace';
@@ -17,5 +19,9 @@ declare global {
     __explorer?: typeof useExplorer;
     __git?: typeof useGit;
     __paneTerminal?: (paneId: string) => Terminal | undefined;
+    __settings?: typeof useSettings;
+    __profiles?: typeof currentProfiles;
+    /** Whether a pane's terminal has the ligature joiner registered. */
+    __paneLigatures?: (paneId: string) => boolean;
   }
 }

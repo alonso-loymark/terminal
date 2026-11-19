@@ -385,7 +385,7 @@ const pane = (ws: Workspace, id = 'p1') => {
 /** One tab whose shell loaded the integration. */
 function integrated(): Workspace {
   let ws = setPaneStatus(workspace(1), 'p1', 'running', null, 7);
-  ws = setPaneSession(ws, 'p1', { shell: 'powershell', integration: true });
+  ws = setPaneSession(ws, 'p1', { profile: 'powershell', shell: 'powershell', integration: 'full' });
   ws = applyShellEvent(ws, 'p1', { type: 'integration', ok: true });
   return applyShellEvent(ws, 'p1', { type: 'cwd', cwd: 'C:\\Users\\Ana' });
 }
@@ -417,9 +417,12 @@ test('shell integration: OSC 7 from inside a running command is not the pane fol
 });
 
 test('shell integration: load failures, missing script and late reports', () => {
-  let ws = setPaneSession(workspace(1), 'p1', { shell: 'powershell', integration: false });
+  let ws = setPaneSession(workspace(1), 'p1', { shell: 'powershell', integration: 'missing' });
   assert.equal(pane(ws).integration, 'unavailable');
-  ws = setPaneSession(workspace(1), 'p1', { shell: 'powershell', integration: true });
+  // cmd reports only its folder; a custom program, nothing (neither shows a notice).
+  assert.equal(pane(setPaneSession(workspace(1), 'p1', { shell: 'cmd', integration: 'cwd' })).integration, 'cwd');
+  assert.equal(pane(setPaneSession(workspace(1), 'p1', { shell: 'other', integration: 'none' })).integration, 'none');
+  ws = setPaneSession(workspace(1), 'p1', { shell: 'powershell', integration: 'full' });
   assert.equal(pane(ws).integration, 'pending');
   ws = applyShellEvent(ws, 'p1', { type: 'integration', ok: false, error: 'scripts deshabilitados' });
   assert.equal(pane(ws).integration, 'error');
@@ -427,7 +430,7 @@ test('shell integration: load failures, missing script and late reports', () => 
   // A slow profile that reports after the timeout recovers.
   ws = applyShellEvent(ws, 'p1', { type: 'integration', ok: true });
   assert.equal(pane(ws).integration, 'ok');
-  assert.equal(pane(setPaneSession(ws, 'p1', { shell: 'powershell', integration: true })).integration, 'ok');
+  assert.equal(pane(setPaneSession(ws, 'p1', { shell: 'powershell', integration: 'full' })).integration, 'ok');
   assert.equal(applyShellEvent(ws, 'p1', { type: 'integration', ok: true }), ws, 'no change, same object');
 });
 
@@ -439,17 +442,18 @@ test('a restart forgets the commands but keeps the folder; an exit stops the run
   assert.equal(pane(ws).integration, 'pending');
   assert.equal(pane(ws).lastCommand, null);
   assert.equal(pane(ws).cwd, 'C:\\Users\\Ana', 'the new session starts there');
-  assert.deepEqual(spawnOf(ws, 'p1'), { shell: 'powershell', cwd: 'C:\\Users\\Ana' });
+  assert.deepEqual(spawnOf(ws, 'p1'), { profile: 'powershell', cwd: 'C:\\Users\\Ana' });
 });
 
-test('split and new tabs inherit shell and folder; without a reported folder, the starting one', () => {
-  let ws = setPaneSession(integrated(), 'p1', { shell: 'gitbash', integration: true });
+test('split and new tabs inherit profile and folder; without a reported folder, the starting one', () => {
+  let ws = setPaneSession(integrated(), 'p1', { profile: 'gitbash', shell: 'gitbash', integration: 'full' });
   ws = splitPane(ws, 'p1', 'horizontal', { paneId: 'p2', splitId: 's1' });
-  assert.equal(pane(ws, 'p2').shell, 'gitbash');
+  assert.equal(pane(ws, 'p2').profile, 'gitbash');
+  assert.equal(pane(ws, 'p2').shell, null, 'known once its own session starts');
   assert.equal(pane(ws, 'p2').startCwd, 'C:\\Users\\Ana');
   assert.equal(pane(ws, 'p2').cwd, null, 'until its own shell reports');
-  assert.deepEqual(spawnOf(ws, 'p2'), { shell: 'gitbash', cwd: 'C:\\Users\\Ana' }, 'falls back to startCwd');
-  ws = addTab(ws, { tabId: 't2', paneId: 'q1', shell: null, cwd: 'D:\\x' });
-  assert.deepEqual(spawnOf(ws, 'q1'), { shell: null, cwd: 'D:\\x' });
-  assert.deepEqual(spawnOf(ws, 'nope'), { shell: null, cwd: null });
+  assert.deepEqual(spawnOf(ws, 'p2'), { profile: 'gitbash', cwd: 'C:\\Users\\Ana' }, 'falls back to startCwd');
+  ws = addTab(ws, { tabId: 't2', paneId: 'q1', profile: null, cwd: 'D:\\x' });
+  assert.deepEqual(spawnOf(ws, 'q1'), { profile: null, cwd: 'D:\\x' });
+  assert.deepEqual(spawnOf(ws, 'nope'), { profile: null, cwd: null });
 });

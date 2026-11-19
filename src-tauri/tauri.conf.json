@@ -10,18 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Terminal",
-        "width": 1100,
-        "height": 700,
-        "minWidth": 480,
-        "minHeight": 280,
-        "center": true,
-        "backgroundColor": "#0d1117"
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": {
         "default-src": "'self'",

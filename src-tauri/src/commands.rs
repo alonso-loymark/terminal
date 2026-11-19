@@ -8,8 +8,8 @@ use tauri::path::BaseDirectory;
 use tauri::{Manager, State, Webview};
 
 use crate::pty::{
-    self, BusyProcess, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId, ShellKind,
-    ShellProfile, ShiftEnterTarget, SpawnOptions,
+    self, BusyProcess, Integration, PtyBackend, PtyError, PtyManager, SessionEvents, SessionId,
+    ShellKind, ShellProfile, ShellSpec, ShiftEnterTarget, SpawnOptions,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,8 +24,8 @@ pub struct SessionExit {
 pub struct SessionInfo {
     session_id: SessionId,
     shell: ShellKind,
-    /// The shell integration script was injected (cwd and command marks will follow).
-    integration: bool,
+    /// What the shell will report (cwd, command marks) through OSC sequences.
+    integration: Integration,
 }
 
 /// Forwards a session's events to the webview through its own channels.
@@ -55,38 +55,16 @@ pub async fn create_session(
     cols: u16,
     rows: u16,
     cwd: Option<String>,
-    shell: Option<ShellKind>,
+    shell: Option<ShellSpec>,
     on_data: Channel<InvokeResponseBody>,
     on_exit: Channel<SessionExit>,
 ) -> Result<SessionInfo, PtyError> {
-    let profile = shell
-        .and_then(pty::shell_profile)
-        .or_else(|| pty::shell_profile(ShellKind::PowerShell))
-        .ok_or_else(|| PtyError::Spawn("no shell available".to_owned()))?;
     // Bundled with the app (tauri.conf.json > bundle.resources); copied next to the exe in dev.
     let integration_dir = webview
         .app_handle()
         .path()
         .resolve("shell-integration", BaseDirectory::Resource)
         .ok();
-    let launch = pty::launch(&profile, integration_dir.as_deref());
-    let requested = cwd.map(PathBuf::from);
-    let mut env = vec![("COLORTERM".to_owned(), "truecolor".to_owned())];
-    env.extend(launch.env);
-    let options = SpawnOptions {
-        program: launch.program,
-        args: launch.args,
-        // A directory that no longer exists or cannot be read falls back to the home folder.
-        cwd: pty::resolve_cwd(requested.as_deref()),
-        env,
-        cols,
-        rows,
-    };
-    let info = |session_id| SessionInfo {
-        session_id,
-        shell: profile.kind,
-        integration: launch.integration,
-    };
     let manager = manager.inner().clone();
     let owner = webview.label().to_owned();
     let events = ChannelEvents {
@@ -94,8 +72,30 @@ pub async fn create_session(
         exit: on_exit,
     };
 
-    // Starting a shell (and its conhost) blocks for a few ms: keep it off the async workers.
+    // Probing shells and starting one (and its conhost) blocks for a few ms: keep it off the
+    // async workers.
     tauri::async_runtime::spawn_blocking(move || {
+        let detected = pty::available_shells();
+        let shell = pty::resolve(shell.as_ref(), &detected)
+            .ok_or_else(|| PtyError::Spawn("el perfil no tiene una shell instalada".to_owned()))?;
+        // A directory that no longer exists or cannot be read falls back to the home folder.
+        let cwd = pty::resolve_cwd(cwd.map(PathBuf::from).as_deref());
+        let launch = pty::launch(&shell, integration_dir.as_deref(), cwd.as_deref());
+        let mut env = vec![("COLORTERM".to_owned(), "truecolor".to_owned())];
+        env.extend(launch.env);
+        let options = SpawnOptions {
+            program: launch.program,
+            args: launch.args,
+            cwd: launch.cwd,
+            env,
+            cols,
+            rows,
+        };
+        let info = |session_id| SessionInfo {
+            session_id,
+            shell: shell.kind,
+            integration: launch.integration,
+        };
         match manager.create(&owner, options.clone(), events.clone()) {
             // The directory passed the checks but CreateProcess still refused it: use home.
             Err(PtyError::Spawn(_)) if options.cwd != pty::default_cwd() => manager.create(
@@ -108,10 +108,10 @@ pub async fn create_session(
             ),
             other => other,
         }
+        .map(info)
     })
     .await
     .map_err(|e| PtyError::Spawn(format!("spawn task failed: {e}")))?
-    .map(info)
 }
 
 /// Facts the UI needs once: the home folder (to shorten paths) and the shells available.

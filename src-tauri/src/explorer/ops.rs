@@ -174,6 +174,23 @@ pub fn open_in_file_manager(path: &Path) -> Result<(), ExplorerError> {
     detached(command)
 }
 
+/// A file in the program Windows associates with its extension (it asks if there is none).
+pub fn open_with_default_app(path: &Path) -> Result<(), ExplorerError> {
+    if !path.is_file() {
+        return Err(ExplorerError::io(path, std::io::ErrorKind::NotFound.into()));
+    }
+    let mut command = Command::new("explorer.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Same verbatim quoting as above (paths cannot contain quotes).
+        command.raw_arg(format!("\"{}\"", path.display()));
+    }
+    #[cfg(not(windows))]
+    command.arg(path);
+    detached(command)
+}
+
 /// Starts a GUI program that outlives the terminal: no console window, no waiting.
 fn detached(mut command: Command) -> Result<(), ExplorerError> {
     #[cfg(windows)]

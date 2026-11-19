@@ -1,7 +1,6 @@
 import { useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { focusActiveTerminal } from '../lib/tabActions';
-import { useSettings } from '../store/settings';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { layoutDividers, layoutRects, panesOf, type PaneId, type Rect, type Tab, type TabId } from '../store/workspaceModel';
@@ -49,7 +48,6 @@ export function Workspace() {
   const paneIds = useWorkspace(useShallow((s) => Object.keys(s.panes)));
   const activePaneId = useWorkspace(selectActivePaneId);
   const searchOpen = useUi((s) => s.searchOpen);
-  const background = useSettings((s) => s.theme.background);
 
   const placement = useMemo(() => placePanes(tabs, activeTabId), [tabs, activeTabId]);
   const activeTab = activeTabId ? tabs[activeTabId] : undefined;
@@ -64,7 +62,7 @@ export function Workspace() {
   };
 
   return (
-    <main className="workspace" style={{ background }}>
+    <main className="workspace">
       <div ref={areaRef} className="pane-area">
         {paneIds.map((id) => {
           const place = placement[id] ?? HIDDEN;

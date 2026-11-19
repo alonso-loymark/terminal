@@ -12,6 +12,7 @@ mod procs;
 mod session;
 mod shell;
 mod teardown;
+mod wsl;
 
 pub use agents::ShiftEnterTarget;
 pub use error::PtyError;
@@ -19,7 +20,9 @@ pub use manager::{PtyManager, SessionId};
 pub use platform::{PtyBackend, backend};
 pub use session::{FLUSH_INTERVAL, MAX_BATCH_BYTES, SessionEvents, SpawnOptions};
 pub use shell::{
-    Launch, ShellCommand, ShellKind, ShellProfile, available_shells, default_cwd, default_shell,
-    find_on_path, launch, resolve_cwd, shell_profile,
+    Integration, Launch, Shell, ShellCommand, ShellKind, ShellProfile, ShellSpec, available_shells,
+    default_cwd, default_shell, expand_env, find_on_path, kind_of, launch, resolve, resolve_cwd,
+    shell_profile,
 };
 pub use teardown::BusyProcess;
+pub use wsl::installed_distros;

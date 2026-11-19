@@ -1,8 +1,9 @@
 // The only module that talks to the Rust PTY commands. Components never call `invoke` directly.
 import { Channel, invoke } from '@tauri-apps/api/core';
-import type { ShellKind } from '../store/workspaceModel';
+import type { DetectedShell, ShellSpec } from '../config/profiles';
+import type { IntegrationLevel, ShellKind } from '../store/workspaceModel';
 
-export type { ShellKind };
+export type { DetectedShell, ShellKind, ShellSpec };
 
 /** Session id assigned by the Rust `PtyManager`. */
 export type SessionId = number;
@@ -11,21 +12,14 @@ export type SessionId = number;
 export interface SessionInfo {
   sessionId: SessionId;
   shell: ShellKind;
-  /** The shell integration script was injected: cwd and command marks will follow. */
-  integration: boolean;
-}
-
-export interface ShellProfile {
-  kind: ShellKind;
-  /** "PowerShell", "Windows PowerShell", "Git Bash". */
-  name: string;
-  program: string;
+  /** What the shell will report: cwd and command marks (full), only the cwd, or nothing. */
+  integration: IntegrationLevel;
 }
 
 export interface SystemInfo {
   homeDir: string | null;
-  /** Shells available on this machine, the default first. */
-  shells: ShellProfile[];
+  /** Shells found on this machine, the default first. */
+  shells: DetectedShell[];
 }
 
 export interface SessionExit {
@@ -42,8 +36,8 @@ export interface CreateSessionOptions {
   rows: number;
   /** Starting folder; missing or inaccessible folders fall back to the user's home. */
   cwd?: string | null;
-  /** Default: PowerShell. */
-  shell?: ShellKind | null;
+  /** What to start (a profile); default: the first shell detected. */
+  shell?: ShellSpec | null;
   /** Raw PTY output; a batch may end in the middle of a UTF-8 sequence (xterm copes). */
   onData: (data: Uint8Array) => void;
   /** Fires once, after the last `onData`. */

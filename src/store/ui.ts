@@ -4,8 +4,9 @@ import type { GroupId, PaneId, TabId } from './workspaceModel';
 export type MenuState =
   | { kind: 'tab'; tabId: TabId; x: number; y: number }
   | { kind: 'group'; groupId: GroupId; x: number; y: number }
-  | { kind: 'pane'; paneId: PaneId; x: number; y: number }
-  /** "▾" next to "+": a new tab with another shell. */
+  /** clipboard: also copy / paste / select all (right click set to "menu"). */
+  | { kind: 'pane'; paneId: PaneId; x: number; y: number; clipboard?: boolean }
+  /** "▾" next to "+": a new tab with any profile. */
   | { kind: 'shells'; x: number; y: number }
   /** Right click in the explorer: on an entry, or on the empty area (the root folder). */
   | { kind: 'explorer'; path: string; isDir: boolean; isRoot: boolean; x: number; y: number };
@@ -24,7 +25,9 @@ export interface ConfirmState {
   target: CloseTarget;
 }
 
-/** Transient UI state: what is being renamed, open menus and dialogs, the search bar. */
+export type SettingsSection = 'appearance' | 'themes' | 'profiles' | 'terminal' | 'explorer';
+
+/** Transient UI state: what is being renamed, open menus and dialogs, the search bar, settings. */
 interface UiState {
   renamingTabId: TabId | null;
   renamingGroupId: GroupId | null;
@@ -33,6 +36,8 @@ interface UiState {
   searchOpen: boolean;
   /** Bumped on every "open search" so an already open bar re-focuses its input. */
   searchRequest: number;
+  /** The settings screen (Ctrl+,) and its section; null when closed. */
+  settings: SettingsSection | null;
   startRenameTab: (id: TabId) => void;
   startRenameGroup: (id: GroupId) => void;
   stopRename: () => void;
@@ -42,6 +47,8 @@ interface UiState {
   closeConfirm: () => void;
   openSearch: () => void;
   closeSearch: () => void;
+  openSettings: (section?: SettingsSection) => void;
+  closeSettings: () => void;
 }
 
 export const useUi = create<UiState>()((set) => ({
@@ -51,6 +58,7 @@ export const useUi = create<UiState>()((set) => ({
   confirm: null,
   searchOpen: false,
   searchRequest: 0,
+  settings: null,
   startRenameTab: (id) => set({ renamingTabId: id, renamingGroupId: null, menu: null }),
   startRenameGroup: (id) => set({ renamingGroupId: id, renamingTabId: null, menu: null }),
   stopRename: () => set({ renamingTabId: null, renamingGroupId: null }),
@@ -60,4 +68,6 @@ export const useUi = create<UiState>()((set) => ({
   closeConfirm: () => set({ confirm: null }),
   openSearch: () => set((s) => ({ searchOpen: true, searchRequest: s.searchRequest + 1 })),
   closeSearch: () => set({ searchOpen: false }),
+  openSettings: (section) => set((s) => ({ settings: section ?? s.settings ?? 'appearance', menu: null })),
+  closeSettings: () => set({ settings: null }),
 }));

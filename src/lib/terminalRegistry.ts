@@ -12,7 +12,10 @@ export interface PaneHandle {
   fit: FitAddon;
   search: SearchAddon;
   session: TerminalSession;
+  /** The pane (positioned, painted with the terminal background, hidden when off screen). */
   host: HTMLElement;
+  /** Where xterm lives: the pane minus its padding (what `fit()` measures). */
+  inner: HTMLElement;
   gpu: GpuRenderer;
   /** Shell integration marks of this terminal (what is typed at the prompt). */
   integration: ShellIntegrationHandle;

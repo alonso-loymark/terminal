@@ -15,6 +15,7 @@ Warp** (binario chico, poca RAM, arranque rápido). Cada dependencia nueva tiene
 | Estado frontend | **zustand** |
 | Drag & drop de tabs | **@dnd-kit** (`core` 6, `sortable` 10, `utilities` 3; la API estable, no `@dnd-kit/react` 0.x) |
 | Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
+| Configuración | `settings.json` (JSONC) leído con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`) |
 
 ## Arquitectura
 
@@ -77,13 +78,17 @@ Reglas de la arquitectura:
     recargar la página (`on_page_load` Started) o salir de la app (`RunEvent::Exit`) cierra las
     sesiones de ese dueño.
 - **Ids de sesión**: `u32` incremental asignado por `PtyManager` (único dentro del proceso).
-- **Comandos Tauri**: `create_session` (devuelve `{ sessionId, shell, integration }`),
-  `write_to_session`, `resize_session`, `close_session`, `send_shift_enter` (ver abajo),
-  `session_busy`, `system_info` (`{ homeDir, shells }`, una vez al arrancar) y `pty_backend`
-  (devuelve `{ backend: "conpty", buildNumber }` para la opción `windowsPty` de xterm, que con
-  build ≥ 21376 activa el reflow compatible con ConPTY). Explorador (`explorer_commands.rs`):
-  `list_dir`, `watch_start` / `watch_set` / `watch_stop`, `git_status`, `create_entry`,
-  `rename_entry`, `trash_entries`, `open_in_vscode`, `open_in_file_manager`.
+- **Comandos Tauri**: `create_session` (`{ cols, rows, cwd, shell: ShellSpec | null }`;
+  devuelve `{ sessionId, shell, integration: 'full' | 'cwd' | 'none' | 'missing' }`, ver
+  "Perfiles"), `write_to_session`, `resize_session`, `close_session`, `send_shift_enter` (ver
+  abajo), `session_busy`, `system_info` (`{ homeDir, shells }`: las shells detectadas, una vez al
+  arrancar) y `pty_backend` (devuelve `{ backend: "conpty", buildNumber }` para la opción
+  `windowsPty` de xterm, que con build ≥ 21376 activa el reflow compatible con ConPTY).
+  Explorador (`explorer_commands.rs`): `list_dir`, `watch_start` / `watch_set` / `watch_stop`,
+  `git_status`, `create_entry`, `rename_entry`, `trash_entries`, `open_in_vscode`,
+  `open_in_file_manager`. Settings (`settings_commands.rs`): `settings_load`, `settings_read`,
+  `settings_write`, `settings_write_schema`, `settings_open`, `read_theme_file`,
+  `set_window_look`.
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -185,6 +190,7 @@ que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
 | `OSC 133 ; C` / `D ; <código>` | inicio / fin del comando | "comando en ejecución" y su exit code |
 | `OSC 633 ; P ; Shell=<shell>` | al cargar | la integración funciona |
 | `OSC 633 ; P ; IntegrationError=<msg>` | si no carga | aviso en la status bar |
+| `OSC 9 ; 9 ; C:\ruta` | en cada prompt de **cmd** | cwd del panel (ruta Windows cruda, como Windows Terminal) |
 
 - **Scripts** en `src-tauri/resources/shell-integration/` (recursos de Tauri: en dev se copian a
   `target/debug/shell-integration`, en el bundle van junto al exe). `commands.rs` los resuelve con
@@ -212,15 +218,32 @@ que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
   `~/.bash_profile` / `~/.bash_login` / `~/.profile`), agrega sus hooks a `PROMPT_COMMAND`
   (array) y `PS0` y envuelve `PS1` con A/B. Rutas MSYS → Windows: `/c/x` → `C:/x`, el resto con
   `cygpath -m`. Se detecta por `git.exe` en el PATH o las rutas de instalación habituales.
-- **Frontend** (`lib/shellIntegration.ts`): `registerOscHandler` para 7, 133 y 633 → eventos
-  puros → `applyShellEvent` en el modelo. Cada `Pane` guarda `cwd`, `lastCommand`,
-  `lastExitCode`, `commandRunning`, `integration` (`pending`/`ok`/`unavailable`/`error`) y la
-  shell. Un OSC 7 que llega **mientras corre un comando** se ignora (ssh a otra máquina, shells
-  anidadas: no es la carpeta del panel).
-- **cwd heredado**: dividir y duplicar usan la shell y la carpeta del panel; nueva tab, la carpeta
-  del panel activo con la shell por defecto (`spawnOf`: `cwd` reportado, si no la carpeta de
-  arranque). El reinicio tras `exit` arranca donde estaba. Si la carpeta ya no existe o no se
-  puede listar, el backend usa la carpeta del usuario (`resolve_cwd`, y reintenta ahí si el
+- **cmd**: no tiene hooks, pero su `PROMPT` admite secuencias: se le antepone
+  `$e]9;9;$P$e\` (al `PROMPT` del usuario si tiene uno; si no, a `$P$G`). Solo informa la
+  carpeta: integración `cwd` (sin aviso). El explorador no le escribe `cd` (no sabe si está
+  ocupado). Verificado a través de ConPTY (`cmd_reports_its_folder_through_the_prompt`).
+- **WSL** (una distro por perfil, detectadas desde el registro: `HKCU\...\Lxss`, como Windows
+  Terminal; sin lanzar `wsl.exe --list`, que puede tardar un segundo; las `docker-desktop*` no
+  cuentan): `wsl.exe -d <distro> --cd <carpeta Windows | ~> -e sh -c <lanzador>`. El lanzador
+  (`WSL_LAUNCHER` en `shell.rs`) ejecuta la shell de login del usuario: si es bash, con
+  `--rcfile bash.sh` (la ruta llega traducida por `WSLENV=TERMINAL_WSL_RCFILE/p`); si es otra
+  (zsh, fish), sin integración y avisando el motivo con `IntegrationError`. `bash.sh` detecta
+  WSL (`$WSL_DISTRO_NAME`): `/mnt/c/x` → `C:/x`, y el resto como
+  `file://wsl.localhost/<distro>/<ruta>` → `\\wsl.localhost\<distro>\...`. El `cd` del
+  explorador usa `wslpath -u`; insertar rutas, `/mnt/<letra>/...`. **No verificado con WSL
+  real** (no está instalado acá): el lanzador se prueba con el `sh` de Git, y la rama WSL de
+  `bash.sh` con Git Bash y `WSL_DISTRO_NAME` puesto.
+- **Frontend** (`lib/shellIntegration.ts`): `registerOscHandler` para 7, 9 (solo `9;9`), 133 y
+  633 → eventos puros → `applyShellEvent` en el modelo. Cada `Pane` guarda `cwd`,
+  `lastCommand`, `lastExitCode`, `commandRunning`, `integration` (`pending`/`ok`/`unavailable`/
+  `error`, y `cwd` para cmd o `none` para un perfil sin integración, ambos sin aviso), el perfil
+  y el tipo de shell. Un OSC 7 que llega **mientras corre un comando** se ignora (ssh a otra
+  máquina, shells anidadas: no es la carpeta del panel).
+- **cwd heredado**: dividir y duplicar usan el perfil y la carpeta del panel; nueva tab, el perfil
+  por defecto (o el elegido en "▾") en su carpeta inicial si la tiene, si no en la del panel
+  activo (`spawnOf`: `cwd` reportado, si no la carpeta de arranque). El reinicio tras `exit`
+  arranca donde estaba. Si la carpeta ya no existe o no se puede listar, el backend usa la
+  carpeta del usuario (`resolve_cwd`, que expande `~` y `%VARIABLES%`, y reintenta ahí si el
   spawn falla), sin mostrar error.
 - **Status bar** (`StatusBar.tsx`): cwd del panel activo (home como `~`, segmentos del medio
   colapsados en `…` según el ancho; ruta completa en el tooltip), comando en ejecución o ✓/✗ con
@@ -229,25 +252,9 @@ que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
 - **Cerrar**: la confirmación incluye el comando en ejecución según OSC 133 además de los
   procesos de `session_busy`. Así también pregunta por trabajo sin procesos hijos
   (`Start-Sleep`, un script de PowerShell largo).
-- **Selector de shell**: "▾" junto al "+" (solo si hay más de una shell). Hoy: PowerShell y
-  Git Bash.
-- **WSL (pendiente, cómo agregarlo)**:
-  1. Perfil: `ShellKind::Wsl` en `shell.rs`, programa `%SystemRoot%\System32\wsl.exe`
-     (detectarlo con `wsl.exe --list --quiet`; una entrada por distro si se quiere).
-  2. cwd: `wsl.exe --cd <ruta Windows>` acepta rutas Windows y las traduce; no hace falta
-     `CHERE_INVOKING`.
-  3. Script: reutilizar `bash.sh` sin la emulación de login de Git Bash (WSL ya corre
-     `~/.bashrc`). Inyectarlo con `wsl.exe -e bash --rcfile /mnt/c/.../bash.sh -i` (ruta del
-     recurso traducida con `wslpath` o armada a mano: `C:\x` → `/mnt/c/x`), o con
-     `--init-file`. Para zsh/fish, scripts propios (precmd/preexec en zsh).
-  4. OSC 7: en WSL el `$PWD` es Linux. Emitir `file://wsl.localhost/<distro>/<ruta>` para rutas
-     del distro y la ruta Windows (`/mnt/c/x` → `C:/x`) para las montadas, así `cwdFromFileUri`
-     produce `\\wsl.localhost\<distro>\...` o `C:\...`, que sirven como cwd de un panel nuevo.
-     Ojo: hoy un host distinto se interpreta como UNC (correcto para `wsl.localhost`).
-  5. `resolve_cwd` acepta UNC `\\wsl.localhost\...` (es listable desde Windows) y Rust puede
-     pasarlo a `wsl.exe --cd`.
-  6. Tests: como `git_bash_integration_loads_the_users_profile_and_reports_commands`, con skip si
-     no hay WSL.
+- **Selector de perfil**: "▾" junto al "+" lista todos los perfiles visibles (el de por defecto
+  muestra `Ctrl+Shift+T`) y abre la configuración. Ver "Configuración, temas y perfiles".
+- zsh/fish en WSL (pendiente): scripts propios (precmd/preexec en zsh) elegidos por el lanzador.
 
 ## Explorador de archivos
 
@@ -313,10 +320,94 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   aquí, copiar ruta, copiar ruta relativa (a la raíz del explorador), nuevo archivo, nueva
   carpeta (input en línea), renombrar (`F2` con el árbol enfocado) y eliminar (`Supr`; a la
   papelera, con confirmación con foco en Cancelar).
-- **Preferencias**: visible, ancho y "ver ocultos" en `localStorage` (`terminal.explorer`)
-  hasta la Fase 6.
+- **Preferencias**: visible, ancho y "ver ocultos" en `settings.json` (`explorer.*`, ver abajo).
+  Ctrl+B y "ver ocultos" se guardan al instante; el ancho, al soltar el borde.
+- **Clic en carpeta**: `explorer.folderClick` = `cd` (lo de arriba) o `navigate` (el explorador
+  entra en la carpeta y queda fijado; la shell no se toca).
 - **RAM** (números en "Estado"): el árbol cuesta poco porque solo se guarda lo visible; al
   colapsar u ocultar se descartan listados y watchers.
+
+## Configuración, temas y perfiles
+
+- **Archivo**: `%APPDATA%\dev.terminal.desktop\settings.json` (la variable `TERMINAL_CONFIG_DIR`
+  cambia la carpeta: la e2e usa una descartable). JSONC: admite comentarios y comas finales. Solo
+  guarda lo que difiere del valor por defecto: lo que no está, vale el default. Al lado,
+  `settings.schema.json` (generado del esquema en cada arranque, solo si cambió) y el archivo
+  arranca con `"$schema": "./settings.schema.json"`: VS Code autocompleta y documenta cada clave.
+- **Esquema** (`config/settingsSchema.ts` con la mini librería `config/schema.ts`): una sola
+  definición da los tipos de TS (inferidos), los defaults, la validación y el JSON Schema.
+  Secciones: `appearance` (fuente, tamaño, line-height, ligaduras, cursor, padding, opacidad,
+  efecto), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
+  `explorer` (arranque, ancho, ocultos, clic en carpeta) y `profiles` (`default`, `list`).
+- **Errores**: JSON roto o un valor inválido (tipo, rango, opción) → el archivo entero se
+  rechaza y **sigue la última configuración válida**; la barra de estado muestra
+  "⚠ settings.json" (tooltip con línea/ruta y motivo; clic → la configuración, que lista los
+  problemas y bloquea los cambios hasta corregirlo, para no escribir sobre un archivo a medio
+  editar). Claves desconocidas: aviso, el resto se aplica.
+- **En vivo** (`lib/settingsSync.ts`): el archivo se vigila con el watcher del explorador (la
+  carpeta de config, no recursivo) y cada cambio se valida y aplica sin reiniciar. Los cambios
+  hechos desde la UI editan **solo ese valor** del texto con `jsonc-parser` (`modify`): los
+  comentarios, el orden y el formato del usuario se conservan; el valor por defecto borra la
+  clave. Escritura atómica (temporal + rename) en Rust; mientras una escritura propia está en
+  vuelo, los avisos del watcher se posponen para no aplicar una versión vieja.
+- **Migración**: `localStorage['terminal.explorer']` (Fase 5) pasa a `explorer.*` la primera vez
+  (solo lo que el archivo no define) y se borra; si el archivo tiene errores, se conserva.
+- **Pantalla** (`Ctrl+,`, `SettingsPage.tsx` + `components/settings/`): Apariencia, Temas,
+  Perfiles, Terminal y Explorador; números y textos se guardan con Enter o al salir del campo;
+  "Abrir settings.json en VS Code" (si no está, la app asociada a .json). Mientras está abierta,
+  los atajos de la app no corren (salvo `Ctrl+,`) y nadie le roba el foco; Esc la cierra.
+- **Temas** (`config/themes.ts`): Oscuro (el de siempre), Claro, Catppuccin Mocha y Latte,
+  Dracula, Tokyo Night y One Dark. Un tema son los 16 colores ANSI + fondo/texto/cursor/selección
+  y, opcional, los colores de la UI (`ui`: background, chrome, panel, border, text, muted,
+  accent, danger, warning, success); lo que falta se deriva de la paleta. `lib/appearance.ts` los
+  pone como variables CSS en `<html>` (todo `styles.css` usa variables, también git, estados y
+  los colores de tabs/grupos, que tienen una paleta para temas oscuros y otra para claros) y
+  cachea las variables en `localStorage` para pintar el tema correcto antes de leer el archivo.
+  **Importar**: pegar el JSON (o soltar un `.json` desde el Explorador de Windows) en Temas;
+  acepta el formato propio, un esquema de Windows Terminal (`purple` = magenta, `cursorColor`),
+  una lista o un fragmento con `"schemes"`. Se guarda en `themes` en formato propio y se elige.
+  Un tema propio con el nombre de uno incluido lo reemplaza.
+- **Terminales**: cada panel aplica en vivo fuente, tamaño (+ el zoom de la sesión, que no se
+  guarda), cursor, scrollback y el tema **de su perfil** (o el global); el panel se pinta con el
+  fondo de su tema y el padding queda adentro (`.terminal-pane` > `.terminal-host`, que es lo que
+  mide `fit()`).
+- **Ligaduras** (`lib/ligatures.ts`): un *character joiner* de xterm con las secuencias comunes
+  (la lista de respaldo de `@xterm/addon-ligatures`); la fuente hace el resto con `calt`. No se
+  usa el addon: lee el archivo de la fuente con Node o pide permiso de acceso a fuentes, y pesa
+  ~200 KB. Requiere una fuente con ligaduras (Cascadia Code, Fira Code, JetBrains Mono).
+- **Opacidad y Mica/Acrylic**: la transparencia de la ventana se fija al crearla, así que la
+  ventana principal se crea en Rust (`lib.rs`, no en `tauri.conf.json`) leyendo `appearance`
+  del archivo: **opaca salvo que se pida** efecto u opacidad < 100 (sin costo para el resto).
+  Creada transparente, cambiar de efecto, de opacidad o de tema claro/oscuro se aplica en vivo
+  (`set_window_look`); creada opaca, la pantalla avisa que se aplica al reiniciar. Con
+  transparencia xterm usa `allowTransparency` (el atlas de WebGL se reconstruye) y el fondo lo
+  pinta el panel con alfa; con efecto, la barra de tabs y la de estado dejan pasar el fondo.
+- **Copiar al seleccionar**: al soltar el mouse con selección (arrastre, doble o triple clic);
+  las selecciones de la búsqueda no se copian.
+- **Clic derecho**: `copyPaste` (copiar o pegar, como Windows Terminal) o `menu` (Copiar, Pegar,
+  Seleccionar todo, Buscar, Limpiar + las acciones del panel). Shift+clic derecho siempre abre el
+  menú.
+
+### Perfiles
+
+- **Detectados** (`pty/shell.rs::available_shells`, en este orden): PowerShell 7 (`pwsh`, si
+  está), Windows PowerShell (`powershell`), Símbolo del sistema (`cmd`), Git Bash (`gitbash`) y
+  una por distro WSL (`wsl-<distro>`). El primero es el de por defecto.
+- **Del usuario** (`config/profiles.ts`): `profiles.list` en settings.json. Una entrada con el id
+  de uno detectado lo personaliza; otra, con `command`, es un perfil propio (id `custom-<nombre>`
+  si no tiene). Campos: `name`, `icon` (emoji o texto corto, o `powershell`/`pwsh`/`cmd`/`git`/
+  `linux`/`terminal`, monogramas incluidos), `command`, `args`, `cwd` (carpeta inicial de tabs
+  nuevas), `env`, `theme` y `hidden`. `profiles.default` elige el de `Ctrl+Shift+T`.
+- **Lanzamiento**: el frontend manda un `ShellSpec` (`kind`, `program`, `args`, `env`, `distro`);
+  Rust decide qué significa (`shell.rs::resolve` + `launch`): busca el programa (nombre en el
+  PATH, `%VARIABLES%`), deduce el tipo por el nombre si es un comando propio y arma integración y
+  entorno. Sin `args`, los de siempre con integración. Con `args` propios: PowerShell conserva la
+  integración salvo que tomen el control (`-Command`, `-File`, `-EncodedCommand`, `-NoExit`, un
+  script; nombres abreviados incluidos, test `powershell_user_arguments_keep_...`); Git Bash y
+  WSL no la inyectan; cmd siempre informa su carpeta. Las variables del perfil van al final (ganan).
+- Cada panel guarda el perfil pedido y, al arrancar, el que realmente arrancó (un perfil borrado
+  reinicia con el de por defecto). Dividir y duplicar usan el mismo perfil.
+- El ícono del perfil se ve en la tab y en el menú "▾"; su nombre, en la barra de estado.
 
 ## Estructura
 
@@ -331,18 +422,32 @@ src/                        Frontend (solo render + input)
   components/Workspace.tsx  Todos los TerminalPane montados y posicionados + divisores + SearchBar
   components/TerminalPane.tsx  Una instancia xterm + addons + sesión por pane (memo, nunca se recrea)
   components/PaneDivider.tsx   Divisor arrastrable (doble clic: igualar)
-  components/StatusBar.tsx  cwd del panel activo, rama de git, último comando, aviso de integración
+  components/StatusBar.tsx  cwd del panel activo, rama de git, último comando, avisos (integración, settings.json)
   components/Sidebar.tsx    Explorador: breadcrumbs, fijar, ver ocultos, aviso, ancho redimensionable
-  components/FileTree.tsx   Árbol virtualizado: clic (cd / insertar), arrastrar a un panel, renombrar
+  components/FileTree.tsx   Árbol virtualizado: clic (cd / navegar / insertar), arrastrar a un panel, renombrar
+  components/ProfileIcon.tsx   Ícono de un perfil (monogramas incluidos o emoji del usuario)
+  components/SettingsPage.tsx  Ctrl+,: navegación, avisos del archivo, abrir settings.json
+  components/settings/      Secciones (GeneralSections, ThemesSection, ProfilesSection) y Controls
+  config/schema.ts          Mini librería de esquema: valida, defaults, tipos inferidos, JSON Schema
+  config/settingsSchema.ts  El esquema de settings.json (+ settingsSchema.test.ts)
+  config/themes.ts          Temas incluidos, import (propio / Windows Terminal), colores de UI (+ test)
+  config/profiles.ts        Perfiles detectados + los de settings.json, por defecto (+ test)
+  config/colors.ts          Colores de tabs/grupos (variables CSS del tema)
   lib/pty.ts                Punto de IPC de las terminales; wrappers tipados de los comandos
   lib/fsApi.ts              Punto de IPC del explorador (listar, watcher, git, operaciones, drop nativo)
+  lib/settingsApi.ts        Punto de IPC de settings.json y del aspecto de la ventana
+  lib/settingsText.ts       JSONC: parseo con línea/columna y ediciones que conservan el formato (puro)
+  lib/settingsSync.ts       Carga, vigila, aplica y guarda settings.json; migración; explorador ↔ settings
+  lib/settingsActions.ts    Importar/borrar temas, editar perfiles
+  lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
+  lib/ligatures.ts          Ligaduras con un character joiner (+ test)
   lib/explorerModel.ts      Lógica pura del explorador (+ explorerModel.test.ts)
   lib/explorerData.ts       Listados perezosos con generación, watcher de lo visible, refresco de git
   lib/explorerActions.ts    cd con guardas, insertar rutas, acciones del menú contextual
   lib/dropTarget.ts         Panel bajo el puntero, resaltado, archivos soltados desde otras apps
   lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (entrada en cola, restart)
   lib/inputQueue.ts         Cola de entrada por sesión: orden, un envío a la vez, reintentos (+ test)
-  lib/shellIntegration.ts   Handlers OSC 7/133/633 → ShellEvent (parsers puros + shellIntegration.test.ts)
+  lib/shellIntegration.ts   Handlers OSC 7/9;9/133/633 → ShellEvent (parsers puros + shellIntegration.test.ts)
   lib/paths.ts              Nombre de carpeta y acortado de rutas (~, …) para la UI
   lib/terminalRegistry.ts   PaneId → { term, fit, search, session } (objetos imperativos)
   lib/tabActions.ts         Cerrar con confirmación, cerrar ventana con la última tab, foco
@@ -351,19 +456,21 @@ src/                        Frontend (solo render + input)
   lib/clipboard.ts          navigator.clipboard con fallback
   lib/renderer.ts           GpuRenderer: WebGL solo mientras se ve, fallback al DOM, loseContext al ocultar
   lib/paneGeometry.ts       Rectángulos del layout → CSS de panes y divisores (gap, mínimo en px)
-  lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui para e2e
+  lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui / __settings para e2e
   store/workspaceModel.ts   Modelo puro de tabs/grupos/panes (+ workspaceModel.test.ts)
   store/workspace.ts        zustand sobre el modelo (ids, acciones)
-  store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda (estado efímero)
-  store/system.ts           zustand: carpeta del usuario y shells disponibles (system_info)
-  store/explorer.ts         zustand: estado del explorador (persistencia simple en localStorage)
+  store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda, pantalla de configuración
+  store/system.ts           zustand: carpeta del usuario y shells detectadas (system_info)
+  store/explorer.ts         zustand: estado del explorador (lo persistente va a settings.json)
   store/git.ts              zustand: estado de git por repositorio + refreshGit (un proceso a la vez)
-  store/settings.ts         zustand: fuente, cursor, scrollback, tema, zoom
-  config/theme.ts, colors.ts  Tema y paleta de colores de tabs/grupos
+  store/settings.ts         zustand: settings en uso, estado del archivo, avisos, zoom de la sesión
+  store/profiles.ts         Perfiles en uso (detectados + settings), memoizados
 src-tauri/
-  src/lib.rs                Builder de Tauri, ciclo de vida de ventanas/página/app
+  src/lib.rs                Builder de Tauri, ventana principal (transparente solo si se pide), ciclo de vida
   src/commands.rs           Comandos Tauri finos: validan y delegan en PtyManager
   src/explorer_commands.rs  Comandos del explorador (spawn_blocking) y su canal del watcher
+  src/settings.rs           settings.json: carpeta, lectura, escritura atómica, JSONC mínimo (sin Tauri)
+  src/settings_commands.rs  Comandos de settings y del aspecto de la ventana (Mica/Acrylic)
   src/explorer/             list.rs, watch.rs, git.rs, ops.rs (sin Tauri; tests unitarios)
   src/pty/manager.rs        Registro de sesiones (create/write/resize/close/close_owned_by/shutdown)
   src/pty/session.rs        ConPTY + hilos reader/flusher/writer/waiter + batching
@@ -371,8 +478,9 @@ src-tauri/
   src/pty/teardown.rs       Cierre selectivo: consola muere, apps con ventana sobreviven
   src/pty/agents.rs         Shift+Enter por contexto: detección de agentes de IA y secuencias
   src/pty/procs.rs          Tabla de procesos (Toolhelp), dueños de ventanas, command lines (Windows)
-  src/pty/shell.rs          Perfiles (PowerShell: pwsh → powershell.exe; Git Bash), cómo lanzarlos
-                            con la integración, cwd inicial y fallback a %USERPROFILE%
+  src/pty/shell.rs          Perfiles detectados (pwsh, powershell, cmd, Git Bash, WSL), ShellSpec →
+                            qué lanzar con qué integración, %VARIABLES%, cwd y fallback a %USERPROFILE%
+  src/pty/wsl.rs            Distros WSL desde el registro (sin lanzar wsl.exe)
   src/pty/platform.rs       Build de Windows (RtlGetVersion) para `pty_backend`
   resources/shell-integration/  powershell.ps1 y bash.sh (recursos del bundle)
   tests/pty.rs              Tests de integración con procesos reales (PowerShell/Git Bash/ConPTY)
@@ -395,15 +503,21 @@ npm run build                           # typecheck (tsc) + build del frontend
 npm test                                # tests unitarios del frontend (node --test, sin dependencias)
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
-npm run e2e:smoke                       # lo esencial (~80 s): en cada cambio
-npm run e2e                             # todas las etapas (~4,5 min): para cerrar una fase
+npm run e2e:smoke                       # lo esencial (~70 s): en cada cambio
+npm run e2e                             # todas las etapas (~3 min): para cerrar una fase
 npm run e2e -- tabs,groups              # solo algunas etapas
 E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en el puerto 9223
 ```
 
 Los tests unitarios de TypeScript (`*.test.ts`) corren con el type stripping nativo de Node 24:
 solo sintaxis borrable (`erasableSyntaxOnly`), imports con extensión `.ts` y quedan fuera del
-`tsconfig` de la app.
+`tsconfig` de la app. Los módulos puros que se importan entre sí en runtime (`config/*.ts`,
+`lib/settingsText.ts`) también usan la extensión `.ts` en sus imports
+(`allowImportingTsExtensions`); `jsonc-parser` se importa igual en Node y en Vite.
+
+`npm run e2e` usa una carpeta de configuración descartable (`TERMINAL_CONFIG_DIR` dentro de la
+carpeta temporal de la corrida): nunca toca el `settings.json` del usuario. Con `E2E_ATTACH=1`
+las etapas de configuración se saltean si la app no usa esa carpeta.
 
 `npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
 app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa el portapapeles
@@ -465,9 +579,9 @@ terminada solo si:
 3. `npm run e2e` pasa completo (cubre automáticamente casi todo el smoke test de abajo).
 
 Durante el trabajo, después de **cada cambio**: `npm run e2e:smoke` (arranque, Ctrl+C,
-Shift+Enter con agentes falsos, tabs, paneles, shell integration, estrés de entrada, explorador
-y cierre; ~80 s, tiene que quedar por debajo de 2 min). La suite completa (`npm run e2e`,
-~4,5 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
+Shift+Enter con agentes falsos, tabs, paneles, shell integration, estrés de entrada, explorador,
+settings.json en vivo y cierre; ~70 s, tiene que quedar por debajo de 2 min). La suite completa (`npm run e2e`,
+~3 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
 ni `src-tauri/`: el HMR de Vite o el rebuild de `tauri dev` reinician la app a mitad de camino.
 Cada etapa imprime su duración (`== etapa: N s`).
 
@@ -498,15 +612,22 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   (no si hay un comando corriendo); clic en archivo inserta la ruta. **A mano** (la e2e no abre
   apps externas ni hace un arrastre real del sistema): "Abrir en VS Code", "Abrir en el
   Explorador de Windows" y arrastrar un archivo desde el Explorador de Windows a un panel.
+- [ ] Configuración: `Ctrl+,` abre la pantalla; cambiar la fuente o el tema se ve al instante;
+  editar `settings.json` en VS Code (botón "Abrir settings.json") con un error deja todo como
+  estaba y muestra "⚠ settings.json"; al corregirlo se aplica. "▾" lista PowerShell, cmd, Git
+  Bash (y WSL si hay); cmd abre en la carpeta del panel y el explorador lo sigue. **A mano**:
+  Mica/Acrylic (`appearance.backdrop`) y opacidad < 100, reiniciando la app una vez; soltar un
+  `.json` de tema desde el Explorador de Windows en Temas.
 
 ## Atajos
 
 | Atajo | Acción |
 |---|---|
-| `Ctrl+Shift+T` / botón `+` | Nueva tab (en la carpeta del panel activo) |
-| Botón `▾` junto al `+` | Nueva tab con otra shell (Git Bash) |
+| `Ctrl+,` | Configuración (otra vez o `Esc`: cerrar) |
+| `Ctrl+Shift+T` / botón `+` | Nueva tab con el perfil por defecto (en su carpeta inicial o la del panel activo) |
+| Botón `▾` junto al `+` | Nueva tab con cualquier perfil; Configuración |
 | `Ctrl+B` | Mostrar / ocultar el explorador de archivos |
-| Clic en carpeta / archivo del explorador | `cd` en el panel activo (si está libre) / insertar la ruta |
+| Clic en carpeta / archivo del explorador | `cd` en el panel activo (si está libre) o solo navegar (según la configuración) / insertar la ruta |
 | Arrastrar del explorador (o del Explorador de Windows) a un panel | Pegar la ruta con comillas en ese panel |
 | `F2` / `Supr` con el árbol enfocado | Renombrar / mover a la papelera |
 | `Ctrl+Shift+W` | Cerrar el panel activo; si es el último, la tab (confirma si hay procesos además de la shell) |
@@ -515,7 +636,7 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 | `Ctrl+Shift+Z` | Maximizar / restaurar el panel activo dentro de la tab |
 | Clic en un panel | Enfocarlo |
 | Arrastrar un divisor / doble clic | Redimensionar / repartir en partes iguales |
-| `Shift`+clic derecho en un panel, `Shift+F10` | Menú del panel: dividir, maximizar, igualar, cerrar |
+| `Shift`+clic derecho en un panel, `Shift+F10` | Menú del panel: dividir, maximizar, igualar, cerrar (con clic derecho en modo menú, además copiar/pegar/seleccionar todo/buscar/limpiar) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Tab siguiente / anterior (salta las de grupos colapsados) |
 | `Ctrl+1`…`Ctrl+8` / `Ctrl+9` | Ir a la tab N / a la última (expande su grupo si está colapsado) |
 | `F2`, doble clic en la tab | Renombrar (`Enter` guarda, `Escape` cancela, vacío vuelve al título del proceso) |
@@ -526,7 +647,7 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 | `Ctrl+C` | Copia si hay selección; si no, envía `^C` |
 | `Ctrl+Shift+C`, `Ctrl+Insert` | Copiar |
 | `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` | Pegar |
-| Clic derecho | Copia si hay selección; si no, pega |
+| Clic derecho | Copia si hay selección; si no, pega (o un menú contextual, según la configuración) |
 | `Ctrl+Shift+F` | Buscar (`Enter` siguiente, `Shift+Enter` anterior, `Esc` cerrar) |
 | `Shift+Enter` | Salto de línea en agentes de IA; Shift+Enter nativo en el resto (PowerShell: AddLine) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom de fuente |
@@ -535,8 +656,9 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 Los atajos de tabs y paneles se escuchan en fase de captura sobre `window`: ganan sobre xterm y el
 programa nunca los recibe. Por eso siguen el estilo de Windows Terminal (`Ctrl+Shift+…`,
 `Alt+Shift+…`): `Ctrl+T` y `Ctrl+W` llegan al programa (readline, nano; verificado en e2e). Siguen
-tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab`, `Alt+flechas` y `Ctrl+B` (como en VS Code;
-readline pierde su "carácter atrás", que tiene la flecha, y tmux su prefijo por defecto).
+tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab`, `Alt+flechas`, `Ctrl+B` (como en VS Code;
+readline pierde su "carácter atrás", que tiene la flecha, y tmux su prefijo por defecto) y
+`Ctrl+,` (como en VS Code y Windows Terminal).
 Mantener apretado un atajo no repite la acción (`event.repeat` se ignora salvo para moverse
 entre tabs y paneles), y la tecla igual no llega al programa.
 
@@ -614,6 +736,19 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   dirigidos (con y sin HMR), ni en corridas completas del e2e ni en release. Si reaparece: crear un
   dump (Administrador de tareas → "Crear archivo de volcado") antes de matarlo, para ver dónde está
   el hilo principal.
+- **Transparencia de la ventana**: en Windows, tao la arma al crear la ventana
+  (`DwmEnableBlurBehindWindow` + una superficie `softbuffer` que pinta el fondo, ~7 MB a
+  1672×1106); no se puede activar después. WebView2 solo admite fondo totalmente transparente u
+  opaco (alfa 0 o 255): la opacidad intermedia la pinta el HTML. Mica/Acrylic los dibuja DWM
+  (`DWMWA_SYSTEMBACKDROP_TYPE`), así que una captura de la página por CDP no los muestra; para
+  verificarlos sin tocar la pantalla del usuario se consulta ese atributo con
+  `DwmGetWindowAttribute` (2 = Mica, 3 = Acrylic). Windows no deja que otro proceso traiga la
+  ventana al frente para una captura de pantalla (sale lo que el usuario tenga encima).
+- **jsonc-parser**: `modify` con valor `undefined` (borrar) lanza "Can not delete in empty
+  document" si el padre de la ruta no existe; `editText` lo saltea. Pasó con la migración: el
+  WebView2 de dev conserva el `localStorage` entre corridas (y entre la e2e y el uso a mano), así
+  que la primera corrida tras la Fase 5 migró de verdad. `initSettings()` nunca rechaza: las
+  terminales la esperan para arrancar.
 
 ## Estado
 
@@ -758,15 +893,58 @@ entre tabs y paneles), y la tecla igual no llega al programa.
     código final (antes de este arreglo la completa tardaba ~11 min: esperas de foco).
   - Ventana que se cierra a mitad de corrida: no se encontró la causa; queda el registro de la
     Fase 5 (log de ciclo de vida en `tauri dev`, consola al cerrarse la página).
+- **Fase 6A — configuración, temas y perfiles: completa y verificada (2026-11-19).**
+  `settings.json` (JSONC) con esquema tipado en TS, validación (un error deja la última
+  configuración válida y avisa en la barra de estado), JSON Schema al lado para VS Code, cambios
+  en vivo y escritura que conserva los comentarios del usuario; migración de `localStorage`.
+  Pantalla `Ctrl+,` con Apariencia, Temas, Perfiles, Terminal y Explorador, y "Abrir
+  settings.json en VS Code". Apariencia: fuente, tamaño, line-height, ligaduras, cursor, padding,
+  scrollback, copiar al seleccionar, opacidad y Mica/Acrylic. Temas: Oscuro, Claro, Catppuccin
+  (Mocha y Latte), Dracula, Tokyo Night y One Dark; importar JSON o esquemas de Windows Terminal;
+  pintan la terminal y toda la UI (todo `styles.css` pasó a variables). Perfiles: pwsh (si
+  existe), Windows PowerShell, cmd (cwd por OSC 9;9), Git Bash y cada distro WSL (registro), más
+  los propios, con nombre, ícono, comando, args, cwd, env y tema; perfil por defecto; "▾" los
+  lista. Comportamiento configurable: clic derecho (copiar/pegar o menú), explorador al
+  arrancar, clic en carpeta (cd o navegar).
+  - `npm test`: 75 (22 nuevos: esquema y validación, JSONC con comentarios y ediciones que
+    conservan el formato, temas incluidos / import de Windows Terminal / derivación de UI,
+    resolución de perfiles, comillas para cmd/WSL, OSC 9;9, ligaduras).
+  - `cargo test`: 45 unitarios (perfiles y lanzamiento por tipo, args de PowerShell que permiten
+    o no la integración, `%VARIABLES%`, lanzador de WSL ejecutado con el `sh` de Git, distros,
+    JSONC mínimo, escritura atómica) + 3 de explorador + 21 de PTY (nuevos: cmd informa su
+    carpeta a través de ConPTY, variables de un perfil, `-NoProfile` con integración, rama WSL
+    de `bash.sh`).
+  - `npm run e2e:smoke`: 90/90 en 66 s (suma la etapa `settings`). `npm run e2e`: 252/252
+    en 336 s y, con el arreglo de `atShellPrompt` de abajo, 252/252 en 184 s; nuevas etapas `settings`, `themes`, `profiles`, `behavior` (38 checks): en vivo,
+    JSON roto y tipo inválido con aviso, UI que conserva comentarios, Esc devuelve el foco, temas
+    en terminal + UI, import de Windows Terminal, tema inválido explicado, tema por perfil, cmd
+    con su cwd y sin `cd` desde el explorador, perfil propio con `-NoProfile`/env/cwd, oculto,
+    por defecto desde la UI, menú contextual con Pegar, copiar al seleccionar, "solo navegar",
+    explorador al arrancar oculto/visible, migración de `localStorage`, ligaduras, padding con
+    PTY correcto, Mica con ventana opaca → "al reiniciar". Además `atShellPrompt` ahora mira la
+    línea lógica: un prompt largo envuelto en un panel angosto hacía esperar 20 s de más
+    (`inherit` 45 → 7 s, `explorer` 29 → 10 s). `E2E_TIMES=1` imprime la hora de cada check.
+  - Una vez (smoke, no reproducido en `panes` sola ni en la completa): "arrastrar el divisor
+    cambia los tamaños" con el divisor movido solo ~2 %, como si el arrastre se cortara tras el
+    primer paso. Si vuelve, mirar si se pierde el pointer capture del divisor.
+  - **Mica/Acrylic en release** (ventana creada transparente; verificado consultando a DWM, sin
+    captura de pantalla): Mica → `DWMWA_SYSTEMBACKDROP_TYPE` 2, Acrylic → 3, y cambiar el efecto
+    o la opacidad en `settings.json` se aplica en vivo (2 → 3 → 1 al quitarlo). **Costo**, release,
+    14 s en reposo: opaca 218 MB (app 6.2, renderer 43.9, GPU 109.4, browser 36.6, otros 22.1) y
+    0,06 s de CPU en 5 s; Mica 230 MB (app 13.1: la superficie `softbuffer` de tao; GPU +6) y
+    0,13 s; Acrylic 85 % 232 MB y 0,13 s. La ventana opaca (el default) no paga nada.
+    **No verificado a ojo** (la prueba no puede traer la ventana al frente sin molestar al
+    usuario): queda en el smoke manual.
+  - Binario release 8,6 → 8,9 MB (`serde_json` y el registro de WSL); JS 904 KB.
+  - **No verificado**: pwsh 7 y WSL reales (no están instalados acá); ligaduras a ojo con
+    Cascadia Code (la e2e verifica que el joiner se registre).
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
-- Próximas fases (ideas): Fase 6 (persistencia completa: tabs, grupos, cwd y las preferencias del
-  explorador que hoy van en `localStorage`), navegación por teclado en el árbol del explorador,
-  arrastrar paneles a otra tab o a una tab nueva (modelo listo: `movePane`), WSL (ver "Shell
-  integration"), saltar entre comandos y seleccionar la salida de
-  uno (marcas 133 ya disponibles), notificaciones al terminar comandos largos (133;D),
-  persistir tabs/grupos (y su cwd) entre sesiones, archivo de configuración (fuente, tema, shell,
-  atajos), perfiles de shell configurables, flow control con ACKs para salidas gigantes,
-  `conpty.dll` + `OpenConsole.exe` empaquetados (ConPTY más nuevo que el del sistema), lista de
-  agentes y sus secuencias configurable.
+- Próximas fases (ideas): Fase 6B (persistencia de la sesión: tabs, grupos, paneles y su cwd
+  entre reinicios), atajos configurables en settings.json, navegación por teclado en el árbol
+  del explorador, arrastrar paneles a otra tab o a una tab nueva (modelo listo: `movePane`),
+  integración para zsh/fish en WSL, saltar entre comandos y seleccionar la salida de uno (marcas
+  133 ya disponibles), notificaciones al terminar comandos largos (133;D), flow control con ACKs
+  para salidas gigantes, `conpty.dll` + `OpenConsole.exe` empaquetados (ConPTY más nuevo que el
+  del sistema), lista de agentes y sus secuencias configurable, imágenes como ícono de perfil.

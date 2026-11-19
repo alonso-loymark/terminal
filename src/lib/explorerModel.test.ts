@@ -15,6 +15,7 @@ import {
   quotePath,
   relativePath,
   toMsysPath,
+  toWslPath,
   visibleDirs,
   type DirEntry,
   type Listing,
@@ -64,6 +65,19 @@ test('quoting for PowerShell and Git Bash', () => {
   assert.equal(quotePath("C:\\it's here\\$HOME", 'gitbash'), "'/c/it'\\''s here/$HOME'");
   assert.equal(cdCommand('C:\\a b', 'powershell'), "Set-Location -LiteralPath 'C:\\a b'");
   assert.equal(cdCommand('C:\\a b', 'gitbash'), "cd -- '/c/a b'");
+});
+
+test('quoting for pwsh, cmd, WSL and other programs', () => {
+  assert.equal(quotePath("C:\\it's", 'pwsh'), "'C:\\it''s'");
+  assert.equal(cdCommand('C:\\a b', 'pwsh'), "Set-Location -LiteralPath 'C:\\a b'");
+  assert.equal(quotePath('C:\\Users\\Ana María\\a.txt', 'cmd'), '"C:\\Users\\Ana María\\a.txt"');
+  assert.equal(cdCommand('D:\\a b', 'cmd'), 'cd /d "D:\\a b"', '/d also changes the drive');
+  assert.equal(toWslPath('C:\\Users\\Ana\\x'), '/mnt/c/Users/Ana/x');
+  assert.equal(toWslPath('\\\\wsl.localhost\\Ubuntu\\home\\ana'), '/home/ana');
+  assert.equal(toWslPath('\\\\wsl$\\Debian'), '/');
+  assert.equal(quotePath("C:\\it's", 'wsl'), "'/mnt/c/it'\\''s'");
+  assert.equal(cdCommand('C:\\a b', 'wsl'), `cd -- "$(wslpath -u 'C:\\a b')"`);
+  assert.equal(quotePath('C:\\a b', 'other'), '"C:\\a b"');
 });
 
 const dir = (path: string, entries: DirEntry[]): Listing => ({ path, status: 'ok', entries, error: null });

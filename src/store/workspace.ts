@@ -1,9 +1,12 @@
 import { create } from 'zustand';
+import { profileFor } from './profiles';
 import * as model from './workspaceModel';
 import type {
   FocusDirection,
   GroupId,
+  IntegrationLevel,
   PaneId,
+  ProfileId,
   SessionStatus,
   ShellEvent,
   ShellKind,
@@ -20,11 +23,12 @@ let groupsCreated = 0;
 
 interface WorkspaceActions {
   /**
-   * Opens a new tab at the end (or after `after`) and activates it. Without `cwd` it starts in
-   * the active pane's folder (`cwd: null`: the home folder); without `shell`, the default one.
+   * Opens a new tab at the end (or after `after`) and activates it. Without `profile`, the
+   * default one. Without `cwd`, the profile's starting folder if it has one, else the active
+   * pane's folder (`cwd: null`: the home folder).
    */
   newTab: (
-    spec?: Partial<Pick<model.NewTab, 'after' | 'groupId' | 'customTitle' | 'color' | 'shell' | 'cwd'>>,
+    spec?: Partial<Pick<model.NewTab, 'after' | 'groupId' | 'customTitle' | 'color' | 'profile' | 'cwd'>>,
   ) => TabId;
   /** Removes tabs and their panes from the state (unmounting their terminals closes the sessions). */
   closeTabs: (ids: TabId[]) => void;
@@ -44,13 +48,16 @@ interface WorkspaceActions {
   ungroup: (groupId: GroupId) => void;
   setPaneTitle: (paneId: PaneId, title: string) => void;
   setPaneStatus: (paneId: PaneId, status: SessionStatus, exitCode: number | null, sessionId: number | null) => void;
-  setPaneSession: (paneId: PaneId, info: { shell: ShellKind; integration: boolean }) => void;
+  setPaneSession: (
+    paneId: PaneId,
+    info: { profile?: ProfileId | null; shell: ShellKind; integration: IntegrationLevel },
+  ) => void;
   /** A shell integration mark (OSC 7 / 133 / 633) from the pane's terminal. */
   applyShellEvent: (paneId: PaneId, event: ShellEvent) => void;
   markActivity: (paneId: PaneId) => void;
   /**
    * Splits the pane (default: the active one); the new pane gets the focus and, unless `spawn`
-   * says otherwise, the same shell and folder. Returns its id.
+   * says otherwise, the same profile and folder. Returns its id.
    */
   splitPane: (direction: SplitDirection, paneId?: PaneId, spawn?: Partial<model.PaneSpawn>) => PaneId | null;
   /** Removes a pane from its tab (unmounting its terminal closes the session); last pane closes the tab. */
@@ -75,7 +82,8 @@ export const useWorkspace = create<WorkspaceStore>()((set, get) => {
     newTab: (spec = {}) => {
       const tabId = nextId('tab');
       update((ws) => {
-        const cwd = spec.cwd === undefined ? model.spawnOf(ws, selectActivePaneId(ws)).cwd : spec.cwd;
+        const cwd =
+          spec.cwd !== undefined ? spec.cwd : (profileFor(spec.profile)?.cwd ?? model.spawnOf(ws, selectActivePaneId(ws)).cwd);
         return model.addTab(ws, { ...spec, cwd, tabId, paneId: nextId('pane') });
       });
       return tabId;
@@ -85,9 +93,9 @@ export const useWorkspace = create<WorkspaceStore>()((set, get) => {
       const ws = get();
       const tab = ws.tabs[id];
       if (!tab) return null;
-      // Same name, color, group, shell and folder (the one its active pane is in now).
-      const { shell, cwd } = model.spawnOf(ws, tab.activePaneId);
-      return ws.newTab({ after: id, groupId: tab.groupId, customTitle: tab.customTitle, color: tab.color, shell, cwd });
+      // Same name, color, group, profile and folder (the one its active pane is in now).
+      const { profile, cwd } = model.spawnOf(ws, tab.activePaneId);
+      return ws.newTab({ after: id, groupId: tab.groupId, customTitle: tab.customTitle, color: tab.color, profile, cwd });
     },
     activateTab: (id) => update((ws) => model.activateTab(ws, id)),
     cycleTab: (delta) => update((ws) => model.cycleTab(ws, delta)),

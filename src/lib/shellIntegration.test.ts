@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { folderName, shortenPath } from './paths.ts';
-import { cwdFromFileUri, parseOsc133, parseOsc633, unescapeOsc633 } from './shellIntegration.ts';
+import { cwdFromFileUri, cwdFromOsc9, parseOsc133, parseOsc633, unescapeOsc633 } from './shellIntegration.ts';
 
 test('OSC 7: percent-encoded UTF-8 with spaces, accents and ñ', () => {
   assert.equal(
@@ -59,4 +59,14 @@ test('status bar paths: home as ~, middle segments collapsed', () => {
   assert.ok(short.length <= 30);
   assert.equal(shortenPath('D:\\a-very-long-folder-name-that-does-not-fit-at-all', null, 20), 'D:\\a-very-long-folder-name-that-does-not-fit-at-all', 'the last segment is always kept');
   assert.equal(shortenPath('\\\\server\\share\\uno\\dos\\tres\\cuatro', null, 25), '\\\\server\\share\\…\\cuatro');
+});
+
+test('OSC 9;9 (cmd): the raw Windows path; other OSC 9 payloads are not a folder', () => {
+  assert.equal(cwdFromOsc9('9;C:\\Users\\Ana María\\Ñandú'), 'C:\\Users\\Ana María\\Ñandú');
+  assert.equal(cwdFromOsc9('9;"D:\\a b"'), 'D:\\a b');
+  assert.equal(cwdFromOsc9('9;c:\\x'), 'C:\\x');
+  assert.equal(cwdFromOsc9('9;\\\\server\\share\\dir'), '\\\\server\\share\\dir');
+  assert.equal(cwdFromOsc9('4;1;50'), null, 'progress');
+  assert.equal(cwdFromOsc9('Build finished'), null, 'notification');
+  assert.equal(cwdFromOsc9('9;relative'), null);
 });

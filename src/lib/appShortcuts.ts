@@ -40,6 +40,20 @@ function actionFor(event: KeyboardEvent): Shortcut | null {
   const plain = !event.ctrlKey && !event.altKey && !event.metaKey;
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
 
+  // Settings (like VS Code). While the screen is open it owns the keyboard.
+  if (ctrl && !event.shiftKey && key === ',') {
+    return once(() => {
+      const ui = useUi.getState();
+      if (ui.settings) {
+        ui.closeSettings();
+        focusActiveTerminal();
+      } else {
+        ui.openSettings();
+      }
+    });
+  }
+  if (useUi.getState().settings) return null;
+
   // Tabs
   if (ctrl && event.shiftKey && key === 't') return once(() => ws.newTab());
   if (ctrl && event.shiftKey && key === 'w') return once(() => void requestClosePane());
@@ -91,7 +105,7 @@ export function installAppShortcuts(): () => void {
     // Tab/pane switches and new terminals land with the keyboard in the active pane, unless a
     // rename or a menu took it.
     const ui = useUi.getState();
-    if (!ui.renamingTabId && !ui.renamingGroupId && !ui.menu) focusActiveTerminal();
+    if (!ui.renamingTabId && !ui.renamingGroupId && !ui.menu && !ui.settings) focusActiveTerminal();
   };
   window.addEventListener('keydown', onKeyDown, { capture: true });
   return () => window.removeEventListener('keydown', onKeyDown, { capture: true });

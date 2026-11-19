@@ -27,7 +27,9 @@ export function focusActiveTerminal(): void {
 /** True when done: focused, or another widget (rename, menu, dialog) owns the keyboard. */
 function focusNow(): boolean {
   const ui = useUi.getState();
-  if (ui.renamingTabId || ui.renamingGroupId || ui.menu || ui.confirm || useExplorer.getState().editing) return true;
+  if (ui.renamingTabId || ui.renamingGroupId || ui.menu || ui.confirm || ui.settings || useExplorer.getState().editing) {
+    return true;
+  }
   const pane = getPane(selectActivePaneId(useWorkspace.getState()));
   if (!pane || pane.host.hidden || !pane.host.isConnected) return false;
   pane.term.focus();

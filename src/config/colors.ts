@@ -1,16 +1,16 @@
 import type { TabColor } from '../store/workspaceModel';
 
-/** Colors for tabs and groups (readable on the dark theme). */
+/** Colors for tabs and groups: CSS variables set by the theme (lib/appearance.ts), readable on it. */
 export const TAB_COLORS: Record<TabColor, string> = {
-  blue: '#58a6ff',
-  red: '#ff7b72',
-  yellow: '#d29922',
-  green: '#3fb950',
-  pink: '#f778ba',
-  purple: '#bc8cff',
-  cyan: '#39c5cf',
-  orange: '#f0883e',
-  grey: '#8b949e',
+  blue: 'var(--tab-blue)',
+  red: 'var(--tab-red)',
+  yellow: 'var(--tab-yellow)',
+  green: 'var(--tab-green)',
+  pink: 'var(--tab-pink)',
+  purple: 'var(--tab-purple)',
+  cyan: 'var(--tab-cyan)',
+  orange: 'var(--tab-orange)',
+  grey: 'var(--tab-grey)',
 };
 
 export const COLOR_NAMES: Record<TabColor, string> = {

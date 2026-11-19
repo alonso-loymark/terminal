@@ -2,10 +2,10 @@ import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type Po
 import { dropPaths, markDropTarget, paneAt } from '../lib/dropTarget';
 import { loadDir } from '../lib/explorerData';
 import {
-  cdInActivePane,
   commitCreate,
   commitRename,
   insertInActivePane,
+  openFolder,
   requestTrash,
 } from '../lib/explorerActions';
 import { gitDecorations, gitStatusOf, type GitDecorations, type TreeRow } from '../lib/explorerModel';
@@ -144,10 +144,13 @@ const Row = memo(function Row({ row, top, selected, renaming, decorations, onDra
     if (open) void loadDir(row.path);
   };
 
-  /** Click: a folder moves the active shell there (if it is idle); a file is typed at its prompt. */
+  /**
+   * Click: a folder moves the active shell there if it is idle (or, per the settings, only the
+   * explorer); a file is typed at the active prompt.
+   */
   const activate = () => {
     useExplorer.getState().select(row.path);
-    if (isDir) cdInActivePane(row.path);
+    if (isDir) openFolder(row.path);
     else insertInActivePane([row.path]);
   };
 

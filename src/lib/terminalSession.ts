@@ -1,5 +1,5 @@
 import type { IDisposable, Terminal } from '@xterm/xterm';
-import type { PaneSpawn, SessionStatus } from '../store/workspaceModel';
+import type { SessionStatus } from '../store/workspaceModel';
 import { InputQueue, type InputItem } from './inputQueue';
 import {
   closeSession,
@@ -9,13 +9,20 @@ import {
   writeToSession,
   type SessionId,
   type SessionInfo,
+  type ShellSpec,
 } from './pty';
 
 export type { SessionStatus };
 
+/** What to start and where (null: the backend's default shell, the home folder). */
+export interface SpawnRequest {
+  shell: ShellSpec | null;
+  cwd: string | null;
+}
+
 export interface TerminalSessionCallbacks {
   /** Shell and folder for each start (asked again on restart: the folder may have changed). */
-  spawn?: () => PaneSpawn;
+  spawn?: () => SpawnRequest;
   onStatus?: (status: SessionStatus, exitCode: number | null) => void;
   /** The backend started the session (before the status turns 'running'). */
   onStarted?: (info: SessionInfo) => void;

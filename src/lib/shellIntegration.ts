@@ -32,6 +32,16 @@ export function cwdFromFileUri(uri: string): string | null {
   return `\\\\${host}${path.replace(/\//g, '\\')}`.replace(/\\$/, '');
 }
 
+/**
+ * OSC 9;9 (ConEmu / Windows Terminal, what cmd's prompt sends): `9;C:\path`, maybe quoted.
+ * Other OSC 9 payloads (notifications, progress) are not a folder: null.
+ */
+export function cwdFromOsc9(data: string): string | null {
+  if (!data.startsWith('9;')) return null;
+  const path = data.slice(2).trim().replace(/^"(.*)"$/, '$1');
+  return /^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+)/.test(path) || /^[A-Za-z]:$/.test(path) ? path.replace(/^([a-z]):/, (d) => d.toUpperCase()) : null;
+}
+
 /** Reverses VS Code's OSC 633 escaping: \\ and \xHH. */
 export function unescapeOsc633(value: string): string {
   return value.replace(/\\(\\|x([0-9a-fA-F]{2}))/g, (_, escaped: string, hex: string | undefined) =>
@@ -113,6 +123,13 @@ export function registerShellIntegration(term: Terminal, emit: (event: ShellEven
       return handle(parseOsc133)(data);
     }),
     term.parser.registerOscHandler(633, handle(parseOsc633)),
+    // cmd's prompt reports the folder this way (see src-tauri/src/pty/shell.rs). Other OSC 9
+    // uses are left alone.
+    term.parser.registerOscHandler(9, (data) => {
+      const cwd = cwdFromOsc9(data);
+      if (cwd) emit({ type: 'cwd', cwd });
+      return cwd !== null;
+    }),
   ];
   return {
     promptInput() {

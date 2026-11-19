@@ -1,6 +1,7 @@
 // What the explorer does to terminals and files. Typing into a terminal is guarded: only an idle
 // shell (OSC 133) with an empty prompt gets a `cd`; otherwise nothing is typed.
 import { useExplorer } from '../store/explorer';
+import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
@@ -37,7 +38,13 @@ export function cdInActivePane(dir: string): boolean {
     return false;
   }
   if (pane.integration !== 'ok') {
-    notify('La shell del panel activo no informa si está libre (sin integración): no se escribe nada.', dir);
+    const why =
+      pane.integration === 'cwd'
+        ? 'cmd informa su carpeta pero no si está ejecutando algo'
+        : pane.integration === 'none'
+          ? 'este perfil corre sin integración de shell'
+          : 'sin integración de shell';
+    notify(`La shell del panel activo no informa si está libre (${why}): no se escribe nada.`, dir);
     return false;
   }
   if (pane.commandRunning) {
@@ -53,6 +60,20 @@ export function cdInActivePane(dir: string): boolean {
   useExplorer.getState().setNotice(null);
   focusActiveTerminal();
   return true;
+}
+
+/**
+ * A click on a folder, as the settings say: `cd` in the active pane, or just show that folder in
+ * the explorer (pinned, so it stays there). A breadcrumb of a pinned explorer always navigates.
+ */
+export function openFolder(dir: string, breadcrumb = false): void {
+  const navigate = useSettings.getState().settings.explorer.folderClick === 'navigate';
+  if (navigate || (breadcrumb && useExplorer.getState().pinned)) {
+    useExplorer.getState().setPinned(dir);
+    useExplorer.getState().setNotice(null);
+    return;
+  }
+  cdInActivePane(dir);
 }
 
 /**

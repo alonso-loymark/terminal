@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { folderName, shortenPath } from '../lib/paths';
 import { refreshGit, selectGitFor, useGit } from '../store/git';
+import { useProfile } from '../store/profiles';
+import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
+import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { Pane } from '../store/workspaceModel';
 
@@ -54,6 +57,28 @@ function IntegrationNotice({ pane }: { pane: Pane }) {
   );
 }
 
+/** settings.json has errors: the last valid settings stay in use. Click: the settings screen. */
+function SettingsNotice() {
+  const status = useSettings((s) => s.status);
+  const issues = useSettings((s) => s.issues);
+  if (status !== 'invalid') return null;
+  const lines = issues
+    .filter((issue) => issue.severity === 'error')
+    .slice(0, 6)
+    .map((issue) => `• ${issue.line ? `línea ${issue.line}: ` : ''}${issue.path ? `${issue.path}: ` : ''}${issue.message}`);
+  return (
+    <button
+      type="button"
+      className="status-notice status-settings"
+      data-settings="invalid"
+      title={`settings.json tiene errores: se sigue usando la última configuración válida.\n${lines.join('\n')}`}
+      onClick={() => useUi.getState().openSettings()}
+    >
+      ⚠ settings.json
+    </button>
+  );
+}
+
 /** Branch of the repository the active pane is in (git runs in the background). */
 function GitBranch({ cwd }: { cwd: string }) {
   const git = useGit(selectGitFor(cwd));
@@ -87,8 +112,8 @@ export function StatusBar() {
     return id ? s.panes[id] : undefined;
   });
   const home = useSystem((s) => s.homeDir);
-  const shells = useSystem((s) => s.shells);
-  const shellName = shells.find((profile) => profile.kind === pane?.shell)?.name ?? '';
+  const profile = useProfile(pane?.profile);
+  const shellName = pane ? (profile?.name ?? '') : '';
   // Long paths collapse only as much as the window needs.
   const ref = useRef<HTMLElement>(null);
   const [width, setWidth] = useState(0);
@@ -111,6 +136,7 @@ export function StatusBar() {
       {pane?.cwd && <GitBranch cwd={pane.cwd} />}
       {pane && <CommandStatus pane={pane} />}
       <span className="status-spacer" />
+      <SettingsNotice />
       {pane && <IntegrationNotice pane={pane} />}
       {shellName && <span className="status-shell">{shellName}</span>}
     </footer>

@@ -36,12 +36,42 @@ export function dropPaths(paths: string[], x: number, y: number): boolean {
   return ok;
 }
 
+/** Other drop zones (the theme import on the settings screen): `[data-file-drop]` elements. */
+const zones = new Map<string, (paths: string[]) => void>();
+
+/** Files dropped on the element with `data-file-drop="<name>"` go to `handler`. */
+export function registerDropZone(name: string, handler: (paths: string[]) => void): () => void {
+  zones.set(name, handler);
+  return () => {
+    if (zones.get(name) === handler) zones.delete(name);
+  };
+}
+
+function zoneAt(x: number, y: number): HTMLElement | null {
+  const element = document.elementFromPoint(x, y);
+  return element instanceof Element ? element.closest<HTMLElement>('[data-file-drop]') : null;
+}
+
+let zoneHighlighted: HTMLElement | null = null;
+function markZone(zone: HTMLElement | null): void {
+  if (zone === zoneHighlighted) return;
+  if (zoneHighlighted) delete zoneHighlighted.dataset.dropTarget;
+  zoneHighlighted = zone;
+  if (zone) zone.dataset.dropTarget = '';
+}
+
 /** Files dragged in from other apps. Returns the uninstaller. */
 export function installFileDrop(): () => void {
   let disposed = false;
   let unlisten: (() => void) | null = null;
   void onFileDrop((event) => {
-    if (event.type === 'over') markDropTarget(paneAt(event.x, event.y));
+    const zone = event.type === 'leave' ? null : zoneAt(event.x, event.y);
+    markZone(event.type === 'over' ? zone : null);
+    if (zone && event.type === 'drop') {
+      zones.get(zone.dataset.fileDrop ?? '')?.(event.paths);
+      return;
+    }
+    if (event.type === 'over') markDropTarget(zone ? null : paneAt(event.x, event.y));
     else if (event.type === 'leave') markDropTarget(null);
     else dropPaths(event.paths, event.x, event.y);
   })

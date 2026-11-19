@@ -116,18 +116,46 @@ export function toMsysPath(path: string): string {
 }
 
 /**
+ * C:\x \u2192 /mnt/c/x and \\wsl.localhost\<distro>\home\ana (or \\wsl$\...) \u2192 /home/ana, for typing
+ * a path into a WSL shell (assumes WSL's default /mnt automount root).
+ */
+export function toWslPath(path: string): string {
+  const p = normalizePath(path);
+  const distro = /^\\\\wsl(?:\.localhost|\$)\\[^\\]+(\\.*)?$/i.exec(p);
+  if (distro) return (distro[1] ?? '\\').replace(/\\/g, '/');
+  const drive = /^([A-Za-z]):\\?(.*)$/.exec(p);
+  if (drive) return `/mnt/${drive[1]!.toLowerCase()}/${drive[2]!.replace(/\\/g, '/')}`.replace(/\/$/, '');
+  return p.replace(/\\/g, '/');
+}
+
+const posixQuote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
+
+/**
  * A path as one argument for the shell, always quoted: PowerShell single quotes (doubling '
- * and its typographic variants, which PowerShell also treats as quotes); Git Bash single quotes
- * around the MSYS path ('\'' for a quote).
+ * and its typographic variants, which PowerShell also treats as quotes); Git Bash and WSL
+ * single quotes around the MSYS / Linux path ('\'' for a quote); cmd and anything else double
+ * quotes (Windows paths cannot contain them).
  */
 export function quotePath(path: string, shell: ShellKind | null): string {
-  if (shell === 'gitbash') return `'${toMsysPath(path).replace(/'/g, "'\\''")}'`;
+  if (shell === 'gitbash') return posixQuote(toMsysPath(path));
+  if (shell === 'wsl') return posixQuote(toWslPath(path));
+  if (shell === 'cmd' || shell === 'other') return `"${normalizePath(path)}"`;
   return `'${normalizePath(path).replace(/['\u2018\u2019\u201a\u201b]/g, (q) => q + q)}'`;
 }
 
 /** The line that moves the shell to `dir` (Enter not included). */
 export function cdCommand(dir: string, shell: ShellKind | null): string {
-  return shell === 'gitbash' ? `cd -- ${quotePath(dir, shell)}` : `Set-Location -LiteralPath ${quotePath(dir, shell)}`;
+  switch (shell) {
+    case 'gitbash':
+      return `cd -- ${quotePath(dir, shell)}`;
+    // wslpath knows the distro's real mount points (and \\wsl.localhost paths).
+    case 'wsl':
+      return `cd -- "$(wslpath -u ${posixQuote(normalizePath(dir))})"`;
+    case 'cmd':
+      return `cd /d ${quotePath(dir, shell)}`;
+    default:
+      return `Set-Location -LiteralPath ${quotePath(dir, shell)}`;
+  }
 }
 
 // ---------------------------------------------------------------- tree

@@ -2,9 +2,12 @@
 // the end-to-end checks in e2e/run.mjs.
 import { useExplorer } from '../store/explorer';
 import { useGit } from '../store/git';
+import { currentProfiles } from '../store/profiles';
+import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
+import { hasLigatures } from './ligatures';
 import { getPane } from './terminalRegistry';
 
 export function installDevHooks(): void {
@@ -18,4 +21,10 @@ export function installDevHooks(): void {
   window.__explorer = useExplorer;
   window.__git = useGit;
   window.__paneTerminal = (paneId) => getPane(paneId)?.term;
+  window.__settings = useSettings;
+  window.__profiles = currentProfiles;
+  window.__paneLigatures = (paneId) => {
+    const term = getPane(paneId)?.term;
+    return !!term && hasLigatures(term);
+  };
 }

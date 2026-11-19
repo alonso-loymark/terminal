@@ -14,31 +14,15 @@ export interface Notice {
 
 export const SIDEBAR_MIN = 160;
 export const SIDEBAR_DEFAULT = 260;
-const STORAGE_KEY = 'terminal.explorer';
 
-interface Persisted {
+/** What settings.json keeps (`explorer.*`, see lib/settingsSync.ts). */
+export interface ExplorerPrefs {
   visible: boolean;
   width: number;
   showHidden: boolean;
 }
 
-/** Visibility, width and the hidden toggle survive restarts (localStorage; Fase 6 brings real settings). */
-function readPersisted(): Persisted {
-  const fallback: Persisted = { visible: true, width: SIDEBAR_DEFAULT, showHidden: false };
-  try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null') as Partial<Persisted> | null;
-    if (!raw) return fallback;
-    return {
-      visible: typeof raw.visible === 'boolean' ? raw.visible : fallback.visible,
-      width: typeof raw.width === 'number' && raw.width >= SIDEBAR_MIN ? raw.width : fallback.width,
-      showHidden: typeof raw.showHidden === 'boolean' ? raw.showHidden : fallback.showHidden,
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-interface ExplorerState extends Persisted {
+interface ExplorerState extends ExplorerPrefs {
   /** Folder the explorer stays on instead of following the active pane's cwd. */
   pinned: string | null;
   /** pathKey → expanded. Kept across roots (absolute paths). */
@@ -52,6 +36,8 @@ interface ExplorerState extends Persisted {
   /** Folders the backend confirmed it is watching (pathKeys; diagnostics and e2e). */
   watched: string[];
   toggleVisible: () => void;
+  /** From settings.json (startup, or the file changed). */
+  applyPrefs: (prefs: ExplorerPrefs) => void;
   setWidth: (width: number) => void;
   toggleHidden: () => void;
   setPinned: (path: string | null) => void;
@@ -66,7 +52,9 @@ interface ExplorerState extends Persisted {
 }
 
 export const useExplorer = create<ExplorerState>()((set) => ({
-  ...readPersisted(),
+  visible: true,
+  width: SIDEBAR_DEFAULT,
+  showHidden: false,
   pinned: null,
   expanded: {},
   listings: {},
@@ -75,6 +63,12 @@ export const useExplorer = create<ExplorerState>()((set) => ({
   selected: null,
   watched: [],
   toggleVisible: () => set((s) => ({ visible: !s.visible })),
+  applyPrefs: (prefs) =>
+    set((s) =>
+      s.visible === prefs.visible && s.width === prefs.width && s.showHidden === prefs.showHidden
+        ? s
+        : { visible: prefs.visible, width: Math.max(SIDEBAR_MIN, prefs.width), showHidden: prefs.showHidden },
+    ),
   setWidth: (width) => set({ width: Math.max(SIDEBAR_MIN, Math.round(width)) }),
   toggleHidden: () => set((s) => ({ showHidden: !s.showHidden })),
   setPinned: (pinned) => set({ pinned }),
@@ -101,15 +95,3 @@ export const useExplorer = create<ExplorerState>()((set) => ({
   select: (path) => set({ selected: path ? pathKey(path) : null }),
   setWatched: (watched) => set({ watched }),
 }));
-
-let saved = '';
-useExplorer.subscribe((s) => {
-  const next = JSON.stringify({ visible: s.visible, width: s.width, showHidden: s.showHidden } satisfies Persisted);
-  if (next === saved) return;
-  saved = next;
-  try {
-    localStorage.setItem(STORAGE_KEY, next);
-  } catch {
-    // Storage unavailable: the preference lasts for this session only.
-  }
-});

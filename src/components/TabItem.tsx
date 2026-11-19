@@ -4,9 +4,11 @@ import type { CSSProperties, MouseEvent } from 'react';
 import { TAB_COLORS } from '../config/colors';
 import { folderName } from '../lib/paths';
 import { focusActiveTerminal, requestCloseTabs } from '../lib/tabActions';
+import { useProfile } from '../store/profiles';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
 import { tabIndicator, tabTitle, type TabId } from '../store/workspaceModel';
+import { ProfileIcon } from './ProfileIcon';
 import { RenameInput } from './RenameInput';
 
 const INDICATOR_LABEL = {
@@ -27,6 +29,8 @@ export function TabItem({ tabId }: { tabId: TabId }) {
   const exitCode = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.exitCode ?? null);
   const customTitle = useWorkspace((s) => s.tabs[tabId]?.customTitle ?? null);
   const cwd = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.cwd ?? null);
+  const profileId = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.profile ?? null);
+  const profile = useProfile(profileId);
   const renaming = useUi((s) => s.renamingTabId === tabId);
   // The active pane's folder under the title, unless the user named the tab (or the title
   // already says it).
@@ -63,6 +67,7 @@ export function TabItem({ tabId }: { tabId: TabId }) {
 
   let tooltip = title;
   if (indicator && indicator !== 'activity') tooltip += ` — ${INDICATOR_LABEL[indicator]}${exitCode !== null ? ` (código ${exitCode})` : ''}`;
+  if (profile) tooltip += `\n${profile.name}`;
   if (cwd) tooltip += `\n${cwd}`;
 
   return (
@@ -86,6 +91,7 @@ export function TabItem({ tabId }: { tabId: TabId }) {
       onContextMenu={onContextMenu}
       onAuxClick={(event) => event.button === 1 && close(event)}
     >
+      <ProfileIcon profile={profile} />
       {renaming ? (
         <RenameInput
           initial={customTitle ?? title}

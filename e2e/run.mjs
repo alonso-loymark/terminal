@@ -27,17 +27,21 @@ const STARTED = Date.now();
  * stages, to close a phase (CLAUDE.md, "Regla de fases").
  */
 const SMOKE = process.argv.includes('--smoke');
-const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'close'];
+const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'close'];
 const only = SMOKE ? SMOKE_STAGES : process.argv[2]?.split(',').filter(Boolean);
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-e2e-'));
+const CONFIG_DIR = path.join(WORK, 'config');
+const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json');
 fs.mkdirSync(ARTIFACTS, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
+/** E2E_TIMES=1: every check prints its time (to find which wait a slow stage spends on). */
+const TIMES = process.env.E2E_TIMES === '1';
 const check = (name, ok, detail = '') => {
   results.push({ name, ok });
   const time = new Date().toTimeString().slice(0, 8);
-  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}${ok ? '' : ` [${time}]`}`);
+  console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}${ok && !TIMES ? '' : ` [${time}]`}`);
 };
 const skip = (name, why) => console.log(`SKIP ${name} — ${why}`);
 const alive = (pid) => {
@@ -74,6 +78,8 @@ if (!ATTACH) {
   // Agent session variables must not leak into the shells under test.
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^CLAUDE/i.test(k)));
   env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${CDP_PORT}`;
+  // A throwaway settings.json: the suite never touches the user's own configuration.
+  env.TERMINAL_CONFIG_DIR = CONFIG_DIR;
   const logFd = fs.openSync(path.join(ARTIFACTS, 'tauri-dev.log'), 'w');
   dev = spawn('npm run tauri dev', { cwd: ROOT, env, shell: true, stdio: ['ignore', logFd, logFd] });
   console.log(`tauri dev lanzado (log en e2e/artifacts/tauri-dev.log); esperando la app...`);
@@ -173,7 +179,12 @@ async function waitUntil(fn, timeout = 10000) {
 const atShellPrompt = () =>
   page.evaluate(() => {
     const b = window.__terminal.buffer.active;
-    const line = b.getLine(b.baseY + b.cursorY)?.translateToString(true) ?? '';
+    // The logical line: a long folder wraps the prompt over several rows in a narrow pane.
+    const end = b.baseY + b.cursorY;
+    let start = end;
+    while (start > 0 && b.getLine(start)?.isWrapped) start--;
+    let line = '';
+    for (let y = start; y <= end; y++) line += b.getLine(y)?.translateToString(y === end) ?? '';
     return b.type === 'normal' && /^PS [A-Za-z]:\\.*>\s*$/.test(line);
   });
 /** The active terminal owns the keyboard (the app focuses it one frame after a tab switch). */
@@ -551,6 +562,93 @@ foreach ($p in @($all | Where-Object ProcessId -eq ${appPid}) + @(Get-Tree ${app
 $out | ConvertTo-Json -Compress`;
   return JSON.parse(powershell(script));
 }
+
+// ---------------------------------------------------------------- settings helpers
+const NEW_SETTINGS = '{\n  "$schema": "./settings.schema.json"\n}\n';
+const settingsState = () =>
+  page.evaluate(() => {
+    const s = window.__settings.getState();
+    return { path: s.path, status: s.status, issues: s.issues, text: s.text, settings: s.settings, restartRequired: s.restartRequired };
+  });
+/** The app runs on the suite's throwaway config folder (not so with E2E_ATTACH and a normal app). */
+const ownSettings = async () => (await settingsState()).path?.toLowerCase() === SETTINGS_FILE.toLowerCase();
+const settingsOnDisk = () => fs.readFileSync(SETTINGS_FILE, 'utf8');
+/** Writes settings.json like an editor would (an object gets the $schema line) and waits until the app read it. */
+async function writeSettings(content) {
+  const text = typeof content === 'string' ? content : `${JSON.stringify({ $schema: './settings.schema.json', ...content }, null, 2)}\n`;
+  fs.writeFileSync(SETTINGS_FILE, text);
+  if (!(await waitUntil(async () => (await settingsState()).text === text, 8000))) {
+    throw new Error(`la app no leyó settings.json: ${String((await settingsState()).text).slice(0, 200)}`);
+  }
+  return settingsState();
+}
+const resetSettings = () => writeSettings(NEW_SETTINGS);
+/** Ctrl+, and a section of the navigation. */
+async function openSettings(section) {
+  if (!(await page.$('.settings'))) await page.keyboard.press('Control+Comma');
+  await page.waitForSelector('.settings', { timeout: 3000 });
+  if (section) await page.click(`.settings-nav [data-section="${section}"]`);
+}
+async function closeSettings() {
+  if (await page.$('.settings')) await page.click('[data-action="close-settings"]');
+  await waitUntil(async () => !(await page.$('.settings')), 3000);
+}
+/** Sets a field of the settings screen like a user: types and presses Enter, picks an option, ticks a box. */
+async function fillSetting(setting, value) {
+  const field = `.settings-field[data-setting="${setting}"]`;
+  const control = page.locator(`${field} input, ${field} select, ${field} textarea`).first();
+  const kind = await control.evaluate((el) => `${el.tagName}:${el.type ?? ''}`);
+  if (kind.startsWith('SELECT')) await control.selectOption(String(value));
+  else if (kind === 'INPUT:checkbox') {
+    if ((await control.isChecked()) !== value) await control.click();
+  } else {
+    await control.fill(String(value));
+    await control.press('Enter');
+  }
+}
+const cssVar = (name) => page.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name);
+const paneBackground = (id) => page.evaluate((id) => window.__paneTerminal(id)?.options.theme?.background ?? null, id);
+/** Reloads the page and waits for the shell again. */
+async function reloadApp() {
+  await page.reload();
+  await page.waitForFunction(() => window.__terminal, null, { timeout: 30000 });
+  await emulateFocus();
+  await waitFor(/PS [A-Za-z]:\\.*>/, { timeout: 30000 });
+}
+/** True only when the cursor sits on an idle cmd prompt (`C:\carpeta>`). */
+const atCmdPrompt = async () => /^[A-Za-z]:\\[^>]*>\s*$/.test(await cursorLine());
+/** Types a command at cmd's prompt; refuses to type anywhere else (like `run`). */
+async function runCmd(cmd) {
+  if (!(await waitUntil(atCmdPrompt, 15000))) throw new Error(`sin prompt de cmd; no se tipea: ${cmd} (${await cursorLine()})`);
+  if (!(await waitUntil(terminalFocused, 3000))) throw new Error(`la terminal activa no tiene el foco (${await focusReport()}); no se tipea: ${cmd}`);
+  await page.keyboard.type(cmd);
+  await page.keyboard.press('Enter');
+}
+/** The ids the "▾" menu offers. */
+async function profileMenu() {
+  await page.click('.tab-new-menu');
+  await page.waitForSelector('[role="menu"] [data-profile]', { timeout: 3000 });
+  return page.$$eval('[role="menu"] [data-profile]', (items) =>
+    items.map((item) => ({ id: item.dataset.profile, name: item.textContent, icon: !!item.querySelector('.profile-icon') })),
+  );
+}
+/** Center of the first cell of `text` on screen in a pane (to click or select it). */
+const textPosition = (id, needle) =>
+  page.evaluate(
+    ({ id, needle }) => {
+      const t = window.__paneTerminal(id);
+      const b = t.buffer.active;
+      const screen = t.element.querySelector('.xterm-screen').getBoundingClientRect();
+      const cw = screen.width / t.cols;
+      const ch = screen.height / t.rows;
+      for (let y = b.viewportY + t.rows - 1; y >= b.viewportY; y--) {
+        const x = b.getLine(y)?.translateToString(true).indexOf(needle) ?? -1;
+        if (x >= 0) return { x: screen.left + (x + needle.length / 2) * cw, y: screen.top + (y - b.viewportY + 0.5) * ch };
+      }
+      return null;
+    },
+    { id, needle },
+  );
 
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
 function agentExe(name) {
@@ -1422,7 +1520,7 @@ const stages = {
     await cdTricky();
     const before = (await wsState()).order.length;
     await page.click('.tab-new-menu');
-    await page.click('[role="menu"] [data-shell="gitbash"]');
+    await page.click('[role="menu"] [data-profile="gitbash"]');
     await waitUntil(async () => (await wsState()).order.length === before + 1, 5000);
     const id = await activePane();
     const ready = await waitUntil(() => idle(id), 30000);
@@ -1663,6 +1761,10 @@ const stages = {
     await sleep(300);
     const w1 = (await explorerState()).width;
     check('arrastrar el borde cambia el ancho', Math.abs(w1 - w0 - 90) <= 3, `${w0} -> ${w1}`);
+    if (await ownSettings()) {
+      const saved = await waitUntil(() => settingsOnDisk().includes(`"width": ${w1}`), 3000);
+      check('... y se guarda en settings.json al soltar', saved, settingsOnDisk());
+    }
     await page.reload();
     await page.waitForFunction(() => window.__terminal, null, { timeout: 30000 });
     await emulateFocus();
@@ -1830,7 +1932,7 @@ const stages = {
     const shells = await page.evaluate(() => window.__system.getState().shells);
     if (shells.some((s) => s.kind === 'gitbash')) {
       await page.click('.tab-new-menu');
-      await page.click('[role="menu"] [data-shell="gitbash"]');
+      await page.click('[role="menu"] [data-profile="gitbash"]');
       const bash = await activePane();
       await waitUntil(() => idle(bash), 30000);
       await waitRow(file);
@@ -2058,6 +2160,267 @@ const stages = {
     await waitPanes(2);
     check('dividir panel aquí', (await paneCwd(await activePane())) === folder, String(await paneCwd(await activePane())));
     await shot('28-explorer-menu');
+    await freshTab();
+  },
+
+  // ------------------------------------------------------------ settings, themes, profiles
+  async settings() {
+    if (!(await ownSettings())) return skip('settings', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await page.evaluate(() => window.__settings.getState().resetZoom());
+    const schemaFile = path.join(CONFIG_DIR, 'settings.schema.json');
+    check(
+      'settings.json se crea al arrancar, con su JSON Schema al lado (autocompletado en VS Code)',
+      fs.existsSync(SETTINGS_FILE) && settingsOnDisk().includes('settings.schema.json') && fs.existsSync(schemaFile) && fs.readFileSync(schemaFile, 'utf8').includes('"fontSize"'),
+    );
+    const id = await activePane();
+
+    // Edited in another program: applies live, and the PTY follows the new grid.
+    await writeSettings({ appearance: { fontSize: 17 } });
+    await waitUntil(async () => (await termInfo()).fontSize === 17, 3000);
+    let pty = await ptyMatches(id);
+    check('cambiar settings.json aplica en vivo (fuente) y el PTY sigue al grid', (await termInfo()).fontSize === 17 && pty.ok, pty.detail);
+
+    // Broken JSON: the last valid settings stay, with a discreet notice.
+    let st = await writeSettings('{\n  "appearance": { "fontSize": 30,\n');
+    const notice = await page.locator('.status-bar [data-settings="invalid"]').getAttribute('title', { timeout: 3000 }).catch(() => null);
+    check('JSON roto: sigue la última configuración válida', st.status === 'invalid' && (await termInfo()).fontSize === 17, JSON.stringify(st.issues));
+    check('... y un aviso discreto en la barra de estado (con la línea del error)', !!notice && /línea \d+/.test(notice), notice ?? '');
+    st = await writeSettings({ appearance: { fontSize: 'grande' } });
+    check(
+      'un valor de tipo incorrecto también se rechaza, con la ruta del problema',
+      st.status === 'invalid' && st.issues.some((i) => i.path === 'appearance.fontSize') && (await termInfo()).fontSize === 17,
+      JSON.stringify(st.issues),
+    );
+    st = await writeSettings({ appearance: { fontSize: 15 } });
+    await waitUntil(async () => (await termInfo()).fontSize === 15, 3000);
+    check('al corregirlo se aplica y el aviso desaparece', st.status === 'ok' && (await termInfo()).fontSize === 15 && !(await page.$('.status-bar [data-settings]')));
+
+    // The settings screen: one change writes only that value; the user's comments stay.
+    await writeSettings('{\n  // mi comentario\n  "$schema": "./settings.schema.json",\n  "appearance": { "fontSize": 15 }\n}\n');
+    await openSettings('appearance');
+    await fillSetting('appearance.fontSize', 16);
+    await waitUntil(() => settingsOnDisk().includes('"fontSize": 16'), 3000);
+    const disk = settingsOnDisk();
+    check('Ctrl+, abre la configuración; un cambio se guarda en settings.json y aplica', disk.includes('"fontSize": 16') && (await termInfo()).fontSize === 16, disk);
+    check('... sin perder los comentarios del archivo', disk.includes('// mi comentario'));
+    await shot('29-settings');
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => !(await page.$('.settings')), 3000);
+    check('Esc cierra la configuración y el foco vuelve a la terminal', await waitUntil(terminalFocused, 3000), await focusReport());
+    await resetSettings();
+    await waitUntil(async () => (await termInfo()).fontSize === 14, 3000);
+    check('sin valores en el archivo: los de por defecto', (await termInfo()).fontSize === 14);
+  },
+
+  async themes() {
+    if (!(await ownSettings())) return skip('themes', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await resetSettings();
+    await freshTab();
+    const id = await activePane();
+    check('tema por defecto: Oscuro en la terminal y en la UI', (await cssVar('--bg')) === '#0d1117' && (await paneBackground(id)) === '#0d1117');
+    const chromeOf = () => page.evaluate(() => ['.tab-bar', '.status-bar', '.sidebar'].map((s) => document.querySelector(s) && getComputedStyle(document.querySelector(s)).backgroundColor));
+
+    await openSettings('themes');
+    await page.click('.theme-card[data-theme-id="dracula"] .theme-pick');
+    await waitUntil(async () => (await cssVar('--bg')) === '#282a36', 3000);
+    let chrome = await chromeOf();
+    check(
+      'elegir Dracula pinta la terminal y toda la UI (tabs, barra de estado, explorador)',
+      (await paneBackground(id)) === '#282a36' && chrome.filter(Boolean).every((c) => c === 'rgb(33, 34, 44)') && settingsOnDisk().includes('"theme": "dracula"'),
+      JSON.stringify(chrome),
+    );
+    await page.click('.theme-card[data-theme-id="light"] .theme-pick');
+    await waitUntil(async () => (await cssVar('--bg')) === '#ffffff', 3000);
+    const scheme = await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme);
+    check('tema claro: terminal y UI claras', (await paneBackground(id)) === '#ffffff' && scheme === 'light', scheme);
+    await shot('30-theme-light');
+
+    // A Windows Terminal scheme pasted in: it shows up, applies, and is kept in our format.
+    const wt = {
+      name: 'E2E Scheme', background: '#102030', foreground: '#E0E0E0', cursorColor: '#FFCC00', selectionBackground: '#334455',
+      black: '#000000', red: '#E06C75', green: '#98C379', yellow: '#E5C07B', blue: '#61AFEF', purple: '#C678DD', cyan: '#56B6C2', white: '#DCDFE4',
+      brightBlack: '#5A6374', brightRed: '#FF7B86', brightGreen: '#B1E18B', brightYellow: '#EFD08F', brightBlue: '#84C0F4', brightPurple: '#D898EB', brightCyan: '#6BCBD6', brightWhite: '#FFFFFF',
+    };
+    await page.fill('.theme-import textarea', JSON.stringify(wt, null, 2));
+    await page.click('[data-action="import-theme"]');
+    await page.waitForSelector('.theme-card[data-theme-id="E2E Scheme"][data-selected]', { timeout: 3000 }).catch(() => null);
+    const t = await page.evaluate((pid) => window.__paneTerminal(pid).options.theme, id);
+    check(
+      'importar un esquema de Windows Terminal: aparece, se aplica (purple → magenta) y queda en settings.json',
+      (await cssVar('--bg')) === '#102030' && t.magenta === '#C678DD' && t.cursor === '#FFCC00' && /"themes":\s*\[\s*\{\s*"name": "E2E Scheme"/.test(settingsOnDisk()),
+      JSON.stringify({ bg: await cssVar('--bg'), magenta: t.magenta }),
+    );
+    await page.fill('.theme-import textarea', '{ "name": "Roto", "background": "rojo" }');
+    await page.click('[data-action="import-theme"]');
+    const error = await page.textContent('.theme-import-result [data-severity="error"]', { timeout: 3000 }).catch(() => null);
+    check('un tema inválido no se importa y se explica por qué', !!error && error.includes('background') && !settingsOnDisk().includes('Roto'), error ?? '');
+    await page.click('.theme-card[data-theme-id="E2E Scheme"] .theme-delete');
+    await waitUntil(async () => (await cssVar('--bg')) === '#0d1117', 3000);
+    check('eliminar el tema en uso vuelve al de por defecto', !settingsOnDisk().includes('E2E Scheme') && (await paneBackground(id)) === '#0d1117');
+    await closeSettings();
+
+    // A profile's own theme: only its terminals; the UI keeps the global one.
+    await writeSettings({ profiles: { list: [{ id: 'cmd', theme: 'tokyo-night' }] } });
+    await page.evaluate(() => window.__workspace.getState().newTab({ profile: 'cmd' }));
+    const cmd = await activePane();
+    await waitUntil(async () => (await paneState(cmd))?.status === 'running', 15000);
+    check(
+      'tema por perfil: la terminal de cmd usa el suyo y la UI el global',
+      (await paneBackground(cmd)) === '#1a1b26' && (await paneBackground(id)) === '#0d1117' && (await cssVar('--bg')) === '#0d1117',
+    );
+    await resetSettings();
+    await freshTab();
+  },
+
+  async profiles() {
+    if (!(await ownSettings())) return skip('profiles', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await resetSettings();
+    await freshTab();
+    const hasGitBash = (await page.evaluate(() => window.__system.getState().shells)).some((s) => s.kind === 'gitbash');
+    const { dir, parent } = explorerFixture();
+    await cdTricky();
+    let menu = await profileMenu();
+    check(
+      'el menú ▾ lista los perfiles detectados, con ícono',
+      ['powershell', 'cmd', ...(hasGitBash ? ['gitbash'] : [])].every((p) => menu.some((m) => m.id === p)) && menu.every((m) => m.icon),
+      menu.map((m) => m.id).join(','),
+    );
+
+    // cmd: starts in the active pane's folder and reports it through its prompt (OSC 9;9).
+    await page.click('[role="menu"] [data-profile="cmd"]');
+    await waitUntil(async () => (await paneState(await activePane()))?.shell === 'cmd', 15000);
+    const cmd = await activePane();
+    await waitUntil(async () => (await paneState(cmd))?.cwd === dir, 15000);
+    let st = await paneState(cmd);
+    check('cmd desde el menú: abre en el cwd del panel activo y lo informa', st.integration === 'cwd' && st.cwd === dir, JSON.stringify({ cwd: st.cwd, integration: st.integration }));
+    const bar = await statusBar();
+    check('cmd: nombre del perfil en la barra de estado y sin aviso de integración', bar.shell === 'Símbolo del sistema' && bar.notice === null, JSON.stringify(bar));
+    await runCmd('cd ..');
+    check('cmd: cd actualiza la carpeta del panel', await waitUntil(async () => (await paneState(cmd))?.cwd === parent, 10000), (await paneState(cmd))?.cwd);
+    await showExplorer();
+    await waitRoot(parent);
+    await waitRow(dir);
+    const line = await cursorLine();
+    await clickRow(dir);
+    await waitUntil(async () => (await explorerState()).notice !== null, 3000);
+    check('clic en una carpeta con cmd: no escribe nada (no sabe si está libre) y avisa', (await cursorLine()) === line && !!(await explorerState()).notice?.message.includes('cmd'));
+    await page.evaluate(() => window.__explorer.getState().setNotice(null));
+
+    // A profile of one's own (and a hidden one) from settings.json.
+    await writeSettings({
+      profiles: {
+        list: [
+          { name: 'PS e2e', command: 'powershell.exe', args: ['-NoProfile'], env: { TERMINAL_E2E: 'hola %USERNAME%' }, icon: '🧪', cwd: parent },
+          { id: 'cmd', hidden: true },
+        ],
+      },
+    });
+    await page.keyboard.press('Escape');
+    menu = await profileMenu();
+    check('un perfil propio aparece en el menú; uno oculto no', menu.some((m) => m.id === 'custom-ps-e2e' && m.name.includes('PS e2e')) && !menu.some((m) => m.id === 'cmd'), menu.map((m) => m.id).join(','));
+    await page.click('[role="menu"] [data-profile="custom-ps-e2e"]');
+    await waitUntil(async () => (await paneState(await activePane()))?.profile === 'custom-ps-e2e', 5000);
+    const own = await activePane();
+    const ready = await waitUntil(() => idle(own), 30000);
+    st = await paneState(own);
+    check('perfil propio: integración aun con -NoProfile, y su carpeta inicial', ready && st.integration === 'ok' && st.cwd === parent, JSON.stringify({ integration: st.integration, cwd: st.cwd }));
+    check('perfil propio: sus variables de entorno (con %VARIABLES%)', (await value('$env:TERMINAL_E2E', 'env')) === `hola ${process.env.USERNAME}`);
+
+    // The default profile from the settings screen: Ctrl+Shift+T opens it.
+    await openSettings('profiles');
+    await fillSetting('profiles.default', 'custom-ps-e2e');
+    await closeSettings();
+    await openTab();
+    st = await paneState(await activePane());
+    check('perfil por defecto elegido en la configuración: Ctrl+Shift+T lo usa', st.profile === 'custom-ps-e2e' && settingsOnDisk().includes('"default": "custom-ps-e2e"'), st.profile);
+    await shot('31-profiles');
+    await resetSettings();
+    await freshTab();
+  },
+
+  async behavior() {
+    if (!(await ownSettings())) return skip('behavior', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await resetSettings();
+    await freshTab();
+    let id = await activePane();
+
+    // Right click as a VS Code style context menu.
+    await writeSettings({ terminal: { rightClick: 'menu' } });
+    let box = await paneBox(id);
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: 'right' });
+    await page.waitForSelector('[role="menu"] [data-action="paste"]', { timeout: 3000 }).catch(() => null);
+    const actions = await page.$$eval('[role="menu"] [data-action]', (items) => items.map((item) => item.dataset.action));
+    check('clic derecho en modo menú: copiar, pegar, seleccionar todo y las acciones del panel', ['copy', 'paste', 'select-all', 'split-right'].every((a) => actions.includes(a)), actions.join(','));
+    await setClipboard('pegado' + '-menu');
+    await page.click('[role="menu"] [data-action="paste"]');
+    check('... y "Pegar" pega en la terminal', await waitUntil(async () => (await cursorLine()).includes('pegado-menu'), 3000), await cursorLine());
+    await waitUntil(terminalFocused, 3000);
+    await page.keyboard.press('Escape'); // PSReadLine: clear the line
+    await waitUntil(atShellPrompt, 3000);
+
+    // Copy on select: a double click on a word copies it.
+    await writeSettings({ terminal: { copyOnSelect: true } });
+    await setClipboard('nada');
+    await run("'copia' + 'sel-' + 'xyz'");
+    const at = await textPosition(id, 'copiasel-xyz');
+    if (at) await page.mouse.dblclick(at.x, at.y);
+    check('copiar al seleccionar: doble clic en una palabra la copia', await waitUntil(async () => (await getClipboard()) === 'copiasel-xyz', 3000), await getClipboard());
+    await page.evaluate((pid) => window.__paneTerminal(pid).clearSelection(), id);
+
+    // Folder click that only navigates the explorer.
+    await writeSettings({ explorer: { folderClick: 'navigate' } });
+    const { dir, sub } = explorerFixture();
+    await cdTricky();
+    await showExplorer();
+    await waitRoot(dir);
+    await waitRow(sub);
+    await clickRow(sub);
+    const navigated = await waitRoot(sub);
+    check(
+      'clic en carpeta en modo "solo navegar": el explorador entra y la shell no se mueve',
+      navigated && (await explorerState()).pinned?.toLowerCase() === sub.toLowerCase() && (await paneState(id)).cwd === dir && (await atEmptyPrompt(id)),
+    );
+    await page.click('[data-action="pin"]');
+
+    // Explorer at startup: hidden, or visible even if it was hidden last time.
+    await writeSettings({ explorer: { startup: 'hidden' } });
+    await reloadApp();
+    check('explorador al arrancar: oculto', !(await explorerState()).visible);
+    await writeSettings({ explorer: { startup: 'visible', visible: false } });
+    await reloadApp();
+    check('... o visible aunque la última vez quedó oculto', (await explorerState()).visible);
+
+    // Fase 5 kept the explorer's preferences in localStorage: they move to settings.json.
+    await resetSettings();
+    await page.evaluate(() => localStorage.setItem('terminal.explorer', JSON.stringify({ visible: true, width: 333, showHidden: true })));
+    await reloadApp();
+    const migrated = await waitUntil(() => /"width": 333/.test(settingsOnDisk()) && /"showHidden": true/.test(settingsOnDisk()), 5000);
+    const legacy = await page.evaluate(() => localStorage.getItem('terminal.explorer'));
+    check('migración: ancho y "ver ocultos" de localStorage pasan a settings.json', migrated && legacy === null && (await explorerState()).width === 333, settingsOnDisk());
+
+    // Ligatures and padding.
+    id = await activePane();
+    await writeSettings({ appearance: { ligatures: true, padding: 20, fontFamily: '"Cascadia Code", Consolas, monospace' } });
+    check('ligaduras: el joiner se registra en las terminales', await waitUntil(() => page.evaluate((pid) => window.__paneLigatures(pid), id), 3000));
+    await sleep(300);
+    const inset = await page.evaluate((pid) => {
+      const pane = document.querySelector(`[data-pane-id="${pid}"]`).getBoundingClientRect();
+      const inner = document.querySelector(`[data-pane-id="${pid}"] .terminal-host`).getBoundingClientRect();
+      return Math.round(inner.left - pane.left);
+    }, id);
+    const pty = await ptyMatches(id);
+    check('margen interno de 20 px y el PTY sigue al tamaño', inset === 20 && pty.ok, `${inset} px, ${pty.detail}`);
+
+    // A backdrop needs a window created transparent: the e2e window is opaque.
+    await writeSettings({ appearance: { backdrop: 'mica' } });
+    await waitUntil(async () => (await settingsState()).restartRequired, 3000);
+    await openSettings('appearance');
+    const restart = await page.$('.settings [data-restart-required]');
+    check('mica con la ventana creada opaca: avisa que se aplica al reiniciar', (await settingsState()).restartRequired && !!restart);
+    await closeSettings();
+    await resetSettings();
+    check('sin ligaduras ni efectos al volver a los valores por defecto', !(await page.evaluate((pid) => window.__paneLigatures(pid), id)) && !(await settingsState()).restartRequired);
     await freshTab();
   },
 

@@ -1,3 +1,4 @@
+/* The theme's colors (lib/appearance.ts sets them from settings.json; these are "Oscuro"). */
 :root {
   color-scheme: dark;
   --bg: #0d1117;
@@ -8,6 +9,19 @@
   --muted: #8b949e;
   --accent: #58a6ff;
   --danger: #f85149;
+  --warning: #d29922;
+  --success: #3fb950;
+  --chip-text: #010409;
+  --tab-blue: #58a6ff;
+  --tab-red: #ff7b72;
+  --tab-yellow: #d29922;
+  --tab-green: #3fb950;
+  --tab-pink: #f778ba;
+  --tab-purple: #bc8cff;
+  --tab-cyan: #39c5cf;
+  --tab-orange: #f0883e;
+  --tab-grey: #8b949e;
+  --terminal-padding: 8px;
   --ui-font: 12px system-ui, 'Segoe UI', sans-serif;
 }
 
@@ -29,6 +43,17 @@ body,
   inset: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* A translucent window (opacity < 100 or Mica/Acrylic): nothing paints behind the regions, each
+   one paints itself with its own alpha (chrome, terminals), so the backdrop shows through. The
+   workspace too: the panes paint their backgrounds, and the gaps between them show the backdrop
+   instead of stacking two translucent layers. */
+:root[data-translucent],
+:root[data-translucent] body,
+:root[data-translucent] #root,
+:root[data-translucent] .workspace {
+  background: transparent;
 }
 
 /* ------------------------------------------------------------------ tab bar */
@@ -217,7 +242,7 @@ body,
   padding: 0 8px;
   border-radius: 6px;
   background: var(--group-color);
-  color: var(--chrome);
+  color: var(--chip-text);
   font-weight: 600;
   cursor: pointer;
   outline: 2px solid transparent;
@@ -415,7 +440,7 @@ body,
 }
 
 .tree-row[data-selected] {
-  background: rgb(56 139 253 / 16%);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .tree-name {
@@ -493,12 +518,12 @@ body,
 
 /* Git: modified, new, renamed, deleted/conflict. Ignored and hidden entries are dimmed. */
 .tree-row[data-git='modified'] .tree-name {
-  color: #d29922;
+  color: var(--warning);
 }
 
 .tree-row[data-git='added'] .tree-name,
 .tree-row[data-git='untracked'] .tree-name {
-  color: #3fb950;
+  color: var(--success);
 }
 
 .tree-row[data-git='renamed'] .tree-name {
@@ -572,35 +597,42 @@ body,
   flex: 1;
   min-width: 0;
   min-height: 0;
+  background: var(--bg);
 }
 
 /* A path dragged from the explorer or from Windows Explorer will be typed in this pane. */
 .terminal-pane[data-drop-target] {
   outline: 2px dashed var(--accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
-/* Margin around the panes. Panes are positioned inside it from the layout tree (inline
-   left/top/width/height); the fit addon measures each pane. */
+/* Panes are positioned inside it from the layout tree (inline left/top/width/height). */
 .pane-area {
   position: absolute;
-  inset: 6px 4px 4px 10px;
+  inset: 0;
 }
 
-/* Inactive panes stay mounted with display: none (xterm pauses rendering, keeps scrollback). */
+/* Inactive panes stay mounted with display: none (xterm pauses rendering, keeps scrollback).
+   The pane is painted with its terminal's background (its profile's theme, translucent when
+   the window is); the padding is the pane's own margin around the grid. */
 .terminal-pane {
   position: absolute;
-  border-radius: 2px;
+}
+
+/* Where xterm lives: the pane minus the padding (what the fit addon measures). */
+.terminal-host {
+  position: absolute;
+  inset: var(--terminal-padding);
 }
 
 .terminal-pane[hidden] {
   display: none;
 }
 
-/* Active pane of a split tab. The outline sits in the gap, outside the terminal grid. */
+/* Active pane of a split tab. The outline sits on the pane's edge, in its padding. */
 .terminal-pane[data-focused] {
   outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: -1px;
 }
 
 .pane-divider {
@@ -697,7 +729,7 @@ body,
 }
 
 .status-command[data-state='ok'] {
-  color: #3fb950;
+  color: var(--success);
 }
 
 .status-command[data-state='error'] {
@@ -718,7 +750,22 @@ body,
 
 .status-notice {
   flex: none;
-  color: #d29922;
+  color: var(--warning);
+}
+
+/* settings.json has errors: a button that opens the settings screen. */
+.status-settings {
+  padding: 0 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--danger);
+  font: inherit;
+  cursor: pointer;
+}
+
+.status-settings:hover {
+  background: var(--panel);
 }
 
 .status-shell {
@@ -739,7 +786,7 @@ body,
 }
 
 .status-git-dirty {
-  color: #d29922;
+  color: var(--warning);
 }
 
 /* ------------------------------------------------------------------ search */
@@ -907,7 +954,7 @@ body,
 .dialog-backdrop {
   display: grid;
   place-items: center;
-  background: rgb(1 4 9 / 60%);
+  background: rgb(0 0 0 / 45%);
 }
 
 .dialog {
@@ -963,4 +1010,465 @@ body,
   border-color: var(--danger);
   background: var(--danger);
   color: #fff;
+}
+
+/* ------------------------------------------------------------------ profiles */
+
+/* A profile's icon: a built-in monogram badge, or the user's emoji / short text. */
+.profile-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 14px;
+  padding: 0 2px;
+  border-radius: 3px;
+  font: 600 9px/1 'Cascadia Mono', Consolas, monospace;
+  letter-spacing: -0.3px;
+}
+
+.profile-icon[data-icon='linux'],
+.profile-icon[data-icon='custom'] {
+  font: 12px/1 'Segoe UI Emoji', system-ui, sans-serif;
+  letter-spacing: 0;
+}
+
+.tab .profile-icon {
+  margin-left: -4px;
+  opacity: 0.9;
+}
+
+.menu-item .profile-icon {
+  margin-right: 2px;
+}
+
+/* ------------------------------------------------------------------ settings */
+
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 45%);
+}
+
+.settings {
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  grid-template-rows: 1fr auto;
+  width: min(900px, calc(100vw - 32px));
+  height: min(640px, calc(100vh - 32px));
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 50%);
+  font: 13px system-ui, 'Segoe UI', sans-serif;
+  color: var(--text);
+}
+
+.settings-nav {
+  grid-row: 1 / 3;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 8px;
+  background: var(--chrome);
+  border-right: 1px solid var(--border);
+}
+
+.settings-nav h1 {
+  margin: 0 8px 10px;
+  font-size: 15px;
+}
+
+.settings-nav button {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav button:hover {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.settings-nav button[aria-current='page'] {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.settings-main {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 22px 24px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.settings-section h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.settings-section h3 {
+  margin: 20px 0 8px;
+  font-size: 13px;
+}
+
+.settings-intro {
+  margin: -6px 0 14px;
+  color: var(--muted);
+}
+
+.settings-field {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  align-items: start;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+.settings-field label {
+  padding-top: 5px;
+}
+
+.settings-control {
+  min-width: 0;
+}
+
+.settings-hint {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-input {
+  width: 100%;
+  max-width: 420px;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.settings-input:focus {
+  border-color: var(--accent);
+}
+
+.settings-input:disabled,
+.settings-toggle:disabled {
+  opacity: 0.5;
+}
+
+.settings-number {
+  width: 110px;
+}
+
+.settings-select {
+  width: auto;
+  min-width: 200px;
+}
+
+.settings-textarea {
+  max-width: none;
+  resize: vertical;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+}
+
+.settings-toggle {
+  width: 16px;
+  height: 16px;
+  margin: 5px 0 0;
+  accent-color: var(--accent);
+}
+
+.settings-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-range input {
+  width: 220px;
+  accent-color: var(--accent);
+}
+
+.settings-button {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.settings-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.settings-button:focus-visible,
+.settings-nav button:focus-visible,
+.theme-pick:focus-visible,
+.profile-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.settings-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-banner {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.settings-banner[data-severity='error'] {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.settings-banner ul {
+  margin: 6px 0 8px;
+  padding-left: 18px;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+}
+
+.settings-banner summary {
+  cursor: pointer;
+}
+
+.settings-warning,
+.settings-restart {
+  color: var(--warning);
+}
+
+.settings-warning {
+  margin: 4px 0 8px;
+}
+
+/* Themes */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.theme-card {
+  position: relative;
+}
+
+.theme-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-card[data-selected] .theme-pick {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.theme-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid;
+  border-radius: 5px;
+  font: 11px 'Cascadia Mono', Consolas, monospace;
+}
+
+.theme-chrome {
+  display: flex;
+  height: 10px;
+  padding: 2px 4px;
+}
+
+.theme-chrome span {
+  width: 24px;
+  border-radius: 2px;
+}
+
+.theme-line {
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.theme-dots {
+  display: flex;
+  gap: 4px;
+  padding: 0 6px;
+}
+
+.theme-dots span {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.theme-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.theme-delete {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--muted);
+  font: 14px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.theme-delete:hover {
+  color: var(--danger);
+}
+
+.theme-import {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px;
+  border: 1px dashed transparent;
+  border-radius: 8px;
+}
+
+/* A theme file dragged from Windows Explorer over the import area. */
+.theme-import[data-drop-target] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.theme-import-result {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.theme-import-result [data-severity='error'] {
+  color: var(--danger);
+}
+
+.theme-import-result [data-severity='warning'] {
+  color: var(--warning);
+}
+
+.theme-import-result[data-ok] > div:first-child {
+  color: var(--success);
+}
+
+/* Profiles */
+.profile-list {
+  margin: 14px 0 12px;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.profile-item + .profile-item {
+  border-top: 1px solid var(--border);
+}
+
+.profile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-row:hover {
+  background: var(--bg);
+}
+
+.profile-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-badge {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.profile-kind {
+  color: var(--muted);
+  font: 11px 'Cascadia Mono', Consolas, monospace;
+}
+
+.profile-form {
+  padding: 4px 12px 12px 36px;
+}
+
+.profile-actions {
+  margin-top: 10px;
 }

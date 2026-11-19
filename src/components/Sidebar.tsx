@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react';
 import { loadDir, syncWatches } from '../lib/explorerData';
-import { cdInActivePane, openTabAt } from '../lib/explorerActions';
+import { openFolder, openTabAt } from '../lib/explorerActions';
 import { breadcrumbs, flattenTree, pathKey, visibleDirs } from '../lib/explorerModel';
+import { flushExplorerPrefs } from '../lib/settingsSync';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { SIDEBAR_DEFAULT, SIDEBAR_MIN, useExplorer } from '../store/explorer';
 import { refreshGit } from '../store/git';
@@ -76,11 +77,8 @@ function ExplorerHeader({ root }: { root: string | null }) {
     if (nav.current) nav.current.scrollLeft = nav.current.scrollWidth;
   }, [root]);
 
-  const onCrumb = (path: string) => {
-    // Pinned: browse the pinned folder. Following: move the shell there (same rules as a click).
-    if (pinned) useExplorer.getState().setPinned(path);
-    else cdInActivePane(path);
-  };
+  // Pinned: browse the pinned folder. Following: like a click on a folder (cd, or navigate).
+  const onCrumb = (path: string) => openFolder(path, true);
 
   return (
     <div className="explorer-header">
@@ -174,6 +172,7 @@ function Resizer() {
       handle.removeEventListener('pointerup', onEnd);
       handle.removeEventListener('pointercancel', onEnd);
       delete handle.dataset.dragging;
+      flushExplorerPrefs();
       focusActiveTerminal();
     };
     handle.addEventListener('pointermove', onMove);

@@ -13,8 +13,8 @@ use serde::{Serialize, Serializer};
 pub use git::{GitChange, GitFileStatus, GitStatus, git_status};
 pub use list::{DEFAULT_HIDDEN, DirEntry, EntryKind, Hidden, list_dir};
 pub use ops::{
-    NewEntryKind, create_entry, open_in_file_manager, open_in_vscode, rename_entry, trash,
-    validate_name,
+    NewEntryKind, create_entry, open_in_file_manager, open_in_vscode, open_with_default_app,
+    rename_entry, trash, validate_name,
 };
 pub use watch::{MAX_WATCHED_DIRS, WatchEvents, WatchId, WatchManager};
 

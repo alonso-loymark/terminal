@@ -9,14 +9,18 @@ import {
   splitAt,
   startCreate,
 } from '../lib/explorerActions';
+import { readText } from '../lib/clipboard';
 import { parentDir } from '../lib/explorerModel';
+import { copySelection } from '../lib/keybindings';
 import { closeOtherTabs, focusActiveTerminal, groupTab, requestClosePane, requestCloseTabs } from '../lib/tabActions';
+import { getPane } from '../lib/terminalRegistry';
 import { useExplorer } from '../store/explorer';
-import { useSystem } from '../store/system';
+import { useProfiles } from '../store/profiles';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
 import { parentSplit, tabOfPane, tabsInGroup, type GroupId, type PaneId, type TabId } from '../store/workspaceModel';
 import { ColorSwatches, Menu, MenuItem, MenuLabel, MenuSeparator } from './Menu';
+import { ProfileIcon } from './ProfileIcon';
 
 const closeMenu = () => useUi.getState().closeMenu();
 const dismiss = () => {
@@ -37,7 +41,7 @@ export function ContextMenus() {
   if (menu.kind === 'group') return <GroupMenu groupId={menu.groupId} x={menu.x} y={menu.y} />;
   if (menu.kind === 'shells') return <ShellMenu x={menu.x} y={menu.y} />;
   if (menu.kind === 'explorer') return <ExplorerMenu path={menu.path} isDir={menu.isDir} isRoot={menu.isRoot} x={menu.x} y={menu.y} />;
-  return <PaneMenu paneId={menu.paneId} x={menu.x} y={menu.y} />;
+  return <PaneMenu paneId={menu.paneId} x={menu.x} y={menu.y} clipboard={menu.clipboard} />;
 }
 
 /** Right click in the file explorer (an entry, or the empty area for the root folder). */
@@ -87,31 +91,42 @@ function ExplorerMenu({ path, isDir, isRoot, x, y }: { path: string; isDir: bool
   );
 }
 
-/** "▾" next to "+": a new tab with any of the available shells, in the active pane's folder. */
+/** "▾" next to "+": a new tab with any profile (hidden ones aside), and the settings. */
 function ShellMenu({ x, y }: { x: number; y: number }) {
-  const shells = useSystem((s) => s.shells);
+  const { profiles, defaultId } = useProfiles();
   return (
     <Menu x={x} y={y} label="Nueva tab con" onClose={dismiss}>
       <MenuLabel>Nueva tab con</MenuLabel>
-      {shells.map((shell) => (
-        <MenuItem
-          key={shell.kind}
-          action="new-tab-shell"
-          data-shell={shell.kind}
-          onSelect={run(() => {
-            useWorkspace.getState().newTab({ shell: shell.kind });
-            focusActiveTerminal();
-          })}
-        >
-          {shell.name}
-        </MenuItem>
-      ))}
+      {profiles
+        .filter((profile) => !profile.hidden)
+        .map((profile) => (
+          <MenuItem
+            key={profile.id}
+            action="new-tab-profile"
+            data-profile={profile.id}
+            shortcut={profile.id === defaultId ? 'Ctrl+Shift+T' : undefined}
+            onSelect={run(() => {
+              useWorkspace.getState().newTab({ profile: profile.id });
+              focusActiveTerminal();
+            })}
+          >
+            <ProfileIcon profile={profile} />
+            {profile.name}
+          </MenuItem>
+        ))}
+      <MenuSeparator />
+      <MenuItem action="open-settings" shortcut="Ctrl+," onSelect={run(() => useUi.getState().openSettings('profiles'))}>
+        Configuración
+      </MenuItem>
     </Menu>
   );
 }
 
-/** Shift+right click on a terminal, or Shift+F10 / the menu key. */
-function PaneMenu({ paneId, x, y }: { paneId: PaneId; x: number; y: number }) {
+/**
+ * Shift+right click on a terminal, or Shift+F10 / the menu key; also a plain right click when
+ * the settings ask for a context menu (then with copy and paste on top).
+ */
+function PaneMenu({ paneId, x, y, clipboard = false }: { paneId: PaneId; x: number; y: number; clipboard?: boolean }) {
   const tab = useWorkspace((s) => {
     const tabId = tabOfPane(s, paneId);
     return tabId ? s.tabs[tabId] : undefined;
@@ -126,8 +141,39 @@ function PaneMenu({ paneId, x, y }: { paneId: PaneId; x: number; y: number }) {
       focusActiveTerminal();
     });
 
+  const term = getPane(paneId)?.term;
+  const hasSelection = term?.hasSelection() ?? false;
+
   return (
     <Menu x={x} y={y} label="Acciones del panel" onClose={dismiss}>
+      {clipboard && term && (
+        <>
+          <MenuItem action="copy" shortcut="Ctrl+C" disabled={!hasSelection} onSelect={act(() => copySelection(term))}>
+            Copiar
+          </MenuItem>
+          <MenuItem
+            action="paste"
+            shortcut="Ctrl+V"
+            onSelect={act(() => {
+              void readText().then((text) => {
+                if (text) term.paste(text);
+              });
+            })}
+          >
+            Pegar
+          </MenuItem>
+          <MenuItem action="select-all" onSelect={act(() => term.selectAll())}>
+            Seleccionar todo
+          </MenuItem>
+          <MenuItem action="find" shortcut="Ctrl+Shift+F" onSelect={run(() => useUi.getState().openSearch())}>
+            Buscar
+          </MenuItem>
+          <MenuItem action="clear" onSelect={act(() => term.clear())}>
+            Limpiar
+          </MenuItem>
+          <MenuSeparator />
+        </>
+      )}
       <MenuItem action="split-right" shortcut="Alt+Shift+D" onSelect={act(() => ws.splitPane('horizontal', paneId))}>
         Dividir a la derecha
       </MenuItem>

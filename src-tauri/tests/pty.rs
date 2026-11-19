@@ -10,8 +10,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use terminal_lib::pty::{
-    PtyManager, SessionEvents, SessionId, ShellKind, ShiftEnterTarget, SpawnOptions, default_shell,
-    find_on_path, launch, shell_profile,
+    Integration, PtyManager, SessionEvents, SessionId, ShellKind, ShellSpec, ShiftEnterTarget,
+    SpawnOptions, available_shells, default_shell, find_on_path, launch, resolve, shell_profile,
 };
 use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Threading::{
@@ -616,23 +616,44 @@ fn file_uri(path: &Path) -> String {
     format!("file://{host}/{}", segments.join("/"))
 }
 
-fn integrated(kind: ShellKind, cwd: &Path, env: Vec<(String, String)>) -> Option<SpawnOptions> {
-    let profile = shell_profile(kind)?;
-    let launch = launch(&profile, Some(Path::new(INTEGRATION_DIR)));
-    assert!(
-        launch.integration,
-        "integration script not found in {INTEGRATION_DIR}"
-    );
+/// What the app would spawn for a profile (as the frontend sends it) in `cwd`.
+fn launched(
+    spec: ShellSpec,
+    cwd: &Path,
+    env: Vec<(String, String)>,
+) -> Option<(SpawnOptions, Integration)> {
+    let shell = resolve(Some(&spec), &available_shells())?;
+    let launch = launch(&shell, Some(Path::new(INTEGRATION_DIR)), Some(cwd));
     let mut all_env = launch.env;
     all_env.extend(env);
-    Some(SpawnOptions {
-        program: launch.program,
-        args: launch.args,
-        cwd: Some(cwd.to_owned()),
-        env: all_env,
-        cols: 140,
-        rows: 30,
-    })
+    Some((
+        SpawnOptions {
+            program: launch.program,
+            args: launch.args,
+            cwd: launch.cwd,
+            env: all_env,
+            cols: 140,
+            rows: 30,
+        },
+        launch.integration,
+    ))
+}
+
+fn kind(kind: ShellKind) -> ShellSpec {
+    ShellSpec {
+        kind: Some(kind),
+        ..Default::default()
+    }
+}
+
+fn integrated(kind_: ShellKind, cwd: &Path, env: Vec<(String, String)>) -> Option<SpawnOptions> {
+    let (options, integration) = launched(kind(kind_), cwd, env)?;
+    assert_eq!(
+        integration,
+        Integration::Full,
+        "integration script not found in {INTEGRATION_DIR}"
+    );
+    Some(options)
 }
 
 #[test]
@@ -812,6 +833,108 @@ fn git_bash_integration_loads_the_users_profile_and_reports_commands() {
         );
         shell.wait_for(at, "\x1b]133;B\x07");
     }
+    manager.close(shell.id).unwrap();
+}
+
+/// WSL has no Git Bash, but bash.sh is the same script: with `WSL_DISTRO_NAME` set, a folder
+/// outside /mnt is reported as \\wsl.localhost\<distro>\... (here the MSYS path stands in for a
+/// Linux one).
+#[test]
+fn bash_integration_reports_wsl_distro_paths() {
+    if shell_profile(ShellKind::GitBash).is_none() {
+        eprintln!("skipped: Git Bash not found");
+        return;
+    }
+    let dir = tricky_dir("wslpath");
+    let manager = PtyManager::new();
+    let env = vec![("WSL_DISTRO_NAME".to_owned(), "Ubuntu-24.04".to_owned())];
+    let options = integrated(ShellKind::GitBash, &dir, env).unwrap();
+    let shell = Shell::start(&manager, options, "\x1b]133;B\x07");
+    let text = dir.display().to_string();
+    let msys = format!(
+        "/{}{}",
+        text[..1].to_lowercase(),
+        text[2..].replace('\\', "/")
+    );
+    let encoded: String = msys
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~/:".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let expected = format!("\x1b]7;file://wsl.localhost/Ubuntu-24.04{encoded}\x07");
+    assert!(
+        shell.output.contains(&expected),
+        "expected {expected:?} in:\n{:?}",
+        shell.output
+    );
+    manager.close(shell.id).unwrap();
+}
+
+// ---------------------------------------------------------------- profiles
+
+#[test]
+fn cmd_reports_its_folder_through_the_prompt() {
+    let dir = tricky_dir("cmd");
+    let manager = PtyManager::new();
+    let (options, integration) = launched(kind(ShellKind::Cmd), &dir, vec![]).unwrap();
+    assert_eq!(integration, Integration::Cwd);
+    // OSC 9;9 with the raw Windows path (spaces, accents and ñ as UTF-8), then the prompt.
+    let report = format!("\x1b]9;9;{}", dir.display());
+    let mut shell = Shell::start(&manager, options, &report);
+    shell.wait_for(0, &format!("{}>", dir.display()));
+    let parent = dir.parent().unwrap().to_owned();
+    let from = shell.output.len();
+    shell.send("cd ..\r");
+    shell.wait_for(from, &format!("\x1b]9;9;{}", parent.display()));
+    shell.run("echo sigue-%COMSPEC:~0,0%viva", "sigue-viva");
+    manager.close(shell.id).unwrap();
+}
+
+#[test]
+fn a_profiles_environment_reaches_the_shell() {
+    let dir = tricky_dir("env");
+    let manager = PtyManager::new();
+    let user = std::env::var("USERNAME").unwrap();
+    let spec = ShellSpec {
+        kind: Some(ShellKind::PowerShell),
+        env: [(
+            "TERMINAL_PROFILE_VAR".to_owned(),
+            "hola %USERNAME%".to_owned(),
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let (options, _) = launched(spec, &dir, vec![]).unwrap();
+    let mut shell = Shell::start(&manager, options, "\x1b]133;B\x07");
+    shell.run(
+        "'var=' + $env:TERMINAL_PROFILE_VAR + (';' + 'end')",
+        &format!("var=hola {user};end"),
+    );
+    manager.close(shell.id).unwrap();
+}
+
+#[test]
+fn powershell_with_custom_switches_keeps_the_integration() {
+    let dir = tricky_dir("noprofile");
+    let manager = PtyManager::new();
+    let spec = ShellSpec {
+        kind: Some(ShellKind::PowerShell),
+        args: Some(vec!["-NoProfile".to_owned(), "-NoLogo".to_owned()]),
+        ..Default::default()
+    };
+    let (options, integration) = launched(spec, &dir, vec![]).unwrap();
+    assert_eq!(integration, Integration::Full);
+    let shell = Shell::start(&manager, options, "\x1b]633;P;Shell=powershell\x07");
+    assert!(
+        shell
+            .output
+            .contains(&format!("\x1b]7;{}\x07", file_uri(&dir)))
+    );
     manager.close(shell.id).unwrap();
 }
 
