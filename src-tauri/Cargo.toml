@@ -1,13 +1,13 @@
 [package]
-name = "terminal"
+name = "brisa"
 version = "0.1.0"
-description = "Terminal liviana para Windows pensada para agentes de IA"
+description = "Brisa: terminal liviana para Windows pensada para agentes de IA"
 edition = "2024"
 rust-version = "1.90"
 publish = false
 
 [lib]
-name = "terminal_lib"
+name = "brisa_lib"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

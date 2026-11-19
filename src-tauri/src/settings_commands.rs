@@ -1,5 +1,6 @@
-//! Tauri commands for the settings file and the window's look: thin adapters over
-//! [`crate::settings`]. The frontend watches the folder with the explorer's watcher.
+//! Tauri commands for the app's files (settings.json, the session, saved layouts) and the
+//! window's look: thin adapters over [`crate::settings`]. The frontend watches the folder with
+//! the explorer's watcher.
 
 use std::path::{Path, PathBuf};
 
@@ -7,17 +8,17 @@ use serde::Serialize;
 use tauri::window::{Color, Effect, EffectsBuilder};
 use tauri::{State, WebviewWindow};
 
-use crate::settings::{self, Backdrop, SCHEMA_FILE, SETTINGS_FILE};
+use crate::settings::{self, Backdrop, ConfigFile};
 
-/// Where the settings live, and how the window was created (decided once, at startup).
+/// Where the app's files live, and how the window was created (decided once, at startup).
 pub struct SettingsState {
     pub dir: PathBuf,
     pub window_transparent: bool,
 }
 
 impl SettingsState {
-    fn file(&self) -> PathBuf {
-        self.dir.join(SETTINGS_FILE)
+    fn file(&self, file: ConfigFile) -> PathBuf {
+        self.dir.join(file.name())
     }
 }
 
@@ -44,7 +45,7 @@ pub struct SettingsFile {
 
 #[tauri::command]
 pub async fn settings_load(state: State<'_, SettingsState>) -> Result<SettingsFile, String> {
-    let path = state.file();
+    let path = state.file(ConfigFile::Settings);
     let dir = state.dir.clone();
     let window_transparent = state.window_transparent;
     blocking(move || {
@@ -58,38 +59,50 @@ pub async fn settings_load(state: State<'_, SettingsState>) -> Result<SettingsFi
     .await
 }
 
+/// One of the app's files; None while it does not exist.
 #[tauri::command]
-pub async fn settings_read(state: State<'_, SettingsState>) -> Result<Option<String>, String> {
-    let path = state.file();
+pub async fn config_read(
+    state: State<'_, SettingsState>,
+    file: ConfigFile,
+) -> Result<Option<String>, String> {
+    let path = state.file(file);
     blocking(move || settings::read(&path)).await
 }
 
+/// Replaces the file atomically (a crash leaves the previous version, never half of one).
+/// `only_if_changed`: skip identical content (the schemas are generated at every start).
 #[tauri::command]
-pub async fn settings_write(state: State<'_, SettingsState>, text: String) -> Result<(), String> {
-    let path = state.file();
-    blocking(move || settings::write(&path, &text)).await
-}
-
-/// The JSON Schema next to the file, for completions and hover help in VS Code.
-#[tauri::command]
-pub async fn settings_write_schema(
+pub async fn config_write(
     state: State<'_, SettingsState>,
+    file: ConfigFile,
     text: String,
+    only_if_changed: Option<bool>,
 ) -> Result<(), String> {
-    let path = state.dir.join(SCHEMA_FILE);
-    blocking(move || settings::write_if_changed(&path, &text).map(|_| ())).await
+    let path = state.file(file);
+    blocking(move || {
+        if only_if_changed.unwrap_or(false) {
+            settings::write_if_changed(&path, &text).map(|_| ())
+        } else {
+            settings::write(&path, &text)
+        }
+    })
+    .await
 }
 
-/// Opens settings.json in VS Code; without VS Code, in the app Windows associates with .json.
+/// Opens settings.json or layouts.json in VS Code; without VS Code, in the app Windows
+/// associates with .json.
 #[tauri::command]
-pub async fn settings_open(state: State<'_, SettingsState>) -> Result<(), String> {
-    let path = state.file();
-    tauri::async_runtime::spawn_blocking(move || open_settings_file(&path))
+pub async fn config_open(state: State<'_, SettingsState>, file: ConfigFile) -> Result<(), String> {
+    if !file.editable() {
+        return Err(format!("{} no se abre en un editor", file.name()));
+    }
+    let path = state.file(file);
+    tauri::async_runtime::spawn_blocking(move || open_config_file(&path))
         .await
         .map_err(|e| format!("tarea interrumpida: {e}"))?
 }
 
-fn open_settings_file(path: &Path) -> Result<(), String> {
+fn open_config_file(path: &Path) -> Result<(), String> {
     if crate::explorer::open_in_vscode(path).is_ok() {
         return Ok(());
     }

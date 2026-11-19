@@ -80,19 +80,37 @@ export function evaluate(text: string | null): Evaluation {
 /** A change to the file: the value at `path`, or `undefined` to remove it (back to the default). */
 export type Edit = [path: JSONPath, value: unknown];
 
-/** Applies edits to the text, keeping everything else as the user wrote it. */
-export function editText(text: string | null, edits: readonly Edit[]): string {
-  let out = text?.trim() ? text : NEW_FILE;
+/**
+ * Applies edits to the text, keeping everything else as the user wrote it. An empty file starts
+ * from `base` (settings.json by default; layouts.json has its own).
+ */
+export function editText(text: string | null, edits: readonly Edit[], base: string = NEW_FILE): string {
+  let out = text?.trim() ? text : base;
   for (const [path, value] of edits) {
     // Removing what is not there is a no-op (jsonc-parser throws when the parent is missing).
     if (value === undefined && !findNodeAtLocation(parseTree(out) ?? EMPTY, path)) continue;
-    const changes = modify(out, path, value, { formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' } });
-    out = applyEdits(out, changes);
+    out = applyEdits(out, modify(out, path, value, FORMAT));
+    // A section left empty by going back to the defaults goes too ("explorer": {} says nothing).
+    if (value === undefined) out = dropEmptyParents(out, path.slice(0, -1));
   }
   return out;
 }
 
+const FORMAT = { formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' } };
 const EMPTY = parseTree('{}')!;
+
+function dropEmptyParents(text: string, path: JSONPath): string {
+  let out = text;
+  for (let at = path; at.length > 0; at = at.slice(0, -1)) {
+    const node = findNodeAtLocation(parseTree(out) ?? EMPTY, at);
+    if (!node || node.type !== 'object' || (node.children?.length ?? 0) > 0) break;
+    const edits = modify(out, at, undefined, FORMAT);
+    // Never at the cost of a comment of the user's (one above the section goes with it).
+    if (edits.some((e) => /\/\/|\/\*/.test(out.slice(e.offset, e.offset + e.length)))) break;
+    out = applyEdits(out, edits);
+  }
+  return out;
+}
 
 const sameValue = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 

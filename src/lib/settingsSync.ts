@@ -36,7 +36,7 @@ let writeQueue: Promise<void> = Promise.resolve();
  */
 export function initSettings(): Promise<void> {
   return (started ??= start().catch((error: unknown) => {
-    console.warn('[terminal] settings.json:', error);
+    console.warn('[brisa] settings.json:', error);
     useSettings.setState({ loaded: true });
   }));
 }
@@ -47,7 +47,7 @@ async function start(): Promise<void> {
   try {
     file = await loadSettingsFile();
   } catch (error) {
-    console.warn('[terminal] no se pudo leer settings.json', error);
+    console.warn('[brisa] no se pudo leer settings.json', error);
     useSettings.setState({ loaded: true });
     return;
   }
@@ -58,7 +58,7 @@ async function start(): Promise<void> {
     if (legacy.length && !update(legacy)) restoreLegacy();
   } catch (error) {
     restoreLegacy();
-    console.warn('[terminal] no se pudieron migrar las preferencias del explorador', error);
+    console.warn('[brisa] no se pudieron migrar las preferencias del explorador', error);
   }
   // A file to open from the settings screen (and to watch) from the first start on.
   if (useSettings.getState().text === null) await write(NEW_FILE);
@@ -81,7 +81,7 @@ function write(text: string): Promise<void> {
   pendingWrites++;
   writeQueue = writeQueue
     .then(() => writeSettingsFile(text))
-    .catch((error: unknown) => console.warn('[terminal] no se pudo guardar settings.json', error))
+    .catch((error: unknown) => console.warn('[brisa] no se pudo guardar settings.json', error))
     .finally(() => {
       pendingWrites--;
       if (pendingWrites === 0 && changedWhileWriting) {
@@ -103,7 +103,7 @@ export function update(edits: readonly Edit[]): boolean {
   try {
     text = editText(state.text, edits);
   } catch (error) {
-    console.warn('[terminal] no se pudo editar settings.json', error);
+    console.warn('[brisa] no se pudo editar settings.json', error);
     return false;
   }
   if (text === state.text) return true;
@@ -126,14 +126,24 @@ export function setSetting(path: JSONPath, value: unknown): boolean {
 
 // ---------------------------------------------------------------- watching
 
+const configListeners = new Set<() => void>();
+
+/** Something changed in the config folder: other files there (layouts.json) re-read themselves. */
+export function onConfigDirChange(listener: () => void): () => void {
+  configListeners.add(listener);
+  return () => configListeners.delete(listener);
+}
+
 async function watch(dir: string): Promise<void> {
   try {
     const id = await watchStart((dirs) => {
-      if (dirs.some((changed) => pathKey(changed) === pathKey(dir))) onDiskChange();
+      if (!dirs.some((changed) => pathKey(changed) === pathKey(dir))) return;
+      onDiskChange();
+      for (const listener of configListeners) listener();
     });
     await watchSet(id, [dir]);
   } catch (error) {
-    console.warn('[terminal] no se puede vigilar settings.json', error);
+    console.warn('[brisa] no se puede vigilar settings.json', error);
   }
 }
 
@@ -155,7 +165,7 @@ async function reconcile(): Promise<void> {
     }
     if (text !== useSettings.getState().text) apply(text);
   } catch (error) {
-    console.warn('[terminal] no se pudo releer settings.json', error);
+    console.warn('[brisa] no se pudo releer settings.json', error);
   }
 }
 
@@ -172,7 +182,7 @@ async function writeSchema(): Promise<void> {
     const text = schema();
     if (text === last) return;
     last = text;
-    writeSettingsSchema(text).catch((error: unknown) => console.warn('[terminal] no se pudo escribir el schema', error));
+    writeSettingsSchema(text).catch((error: unknown) => console.warn('[brisa] no se pudo escribir el schema', error));
   };
   save();
   // New custom themes are suggested too.

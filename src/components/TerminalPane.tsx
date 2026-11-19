@@ -7,13 +7,14 @@ import { memo, useEffect, useRef } from 'react';
 import { shellSpec } from '../config/profiles';
 import { terminalLook, type TerminalLook } from '../lib/appearance';
 import { copyText, readText } from '../lib/clipboard';
-import { copySelection, installKeybindings } from '../lib/keybindings';
+import { copySelection } from '../lib/keybindings';
 import { setLigatures } from '../lib/ligatures';
 import { paneStyle, sameRect } from '../lib/paneGeometry';
 import { getPtyBackend, type PtyBackend } from '../lib/pty';
 import { GpuRenderer } from '../lib/renderer';
 import { initSettings } from '../lib/settingsSync';
 import { registerShellIntegration } from '../lib/shellIntegration';
+import { promptReady } from '../lib/initialCommands';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { getPane, registerPane, unregisterPane, type PaneHandle } from '../lib/terminalRegistry';
 import { TerminalSession } from '../lib/terminalSession';
@@ -33,7 +34,7 @@ const INTEGRATION_TIMEOUT_MS = 20_000;
 /** Links open on Ctrl+click (like VS Code and Windows Terminal), never on a plain click. */
 function openLink(event: MouseEvent, uri: string): void {
   if (!event.ctrlKey) return;
-  openUrl(uri).catch((error: unknown) => console.warn('[terminal] no se pudo abrir el link', error));
+  openUrl(uri).catch((error: unknown) => console.warn('[brisa] no se pudo abrir el link', error));
 }
 
 /** Resizes the grid to the host, skipping hidden/minimized states (a 0×0 host would shrink the PTY). */
@@ -46,7 +47,7 @@ function fitToHost(fit: FitAddon, host: HTMLElement): void {
 let backend: Promise<PtyBackend | null> | null = null;
 const ptyBackend = () =>
   (backend ??= getPtyBackend().catch((error: unknown) => {
-    console.warn('[terminal] pty_backend falló', error);
+    console.warn('[brisa] pty_backend falló', error);
     return null;
   }));
 
@@ -98,7 +99,11 @@ export const TerminalPane = memo(
 
       // Shell integration marks (cwd, command start/end, exit code) go to the pane's state.
       // Registered before the session starts, so the first prompt is not missed.
-      const integration = registerShellIntegration(term, (event) => workspace().applyShellEvent(paneId, event));
+      const integration = registerShellIntegration(
+        term,
+        (event) => workspace().applyShellEvent(paneId, event),
+        () => promptReady(paneId),
+      );
       let integrationTimer = 0;
       // The profile actually started (the pane may ask for the default one, or for one that
       // no longer exists).
@@ -126,14 +131,6 @@ export const TerminalPane = memo(
       });
       const handle: PaneHandle = { term, fit, search, session, host, inner, gpu, integration };
       registerPane(paneId, handle);
-
-      installKeybindings(term, {
-        shiftEnter: () => session.shiftEnter(),
-        openSearch: () => useUi.getState().openSearch(),
-        zoomIn: () => useSettings.getState().zoomIn(),
-        zoomOut: () => useSettings.getState().zoomOut(),
-        resetZoom: () => useSettings.getState().resetZoom(),
-      });
 
       // Right click: copy the selection if there is one, otherwise paste (Windows Terminal
       // style), or a context menu (VS Code style), as the settings say. Shift+right click

@@ -22,7 +22,7 @@ fn create_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let text = settings::read(&dir.join(settings::SETTINGS_FILE)).unwrap_or(None);
     let look = settings::window_look(text.as_deref());
     let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-        .title("Terminal")
+        .title("Brisa")
         .inner_size(1100.0, 700.0)
         .min_inner_size(480.0, 280.0)
         .center()
@@ -73,17 +73,16 @@ pub fn run() -> tauri::Result<()> {
             explorer_commands::open_in_vscode,
             explorer_commands::open_in_file_manager,
             settings_commands::settings_load,
-            settings_commands::settings_read,
-            settings_commands::settings_write,
-            settings_commands::settings_write_schema,
-            settings_commands::settings_open,
+            settings_commands::config_read,
+            settings_commands::config_write,
+            settings_commands::config_open,
             settings_commands::read_theme_file,
             settings_commands::set_window_look,
         ])
         .on_page_load(|webview, payload| {
             #[cfg(debug_assertions)]
             eprintln!(
-                "[terminal] page load {:?} in {}: {}",
+                "[brisa] page load {:?} in {}: {}",
                 payload.event(),
                 webview.label(),
                 payload.url()
@@ -106,7 +105,7 @@ pub fn run() -> tauri::Result<()> {
                 event,
                 WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
             ) {
-                eprintln!("[terminal] window {}: {event:?}", window.label());
+                eprintln!("[brisa] window {}: {event:?}", window.label());
             }
             if let WindowEvent::Destroyed = event {
                 window.state::<PtyManager>().close_owned_by(window.label());
@@ -118,7 +117,7 @@ pub fn run() -> tauri::Result<()> {
     app.run(|app, event| {
         #[cfg(debug_assertions)]
         if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-            eprintln!("[terminal] {event:?}");
+            eprintln!("[brisa] {event:?}");
         }
         if let RunEvent::Exit = event {
             app.state::<PtyManager>().shutdown();

@@ -10,6 +10,7 @@ import {
 } from '../lib/explorerActions';
 import { gitDecorations, gitStatusOf, type GitDecorations, type TreeRow } from '../lib/explorerModel';
 import { useExplorer } from '../store/explorer';
+import { eventMatches } from '../store/keymap';
 import { selectGitFor, useGit } from '../store/git';
 import { useUi } from '../store/ui';
 import { RenameInput } from './RenameInput';
@@ -54,10 +55,11 @@ export function FileTree({ rows, root }: { rows: TreeRow[]; root: string }) {
     if (event.target instanceof HTMLInputElement || !selected) return;
     const row = rows.find((r) => r.type === 'entry' && r.key === selected);
     if (!row || row.type !== 'entry') return;
-    if (event.key === 'F2') {
+    // F2 and Supr by default (settings.json: explorer.rename, explorer.delete).
+    if (eventMatches(event, 'explorer.rename')) {
       event.preventDefault();
       useExplorer.getState().setEditing({ kind: 'rename', path: row.path });
-    } else if (event.key === 'Delete') {
+    } else if (eventMatches(event, 'explorer.delete')) {
       event.preventDefault();
       requestTrash(row.path);
     }

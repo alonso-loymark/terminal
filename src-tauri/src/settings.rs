@@ -1,6 +1,7 @@
-//! The settings file on disk. The frontend owns its schema and validation (TypeScript); the
-//! backend only finds, reads and writes the file, and peeks at the window effect, which has to
-//! be known before the window exists.
+//! The app's files on disk (settings.json, the session, saved layouts). The frontend owns their
+//! schemas and validation (TypeScript); the backend only finds, reads and writes them, moves the
+//! folder of the app's old name, and peeks at the window effect, which has to be known before
+//! the window exists.
 
 use std::fs;
 use std::io;
@@ -11,17 +12,91 @@ use serde::{Deserialize, Serialize};
 pub const SETTINGS_FILE: &str = "settings.json";
 pub const SCHEMA_FILE: &str = "settings.schema.json";
 /// Overrides the config folder (end-to-end tests run against a throwaway one).
-pub const CONFIG_DIR_VAR: &str = "TERMINAL_CONFIG_DIR";
+pub const CONFIG_DIR_VAR: &str = "BRISA_CONFIG_DIR";
+/// The config folder of the app's first name ("Terminal"), next to the current one.
+pub const LEGACY_CONFIG_DIR: &str = "dev.terminal.desktop";
 /// Theme files dropped on the settings screen: anything bigger is not a theme.
 pub const MAX_THEME_FILE: u64 = 1024 * 1024;
 
-/// The folder holding settings.json: `TERMINAL_CONFIG_DIR`, else the app's config folder
-/// (`%APPDATA%\<identifier>`).
+/// The files the frontend reads and writes in the config folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigFile {
+    Settings,
+    SettingsSchema,
+    /// Tabs, groups and panes of the last session (written by the app).
+    Session,
+    /// Saved layouts (JSON with comments, editable by hand).
+    Layouts,
+    LayoutsSchema,
+}
+
+impl ConfigFile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Settings => SETTINGS_FILE,
+            Self::SettingsSchema => SCHEMA_FILE,
+            Self::Session => "session.json",
+            Self::Layouts => "layouts.json",
+            Self::LayoutsSchema => "layouts.schema.json",
+        }
+    }
+
+    /// The files a user opens in an editor.
+    pub fn editable(self) -> bool {
+        matches!(self, Self::Settings | Self::Layouts)
+    }
+}
+
+/// The config folder: `BRISA_CONFIG_DIR`, else the app's config folder
+/// (`%APPDATA%\<identifier>`), where the files of the app's old name are moved the first time
+/// (see [`migrate_legacy`]).
 pub fn config_dir(app_config_dir: Option<PathBuf>) -> Option<PathBuf> {
-    std::env::var_os(CONFIG_DIR_VAR)
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .or(app_config_dir)
+    if let Some(dir) = std::env::var_os(CONFIG_DIR_VAR).filter(|dir| !dir.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let dir = app_config_dir?;
+    if let Some(legacy) = dir.parent().map(|parent| parent.join(LEGACY_CONFIG_DIR))
+        && let Err(error) = migrate_legacy(&legacy, &dir)
+    {
+        eprintln!("[brisa] no se pudo migrar {}: {error}", legacy.display());
+    }
+    Some(dir)
+}
+
+/// Brings the config folder of the app's old name to the new one: settings.json (custom themes
+/// included) and anything else in it. Only when the old folder exists and the new one has no
+/// settings yet. Moved in one step when possible; otherwise (the old folder is in use, or the
+/// new one already exists) copied file by file, never overwriting, leaving the old one alone.
+/// Returns whether anything was brought over.
+pub fn migrate_legacy(legacy: &Path, dir: &Path) -> io::Result<bool> {
+    if !legacy.is_dir() || dir.join(SETTINGS_FILE).exists() {
+        return Ok(false);
+    }
+    if !dir.exists() {
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if fs::rename(legacy, dir).is_ok() {
+            return Ok(true);
+        }
+    }
+    copy_missing(legacy, dir)?;
+    Ok(true)
+}
+
+fn copy_missing(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_missing(&entry.path(), &target)?;
+        } else if !target.exists() {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// The file's text, or None if it does not exist yet.
@@ -212,7 +287,7 @@ mod tests {
 
     #[test]
     fn writes_are_atomic_and_skip_identical_content() {
-        let dir = std::env::temp_dir().join(format!("terminal-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("brisa-settings-{}", std::process::id()));
         let path = dir.join("sub").join(SETTINGS_FILE);
         assert_eq!(read(&path).unwrap(), None);
         write(&path, "{\"a\": 1}").unwrap();
@@ -228,7 +303,7 @@ mod tests {
 
     #[test]
     fn theme_files_are_size_limited() {
-        let dir = std::env::temp_dir().join(format!("terminal-theme-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("brisa-theme-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let small = dir.join("tema.json");
         fs::write(&small, r##"{"name": "x", "background": "#000000"}"##).unwrap();
@@ -238,6 +313,61 @@ mod tests {
         assert!(read_theme_file(&big).is_err());
         assert!(read_theme_file(&dir).is_err());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_old_config_folder_moves_to_the_new_name() {
+        let base = std::env::temp_dir().join(format!("brisa-migrate-{}", std::process::id()));
+        let legacy = base.join(LEGACY_CONFIG_DIR);
+        let dir = base.join("dev.brisa.desktop");
+        fs::create_dir_all(legacy.join("sub")).unwrap();
+        let settings = "{\n  // mis temas\n  \"themes\": [{\"name\": \"Mío\"}]\n}\n";
+        fs::write(legacy.join(SETTINGS_FILE), settings).unwrap();
+        fs::write(legacy.join("sub").join("x.txt"), "x").unwrap();
+        assert!(migrate_legacy(&legacy, &dir).unwrap());
+        assert_eq!(
+            read(&dir.join(SETTINGS_FILE)).unwrap().as_deref(),
+            Some(settings)
+        );
+        assert!(dir.join("sub").join("x.txt").exists());
+        assert!(!legacy.exists(), "moved, not copied");
+        // Once migrated (or with settings of its own) nothing else happens.
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join(SETTINGS_FILE), "{\"viejo\": true}").unwrap();
+        assert!(!migrate_legacy(&legacy, &dir).unwrap());
+        assert_eq!(
+            read(&dir.join(SETTINGS_FILE)).unwrap().as_deref(),
+            Some(settings)
+        );
+        // No old folder: nothing to do.
+        assert!(!migrate_legacy(&base.join("no-existe"), &base.join("otra")).unwrap());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn an_existing_new_folder_gets_copies_without_overwriting() {
+        let base = std::env::temp_dir().join(format!("brisa-migrate-copy-{}", std::process::id()));
+        let legacy = base.join(LEGACY_CONFIG_DIR);
+        let dir = base.join("dev.brisa.desktop");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(legacy.join(SETTINGS_FILE), "{\"a\": 1}").unwrap();
+        fs::write(legacy.join("layouts.json"), "{\"viejo\": 1}").unwrap();
+        fs::write(dir.join("layouts.json"), "{\"nuevo\": 1}").unwrap();
+        assert!(migrate_legacy(&legacy, &dir).unwrap());
+        assert_eq!(
+            read(&dir.join(SETTINGS_FILE)).unwrap().as_deref(),
+            Some("{\"a\": 1}")
+        );
+        assert_eq!(
+            read(&dir.join("layouts.json")).unwrap().as_deref(),
+            Some("{\"nuevo\": 1}")
+        );
+        assert!(
+            legacy.join(SETTINGS_FILE).exists(),
+            "the old folder is left alone"
+        );
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]

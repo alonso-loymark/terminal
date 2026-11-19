@@ -93,7 +93,7 @@ function applyUi(): void {
   lastWindowLook = key;
   setWindowLook(look)
     .then((result) => useSettings.setState({ restartRequired: result.restartRequired }))
-    .catch((error: unknown) => console.warn('[terminal] no se pudo aplicar el efecto de la ventana', error));
+    .catch((error: unknown) => console.warn('[brisa] no se pudo aplicar el efecto de la ventana', error));
 }
 
 /** Follows the settings; returns the uninstaller. */

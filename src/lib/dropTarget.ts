@@ -79,7 +79,7 @@ export function installFileDrop(): () => void {
       if (disposed) stop();
       else unlisten = stop;
     })
-    .catch((error: unknown) => console.warn('[terminal] arrastrar archivos no disponible', error));
+    .catch((error: unknown) => console.warn('[brisa] arrastrar archivos no disponible', error));
   return () => {
     disposed = true;
     unlisten?.();

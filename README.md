@@ -1,4 +1,4 @@
-# Terminal
+# Brisa
 
 Terminal de escritorio para Windows, liviana y personalizable, pensada para trabajar con agentes
 de IA (Claude Code, Codex, Gemini CLI). Construida con Tauri 2 (Rust + WebView2), React,
@@ -16,20 +16,32 @@ TypeScript y xterm.js sobre ConPTY.
   Mica/Acrylic; temas incluidos (Oscuro, Claro, Catppuccin, Dracula, Tokyo Night, One Dark) e
   importables (JSON o esquemas de Windows Terminal) que pintan también la interfaz; perfiles de
   shell (detectados y propios, con ícono, argumentos, carpeta, variables y tema).
+- Atajos de teclado configurables (pantalla o `keybindings` en settings.json), con detección de
+  conflictos entre acciones y con las teclas que necesitan los programas (Ctrl+C, Ctrl+W, Ctrl+R…).
+- Paleta de comandos (`Ctrl+Shift+P`) con búsqueda difusa: acciones con su atajo, tabs y paneles
+  por nombre, perfiles, temas y layouts; lo usado recientemente primero.
+- Sesión: al reabrir vuelven las tabs, grupos, nombres, colores, paneles con sus tamaños, y el
+  perfil y la carpeta de cada panel (desactivable).
+- Layouts guardados (`layouts.json`, editable a mano): una tab o la ventana entera con un nombre,
+  y un comando inicial por panel que se escribe cuando la shell está lista.
 - Renderizado con WebGL (fallback DOM), búsqueda, links clickeables, copiar/pegar estilo Windows
   Terminal (o menú contextual) y zoom.
+
+La configuración vive en `%APPDATA%\dev.brisa.desktop\`. Si existe la de la versión anterior
+(`%APPDATA%\dev.terminal.desktop`, cuando la app se llamaba "Terminal"), se migra sola al primer
+arranque, temas importados incluidos.
 
 ## Requisitos
 
 - Windows 10/11 con WebView2
-- Rust (toolchain MSVC) y Node.js 20+
+- Rust (toolchain MSVC) y Node.js 24+
 
 ## Uso
 
 ```powershell
 npm install
 npm run tauri dev                    # desarrollo
-npm run tauri build -- --no-bundle   # ejecutable release en src-tauri/target/release/
+npm run tauri build -- --no-bundle   # ejecutable release (brisa.exe) en src-tauri/target/release/
 npm run e2e                          # pruebas end-to-end sobre la app real
 ```
 

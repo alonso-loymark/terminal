@@ -12,6 +12,7 @@ import { horizontalListSortingStrategy, SortableContext } from '@dnd-kit/sortabl
 import { Fragment } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { focusActiveTerminal } from '../lib/tabActions';
+import { useShortcutLabel } from '../store/keymap';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
 import { visibleTabIds } from '../store/workspaceModel';
@@ -52,6 +53,7 @@ export function TabBar() {
     }),
   );
   const sortable = segments.filter((id) => !isGroupTarget(id));
+  const newTabKey = useShortcutLabel('tab.new');
   // Keep clicks and double-clicks working: a drag starts after moving 6 px.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
@@ -81,7 +83,7 @@ export function TabBar() {
       <button
         type="button"
         className="tab-new"
-        title="Nueva tab (Ctrl+Shift+T)"
+        title={newTabKey ? `Nueva tab (${newTabKey})` : 'Nueva tab'}
         aria-label="Nueva tab"
         onClick={() => {
           useWorkspace.getState().newTab();
@@ -93,7 +95,7 @@ export function TabBar() {
       <button
         type="button"
         className="tab-new-menu"
-        title="Nueva tab con otro perfil"
+        title="Nueva tab con otro perfil, layouts"
         aria-label="Elegir perfil para la nueva tab"
         aria-haspopup="menu"
         onClick={(event) => {

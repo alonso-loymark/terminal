@@ -4,7 +4,7 @@ param(
   [int]$Width = 0,
   [int]$Height = 0
 )
-# Drives the app window with real Win32 calls. Targets one process id, never "any terminal.exe".
+# Drives the app window with real Win32 calls. Targets one process id, never "any brisa.exe".
 $ErrorActionPreference = 'Stop'
 Add-Type @"
 using System;

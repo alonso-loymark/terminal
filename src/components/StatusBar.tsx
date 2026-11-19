@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { folderName, shortenPath } from '../lib/paths';
 import { refreshGit, selectGitFor, useGit } from '../store/git';
 import { useProfile } from '../store/profiles';
+import { useLayouts } from '../store/layouts';
 import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
@@ -79,6 +80,32 @@ function SettingsNotice() {
   );
 }
 
+/** layouts.json has errors: broken JSON (the last good layouts stay) or layouts left out. */
+function LayoutsNotice() {
+  const status = useLayouts((s) => s.status);
+  const issues = useLayouts((s) => s.issues);
+  const errors = issues.filter((issue) => issue.severity === 'error');
+  if (status !== 'invalid' && errors.length === 0) return null;
+  const lines = errors
+    .slice(0, 6)
+    .map((issue) => `• ${issue.line ? `línea ${issue.line}: ` : ''}${issue.path ? `${issue.path}: ` : ''}${issue.message}`);
+  const summary =
+    status === 'invalid'
+      ? 'layouts.json tiene errores: se siguen usando los layouts de antes.'
+      : 'Hay layouts con errores en layouts.json: no se pueden abrir.';
+  return (
+    <button
+      type="button"
+      className="status-notice status-settings"
+      data-layouts="invalid"
+      title={`${summary}\n${lines.join('\n')}`}
+      onClick={() => useUi.getState().openSettings('session')}
+    >
+      ⚠ layouts.json
+    </button>
+  );
+}
+
 /** Branch of the repository the active pane is in (git runs in the background). */
 function GitBranch({ cwd }: { cwd: string }) {
   const git = useGit(selectGitFor(cwd));
@@ -137,6 +164,7 @@ export function StatusBar() {
       {pane && <CommandStatus pane={pane} />}
       <span className="status-spacer" />
       <SettingsNotice />
+      <LayoutsNotice />
       {pane && <IntegrationNotice pane={pane} />}
       {shellName && <span className="status-shell">{shellName}</span>}
     </footer>

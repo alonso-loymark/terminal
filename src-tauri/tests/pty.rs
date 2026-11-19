@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use terminal_lib::pty::{
+use brisa_lib::pty::{
     Integration, PtyManager, SessionEvents, SessionId, ShellKind, ShellSpec, ShiftEnterTarget,
     SpawnOptions, available_shells, default_shell, find_on_path, launch, resolve, shell_profile,
 };

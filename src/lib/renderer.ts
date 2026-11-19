@@ -33,7 +33,7 @@ export class GpuRenderer {
       this.#onChange('webgl');
       return 'webgl';
     } catch (error) {
-      console.warn('[terminal] WebGL no disponible, se usa el renderer DOM', error);
+      console.warn('[brisa] WebGL no disponible, se usa el renderer DOM', error);
       this.#onChange('dom');
       return 'dom';
     }

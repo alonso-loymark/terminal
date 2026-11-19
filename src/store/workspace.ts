@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { instantiate, type Instantiated, type WindowSpec } from './layoutModel';
 import { profileFor } from './profiles';
 import * as model from './workspaceModel';
 import type {
@@ -22,6 +23,13 @@ const nextId = (prefix: string) => `${prefix}-${++lastId}`;
 let groupsCreated = 0;
 
 interface WorkspaceActions {
+  /** One tab with the default profile (a fresh start, or nothing to restore). */
+  reset: () => void;
+  /**
+   * Opens a saved arrangement (the session, a layout): its tabs and groups are added at the end
+   * (or replace everything) and its active tab is activated.
+   */
+  openWindow: (spec: WindowSpec, options?: { replace?: boolean }) => Instantiated;
   /**
    * Opens a new tab at the end (or after `after`) and activates it. Without `profile`, the
    * default one. Without `cwd`, the profile's starting folder if it has one, else the active
@@ -71,14 +79,22 @@ interface WorkspaceActions {
 
 export type WorkspaceStore = Workspace & WorkspaceActions;
 
-const initial = model.addTab(model.emptyWorkspace(), { tabId: nextId('tab'), paneId: nextId('pane') });
-
-/** Tabs, groups and pane metadata. Serializable only: xterm instances live in terminalRegistry. */
+/**
+ * Tabs, groups and pane metadata. Serializable only: xterm instances live in terminalRegistry.
+ * Empty until lib/sessionSync.ts restores the last session or opens the first tab.
+ */
 export const useWorkspace = create<WorkspaceStore>()((set, get) => {
   // Model functions return the same object when nothing changed, so no needless re-renders.
   const update = (fn: (ws: Workspace) => Workspace) => set((state) => fn(state));
   return {
-    ...initial,
+    ...model.emptyWorkspace(),
+    reset: () => set({ ...model.addTab(model.emptyWorkspace(), { tabId: nextId('tab'), paneId: nextId('pane') }) }),
+    openWindow: (spec, options = {}) => {
+      const base = options.replace ? model.emptyWorkspace() : get();
+      const result = instantiate(base, spec, { id: nextId, activate: true });
+      set({ tabs: result.ws.tabs, tabOrder: result.ws.tabOrder, groups: result.ws.groups, panes: result.ws.panes, activeTabId: result.ws.activeTabId });
+      return result;
+    },
     newTab: (spec = {}) => {
       const tabId = nextId('tab');
       update((ws) => {

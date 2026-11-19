@@ -1,8 +1,10 @@
-# Terminal — guía del proyecto
+# Brisa — guía del proyecto
 
-Terminal de escritorio para Windows, liviana y muy personalizable, pensada para trabajar con
-agentes de IA (Claude Code, Codex, Gemini CLI). Objetivo explícito: ser **mucho más liviana que
-Warp** (binario chico, poca RAM, arranque rápido). Cada dependencia nueva tiene que justificarse.
+**Brisa** es una terminal de escritorio para Windows, liviana y muy personalizable, pensada para
+trabajar con agentes de IA (Claude Code, Codex, Gemini CLI). Objetivo explícito: ser **mucho más
+liviana que Warp** (binario chico, poca RAM, arranque rápido). Cada dependencia nueva tiene que
+justificarse. (Hasta la Fase 6A se llamó "Terminal": el repo y la carpeta siguen con ese nombre;
+ejecutable `brisa.exe`, identificador `dev.brisa.desktop`.)
 
 ## Stack (obligatorio — no cambiar sin discutirlo antes)
 
@@ -15,7 +17,7 @@ Warp** (binario chico, poca RAM, arranque rápido). Cada dependencia nueva tiene
 | Estado frontend | **zustand** |
 | Drag & drop de tabs | **@dnd-kit** (`core` 6, `sortable` 10, `utilities` 3; la API estable, no `@dnd-kit/react` 0.x) |
 | Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
-| Configuración | `settings.json` (JSONC) leído con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`) |
+| Configuración | `settings.json` y `layouts.json` (JSONC) leídos con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`); `session.json` (JSON que escribe la app) |
 
 ## Arquitectura
 
@@ -86,9 +88,11 @@ Reglas de la arquitectura:
   `windowsPty` de xterm, que con build ≥ 21376 activa el reflow compatible con ConPTY).
   Explorador (`explorer_commands.rs`): `list_dir`, `watch_start` / `watch_set` / `watch_stop`,
   `git_status`, `create_entry`, `rename_entry`, `trash_entries`, `open_in_vscode`,
-  `open_in_file_manager`. Settings (`settings_commands.rs`): `settings_load`, `settings_read`,
-  `settings_write`, `settings_write_schema`, `settings_open`, `read_theme_file`,
-  `set_window_look`.
+  `open_in_file_manager`. Archivos de configuración (`settings_commands.rs`): `settings_load`
+  (texto de settings.json + carpeta + si la ventana se creó transparente), `config_read`,
+  `config_write` (atómica; `onlyIfChanged` para los schemas) y `config_open` (VS Code), que
+  reciben `file: 'settings' | 'settingsSchema' | 'session' | 'layouts' | 'layoutsSchema'`
+  (`settings::ConfigFile`: el frontend nunca pasa rutas), `read_theme_file` y `set_window_look`.
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -329,16 +333,28 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 
 ## Configuración, temas y perfiles
 
-- **Archivo**: `%APPDATA%\dev.terminal.desktop\settings.json` (la variable `TERMINAL_CONFIG_DIR`
-  cambia la carpeta: la e2e usa una descartable). JSONC: admite comentarios y comas finales. Solo
-  guarda lo que difiere del valor por defecto: lo que no está, vale el default. Al lado,
-  `settings.schema.json` (generado del esquema en cada arranque, solo si cambió) y el archivo
-  arranca con `"$schema": "./settings.schema.json"`: VS Code autocompleta y documenta cada clave.
+- **Carpeta**: `%APPDATA%\dev.brisa.desktop\` (la variable `BRISA_CONFIG_DIR` la cambia: la e2e
+  usa una descartable). Adentro: `settings.json` (+ `settings.schema.json`), `layouts.json` (+
+  `layouts.schema.json`) y `session.json`.
+- **Migración del nombre viejo** (`settings::migrate_legacy`, al arrancar, solo sin
+  `BRISA_CONFIG_DIR`): si existe `%APPDATA%\dev.terminal.desktop` y la carpeta nueva no tiene
+  settings.json, se **mueve** entera (un `rename`: settings, temas importados, layouts, sesión); si
+  no se puede (la vieja en uso, o la nueva ya existe) se copia archivo por archivo sin pisar nada y
+  la vieja queda como estaba. Tests `the_old_config_folder_moves_to_the_new_name` y
+  `an_existing_new_folder_gets_copies_without_overwriting`. Lo que **no** se migra: los datos de
+  WebView2 (`%LOCALAPPDATA%\dev.terminal.desktop`, solo caché y el tema cacheado en
+  `localStorage`): el primer arranque pinta el tema por defecto un instante.
+- **settings.json**: JSONC (comentarios y comas finales). Solo guarda lo que difiere del valor
+  por defecto: lo que no está, vale el default; una sección que queda vacía al volver a los
+  defaults se borra (salvo que tenga un comentario del usuario). Arranca con
+  `"$schema": "./settings.schema.json"` (generado del esquema en cada arranque, solo si cambió):
+  VS Code autocompleta y documenta cada clave.
 - **Esquema** (`config/settingsSchema.ts` con la mini librería `config/schema.ts`): una sola
   definición da los tipos de TS (inferidos), los defaults, la validación y el JSON Schema.
   Secciones: `appearance` (fuente, tamaño, line-height, ligaduras, cursor, padding, opacidad,
   efecto), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
-  `explorer` (arranque, ancho, ocultos, clic en carpeta) y `profiles` (`default`, `list`).
+  `explorer` (arranque, ancho, ocultos, clic en carpeta), `profiles` (`default`, `list`),
+  `session` (`restore`) y `keybindings` (ver "Atajos configurables").
 - **Errores**: JSON roto o un valor inválido (tipo, rango, opción) → el archivo entero se
   rechaza y **sigue la última configuración válida**; la barra de estado muestra
   "⚠ settings.json" (tooltip con línea/ruta y motivo; clic → la configuración, que lista los
@@ -353,9 +369,10 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 - **Migración**: `localStorage['terminal.explorer']` (Fase 5) pasa a `explorer.*` la primera vez
   (solo lo que el archivo no define) y se borra; si el archivo tiene errores, se conserva.
 - **Pantalla** (`Ctrl+,`, `SettingsPage.tsx` + `components/settings/`): Apariencia, Temas,
-  Perfiles, Terminal y Explorador; números y textos se guardan con Enter o al salir del campo;
-  "Abrir settings.json en VS Code" (si no está, la app asociada a .json). Mientras está abierta,
-  los atajos de la app no corren (salvo `Ctrl+,`) y nadie le roba el foco; Esc la cierra.
+  Perfiles, Terminal, Explorador, Atajos y Sesión y layouts; números y textos se guardan con
+  Enter o al salir del campo; "Abrir settings.json en VS Code" (si no está, la app asociada a
+  .json). Mientras está abierta, los atajos de la app no corren (salvo el de la configuración) y
+  nadie le roba el foco; Esc la cierra.
 - **Temas** (`config/themes.ts`): Oscuro (el de siempre), Claro, Catppuccin Mocha y Latte,
   Dracula, Tokyo Night y One Dark. Un tema son los 16 colores ANSI + fondo/texto/cursor/selección
   y, opcional, los colores de la UI (`ui`: background, chrome, panel, border, text, muted,
@@ -409,6 +426,107 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   reinicia con el de por defecto). Dividir y duplicar usan el mismo perfil.
 - El ícono del perfil se ve en la tab y en el menú "▾"; su nombre, en la barra de estado.
 
+## Atajos configurables
+
+- **Registro** (`config/keybindings.ts`, puro, con tests): cada acción de la app con id, nombre en
+  español, categoría, **alcance** y teclas por defecto. `global` (en toda la app; en un campo de
+  texto solo si tiene Ctrl/Alt: F2 o Supr son del campo), `terminal` (solo con el foco en una
+  terminal: copiar, pegar, buscar, Shift+Enter) y `explorer` (solo en el árbol: renombrar,
+  eliminar). `repeat`: mantener apretado repite (moverse entre tabs y paneles); el resto actúa
+  una vez por pulsación y la tecla igual no llega al programa. `passthrough`: actúa solo a veces
+  y si no la tecla sigue al programa (Ctrl+C copia **solo** si hay selección).
+- **settings.json** `keybindings`: `{ "acción": "tecla" | ["tecla", ...] }`; `[]` la deja sin
+  atajo; lo que no está usa el default. Formato de VS Code/Windows Terminal (`ctrl+shift+t`,
+  `alt+left`, `shift+f10`, `ctrl++`, `supr`), normalizado a `ctrl+alt+shift+meta+tecla`. Una
+  tecla mal escrita o que bloquearía la escritura (sin Ctrl/Alt: una letra, Espacio, Enter) es un
+  error (el archivo se rechaza como cualquier otro error); una acción desconocida, un aviso.
+  El JSON Schema documenta cada acción con su default.
+- **Despacho** (`lib/appShortcuts.ts`): **un solo listener** en captura sobre `window` para todo
+  (también lo que antes hacía el key handler de xterm). Contexto por el `target` del evento
+  (terminal = la textarea de xterm; explorador; campo de texto; resto); entre las acciones de esa
+  tecla gana la de alcance específico, después la que el usuario asignó, después el orden del
+  registro. Ejecuta (`lib/appActions.ts`) y frena el evento; `native` (Ctrl+V, Ctrl+Shift+V,
+  Shift+Insert) solo frena la propagación, así xterm no manda `^V` y Chromium dispara el `paste`
+  nativo (bracketed paste incluido); un atajo de pegar propio lee el portapapeles y usa
+  `term.paste`. Con un diálogo abierto, grabando una tecla o con la paleta/configuración
+  abiertas solo corre el atajo que las cierra.
+- **Teclas de un evento** (`eventKeys`): la tecla tipeada primero; dígitos por `code` (Ctrl+Shift+1
+  escribe "!"); letras por `code` solo si el layout no escribe una letra latina ahí (Dvorak:
+  Ctrl+X sigue siendo Ctrl+X); un símbolo con Shift también vale por la tecla donde está
+  (Alt+Shift+- escribe "_") y, si el atajo no dice Shift, por sí mismo (`ctrl++` es Ctrl+Shift+=
+  en un teclado US). Ctrl+Alt con un carácter es AltGr: solo ese carácter (AltGr+2 = "@" nunca
+  es Ctrl+Alt+2).
+- **Conflictos** (`keymapConflicts`): una tecla en dos acciones que verían la misma pulsación
+  (mismo alcance, o global + terminal; global + explorador no: el árbol tiene su F2); teclas que
+  bloquean la escritura; y teclas que usan los programas (`RESERVED_KEYS`: Ctrl+C/D/Z/R/W/A/E/K/
+  U/L/T/P/N/F/B/O/X/S/Q…, Alt+B/F/D/., flechas, Esc, Shift+Tab…, cada una con para qué la usan;
+  Ctrl+V no, es la convención de Windows). El único aviso con los defaults es Ctrl+B (explorador,
+  como en VS Code; readline y tmux la usan), deliberado.
+- **Pantalla Atajos** (`components/settings/KeybindingsSection.tsx`): por categoría, buscar por
+  nombre o tecla, quitar (×), agregar (+ y se graba la pulsación; Esc cancela), volver al
+  default (↺) y "Restaurar los valores por defecto" (borra `keybindings`). Al grabar, una tecla
+  de otra acción ofrece **Reasignar** (se la saca a la otra); una que usan los programas avisa
+  para qué y pide "Asignar igual"; una que escribe se rechaza. Los conflictos escritos a mano
+  se marcan en la lista. Los menús y tooltips muestran los atajos en uso (`shortcutLabel`).
+- Teclas internas de un widget (Enter/Esc/flechas en menús, búsqueda, renombrar, paleta) no se
+  configuran.
+
+## Paleta de comandos
+
+- `Ctrl+Shift+P` (`CommandPalette.tsx`, ítems en `lib/paletteItems.ts`): todas las acciones con
+  su atajo, más lo del momento: ir a una tab o a un panel (de tabs divididas) por nombre o
+  carpeta, nueva tab con cada perfil, aplicar cada tema (el en uso marcado) y abrir cada layout.
+- **Búsqueda difusa** (`lib/fuzzy.ts`, pura, con tests): los caracteres en orden, sin importar
+  mayúsculas ni tildes; cada palabra por su cuenta y en cualquier orden ("dracula tema");
+  puntúan los inicios de palabra y las rachas ("dvd drch" → Dividir el panel a la derecha).
+- **Recientes**: lo ejecutado desde la paleta va primero con la búsqueda vacía y suma puntos con
+  búsqueda; se guarda en `session.json` (`recent`, 20). Las tabs y paneles no (cambian de id).
+- Flechas/RePág/AvPág, Enter, clic; Esc o clic afuera cierra y devuelve el foco a la terminal.
+
+## Sesión
+
+- `lib/sessionSync.ts`: al arrancar se leen settings, shells, layouts y `session.json` **antes**
+  de montar ninguna terminal (el store arranca vacío; `App` espera `useSession.ready`), y se
+  restaura la ventana o se abre una tab. Se restauran tabs (nombre propio, color, grupo), grupos
+  (nombre, color, colapsado), el layout de paneles con sus tamaños, el panel activo y el
+  maximizado, la tab activa, y el **perfil y la carpeta** de cada panel (la última que informó
+  la shell, si no la de arranque). El contenido de las terminales no. Una carpeta que ya no
+  existe → la del usuario (lo resuelve `resolve_cwd` en el backend).
+- **Guardado**: cada cambio del store programa un guardado a los 250 ms (máximo 1 s aunque
+  sigan llegando cambios, p. ej. un título que cambia todo el tiempo); se escribe solo si el
+  texto cambió, de a una escritura por vez, **atómica** (temporal + rename en Rust: un crash deja
+  la versión anterior). Cerrar la última tab guarda una sesión vacía antes de cerrar la ventana
+  (la próxima vez, una tab nueva). Cerrar con la X no toca el archivo: queda lo último guardado.
+- `session.restore: false`: no se restaura ni se guardan tabs (`window: null`; los recientes de
+  la paleta sí). Un `session.json` ilegible o de otra versión = sin sesión.
+- Formato: el mismo de los layouts (`store/layoutModel.ts`: `snapshotWindow` / `instantiate`,
+  puros y con tests), más `version` y `recent`. Recargar la página también restaura (la e2e lo
+  tiene en cuenta: tras `reloadApp()` vuelve la sesión, no una tab nueva).
+
+## Layouts guardados
+
+- **Guardar** la tab activa o la ventana entera (paleta, menú "▾" o Configuración → Sesión y
+  layouts): diálogo con el nombre (por defecto el de la tab; uno existente se reemplaza) y un
+  **comando inicial opcional por panel**, sugerido con lo que corre ahí ahora (`npm run dev`,
+  `claude`). Se guarda en `layouts.json` editando solo esa entrada (los comentarios quedan).
+- **layouts.json** (JSONC, con `layouts.schema.json` al lado y un comentario que explica el
+  formato al crearlo): `{ "layouts": [{ "name", "tabs": [...], "groups": [...] }] }`. Una tab:
+  `title`, `color`, `group` (nombre de un grupo) y un panel (`profile`, `cwd`, `command`) o un
+  `layout` con divisiones `{ "split": "horizontal" | "vertical", "sizes": [..], "panes": [..] }`
+  (`focus`/`zoom` opcionales). Un grupo que reaparece separado es otro grupo. Se vigila como
+  settings.json (cambios a mano en vivo). Cada layout se valida por separado: uno roto se deja
+  afuera con su aviso; JSON roto → siguen los de antes, "⚠ layouts.json" en la barra de estado y
+  la app no escribe encima.
+- **Abrir** (paleta "Abrir layout:", menú "▾", Configuración): las tabs se agregan al final; si la
+  ventana es solo una tab sin usar (sin comandos, nada escrito, sin nombre ni grupo), el layout
+  la reemplaza.
+- **Comandos iniciales** (`lib/initialCommands.ts`): se escriben (+ Enter) **solo** cuando la
+  integración dice que la shell está lista: llegó el `133;B` del prompt (hook `onInputStart` de
+  `registerShellIntegration`), integración `ok`, ningún comando corriendo y el prompt vacío. Nunca
+  antes. En una shell sin `133` (cmd, un perfil propio, integración que no cargó), con texto ya
+  escrito, si la shell termina o si no hay prompt en 30 s, no se escribe y un aviso (toast) dice
+  por qué.
+
 ## Estructura
 
 ```
@@ -422,23 +540,35 @@ src/                        Frontend (solo render + input)
   components/Workspace.tsx  Todos los TerminalPane montados y posicionados + divisores + SearchBar
   components/TerminalPane.tsx  Una instancia xterm + addons + sesión por pane (memo, nunca se recrea)
   components/PaneDivider.tsx   Divisor arrastrable (doble clic: igualar)
-  components/StatusBar.tsx  cwd del panel activo, rama de git, último comando, avisos (integración, settings.json)
+  components/StatusBar.tsx  cwd del panel activo, rama de git, último comando, avisos (integración, settings.json, layouts.json)
   components/Sidebar.tsx    Explorador: breadcrumbs, fijar, ver ocultos, aviso, ancho redimensionable
   components/FileTree.tsx   Árbol virtualizado: clic (cd / navegar / insertar), arrastrar a un panel, renombrar
   components/ProfileIcon.tsx   Ícono de un perfil (monogramas incluidos o emoji del usuario)
   components/SettingsPage.tsx  Ctrl+,: navegación, avisos del archivo, abrir settings.json
-  components/settings/      Secciones (GeneralSections, ThemesSection, ProfilesSection) y Controls
+  components/settings/      Secciones (GeneralSections, ThemesSection, ProfilesSection, KeybindingsSection,
+                            SessionSection) y Controls
+  components/CommandPalette.tsx  Ctrl+Shift+P: búsqueda difusa, recientes primero, atajos a la derecha
+  components/SaveLayoutDialog.tsx  Guardar la tab o la ventana como layout (nombre + comando por panel)
+  components/Toast.tsx      Aviso breve abajo (layout guardado, comando inicial que no se escribió)
   config/schema.ts          Mini librería de esquema: valida, defaults, tipos inferidos, JSON Schema
   config/settingsSchema.ts  El esquema de settings.json (+ settingsSchema.test.ts)
+  config/keybindings.ts     Acciones, teclas por defecto, parseo, eventos → teclas, conflictos, keybindings (+ test)
   config/themes.ts          Temas incluidos, import (propio / Windows Terminal), colores de UI (+ test)
   config/profiles.ts        Perfiles detectados + los de settings.json, por defecto (+ test)
   config/colors.ts          Colores de tabs/grupos (variables CSS del tema)
   lib/pty.ts                Punto de IPC de las terminales; wrappers tipados de los comandos
   lib/fsApi.ts              Punto de IPC del explorador (listar, watcher, git, operaciones, drop nativo)
-  lib/settingsApi.ts        Punto de IPC de settings.json y del aspecto de la ventana
+  lib/settingsApi.ts        Punto de IPC de los archivos de config (settings, sesión, layouts) y del aspecto de la ventana
   lib/settingsText.ts       JSONC: parseo con línea/columna y ediciones que conservan el formato (puro)
   lib/settingsSync.ts       Carga, vigila, aplica y guarda settings.json; migración; explorador ↔ settings
-  lib/settingsActions.ts    Importar/borrar temas, editar perfiles
+  lib/settingsActions.ts    Importar/borrar temas, editar perfiles, asignar/reasignar/restaurar atajos
+  lib/sessionSync.ts        Arranque (settings + shells + layouts + sesión → restaurar), guardado de session.json
+  lib/layoutsSync.ts        Carga, vigila y guarda layouts.json (ediciones que conservan el formato)
+  lib/layoutActions.ts      Guardar la tab/ventana como layout, abrir uno (reemplaza una tab sin usar)
+  lib/initialCommands.ts    Comandos iniciales de un layout: se escriben al llegar el prompt (OSC 133;B)
+  lib/fuzzy.ts              Búsqueda difusa de la paleta (+ fuzzy.test.ts)
+  lib/paletteItems.ts       Lo que ofrece la paleta: acciones, tabs, paneles, perfiles, temas, layouts
+  lib/appActions.ts         Qué hace cada acción (desde su atajo o la paleta)
   lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
   lib/ligatures.ts          Ligaduras con un character joiner (+ test)
   lib/explorerModel.ts      Lógica pura del explorador (+ explorerModel.test.ts)
@@ -451,15 +581,20 @@ src/                        Frontend (solo render + input)
   lib/paths.ts              Nombre de carpeta y acortado de rutas (~, …) para la UI
   lib/terminalRegistry.ts   PaneId → { term, fit, search, session } (objetos imperativos)
   lib/tabActions.ts         Cerrar con confirmación, cerrar ventana con la última tab, foco
-  lib/appShortcuts.ts       Atajos de tabs/grupos (listener en captura sobre window)
-  lib/keybindings.ts        Atajos de terminal: copiar/pegar, búsqueda, zoom, Shift+Enter
+  lib/appShortcuts.ts       Despacho de todos los atajos (un listener en captura sobre window)
+  lib/keybindings.ts        copySelection (copiar y limpiar la selección)
   lib/clipboard.ts          navigator.clipboard con fallback
   lib/renderer.ts           GpuRenderer: WebGL solo mientras se ve, fallback al DOM, loseContext al ocultar
   lib/paneGeometry.ts       Rectángulos del layout → CSS de panes y divisores (gap, mínimo en px)
-  lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui / __settings para e2e
+  lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui / __settings / __layouts /
+                            __session / __pendingCommands para e2e
   store/workspaceModel.ts   Modelo puro de tabs/grupos/panes (+ workspaceModel.test.ts)
-  store/workspace.ts        zustand sobre el modelo (ids, acciones)
-  store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda, pantalla de configuración
+  store/workspace.ts        zustand sobre el modelo (ids, acciones; vacío hasta restaurar la sesión)
+  store/layoutModel.ts      Formato de sesión y layouts: snapshot, validación, reconstrucción (puro, + test)
+  store/layouts.ts          zustand: layouts.json en uso (lista válida, estado, avisos)
+  store/session.ts          zustand: sesión lista para montar terminales, comandos recientes de la paleta
+  store/keymap.ts           Atajos en uso (defaults + settings), conflictos, etiquetas para menús
+  store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda, configuración, paleta, layout, toast
   store/system.ts           zustand: carpeta del usuario y shells detectadas (system_info)
   store/explorer.ts         zustand: estado del explorador (lo persistente va a settings.json)
   store/git.ts              zustand: estado de git por repositorio + refreshGit (un proceso a la vez)
@@ -469,8 +604,9 @@ src-tauri/
   src/lib.rs                Builder de Tauri, ventana principal (transparente solo si se pide), ciclo de vida
   src/commands.rs           Comandos Tauri finos: validan y delegan en PtyManager
   src/explorer_commands.rs  Comandos del explorador (spawn_blocking) y su canal del watcher
-  src/settings.rs           settings.json: carpeta, lectura, escritura atómica, JSONC mínimo (sin Tauri)
-  src/settings_commands.rs  Comandos de settings y del aspecto de la ventana (Mica/Acrylic)
+  src/settings.rs           Archivos de config: carpeta (+ migración de dev.terminal.desktop), lectura,
+                            escritura atómica, JSONC mínimo (sin Tauri)
+  src/settings_commands.rs  Comandos de los archivos de config y del aspecto de la ventana (Mica/Acrylic)
   src/explorer/             list.rs, watch.rs, git.rs, ops.rs (sin Tauri; tests unitarios)
   src/pty/manager.rs        Registro de sesiones (create/write/resize/close/close_owned_by/shutdown)
   src/pty/session.rs        ConPTY + hilos reader/flusher/writer/waiter + batching
@@ -491,7 +627,7 @@ e2e/
   sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
   recycle.ps1               Verifica que lo borrado por la e2e está en la papelera y lo saca de ahí
-  artifacts/                Capturas y log de `tauri dev` (ignorado por git)
+  artifacts/                Capturas de la página (CDP) y logs de `tauri dev` (ignorado por git)
 ```
 
 ## Comandos
@@ -503,8 +639,8 @@ npm run build                           # typecheck (tsc) + build del frontend
 npm test                                # tests unitarios del frontend (node --test, sin dependencias)
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
-npm run e2e:smoke                       # lo esencial (~70 s): en cada cambio
-npm run e2e                             # todas las etapas (~3 min): para cerrar una fase
+npm run e2e:smoke                       # lo esencial (~90 s): en cada cambio
+npm run e2e                             # todas las etapas (~4 min): para cerrar una fase
 npm run e2e -- tabs,groups              # solo algunas etapas
 E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en el puerto 9223
 ```
@@ -512,17 +648,31 @@ E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en e
 Los tests unitarios de TypeScript (`*.test.ts`) corren con el type stripping nativo de Node 24:
 solo sintaxis borrable (`erasableSyntaxOnly`), imports con extensión `.ts` y quedan fuera del
 `tsconfig` de la app. Los módulos puros que se importan entre sí en runtime (`config/*.ts`,
-`lib/settingsText.ts`) también usan la extensión `.ts` en sus imports
+`lib/settingsText.ts`, `store/layoutModel.ts`) también usan la extensión `.ts` en sus imports
 (`allowImportingTsExtensions`); `jsonc-parser` se importa igual en Node y en Vite.
 
-`npm run e2e` usa una carpeta de configuración descartable (`TERMINAL_CONFIG_DIR` dentro de la
-carpeta temporal de la corrida): nunca toca el `settings.json` del usuario. Con `E2E_ATTACH=1`
-las etapas de configuración se saltean si la app no usa esa carpeta.
+`npm run e2e` usa una carpeta de configuración descartable (`BRISA_CONFIG_DIR` dentro de la
+carpeta temporal de la corrida): nunca toca el `settings.json`, los layouts ni la sesión del
+usuario (y sin la carpeta del usuario tampoco corre la migración del nombre viejo). Con
+`E2E_ATTACH=1` las etapas de configuración se saltean si la app no usa esa carpeta. La etapa
+`reopen` cierra la ventana con la X y relanza `tauri dev` (log en `tauri-dev-2.log`) para ver
+qué vuelve.
 
 `npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
 app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa el portapapeles
 (lo restaura al terminar). `cargo test` también abre `charmap` brevemente. Capturas en
 `e2e/artifacts/`.
+
+## Capturas de pantalla (regla obligatoria)
+
+- **Nunca** capturar la pantalla completa ni otras ventanas: el usuario trabaja en su máquina y
+  lo que tenga abierto es suyo.
+- Para verificar algo visual, capturar **solo la ventana de la app por su handle**. Las capturas
+  de la e2e (`page.screenshot` por CDP) son el contenido de la página de la app, nada más: valen.
+- Lo que la página no muestra (Mica/Acrylic los dibuja DWM, la barra de título) solo se captura
+  si se puede garantizar que sale únicamente la ventana de la app (por su HWND, sin lo que tenga
+  encima). Si no se puede garantizar, **no se captura**: se verifica de otra forma (consultando a
+  DWM, por ejemplo) y lo visual queda como paso manual en el smoke test.
 
 ## Pruebas con agentes de IA (regla obligatoria)
 
@@ -580,8 +730,8 @@ terminada solo si:
 
 Durante el trabajo, después de **cada cambio**: `npm run e2e:smoke` (arranque, Ctrl+C,
 Shift+Enter con agentes falsos, tabs, paneles, shell integration, estrés de entrada, explorador,
-settings.json en vivo y cierre; ~70 s, tiene que quedar por debajo de 2 min). La suite completa (`npm run e2e`,
-~3 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
+settings.json en vivo, atajos configurables, sesión y cierre; ~90 s, tiene que quedar por debajo
+de 2 min). La suite completa (`npm run e2e`, ~4 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
 ni `src-tauri/`: el HMR de Vite o el rebuild de `tauri dev` reinician la app a mitad de camino.
 Cada etapa imprime su duración (`== etapa: N s`).
 
@@ -618,14 +768,33 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   Bash (y WSL si hay); cmd abre en la carpeta del panel y el explorador lo sigue. **A mano**:
   Mica/Acrylic (`appearance.backdrop`) y opacidad < 100, reiniciando la app una vez; soltar un
   `.json` de tema desde el Explorador de Windows en Temas.
+- [ ] Atajos: en Configuración → Atajos, agregar uno (se graba la tecla), quitar `Ctrl+B` (llega
+  al programa), uno repetido ofrece "Reasignar"; "Restaurar los valores por defecto".
+- [ ] `Ctrl+Shift+P`: buscar "ntab", "tema dracula", una tab por su nombre; lo último usado sale
+  primero.
+- [ ] Sesión: tabs con nombre y color, un grupo colapsado, una tab dividida y `cd` en un panel;
+  cerrar con la X y volver a abrir → todo igual (sin el contenido). Con `session.restore: false`,
+  una tab nueva.
+- [ ] Layouts: "▾" → "Guardar la tab como layout…" con un comando (`npm run dev`); abrirlo desde
+  la paleta → el comando se escribe recién cuando aparece el prompt. **A mano**: "Abrir
+  layouts.json" lo abre en VS Code.
+- [ ] Primer arranque tras el renombre: la configuración de `%APPDATA%\dev.terminal.desktop`
+  aparece en `%APPDATA%\dev.brisa.desktop` (temas importados incluidos).
 
 ## Atajos
 
+Todos los atajos de la tabla (salvo los del mouse y los internos de un widget) son los
+**valores por defecto** y se cambian en Configuración → Atajos o en `keybindings` de
+settings.json (ver "Atajos configurables"). Sin atajo por defecto, solo desde la paleta: cerrar
+tab, cerrar las demás, duplicar, quitar del grupo, igualar paneles, seleccionar todo, limpiar,
+ver ocultos, guardar layouts, abrir settings.json / layouts.json.
+
 | Atajo | Acción |
 |---|---|
+| `Ctrl+Shift+P` | Paleta de comandos (acciones, tabs, paneles, perfiles, temas, layouts) |
 | `Ctrl+,` | Configuración (otra vez o `Esc`: cerrar) |
 | `Ctrl+Shift+T` / botón `+` | Nueva tab con el perfil por defecto (en su carpeta inicial o la del panel activo) |
-| Botón `▾` junto al `+` | Nueva tab con cualquier perfil; Configuración |
+| Botón `▾` junto al `+` | Nueva tab con cualquier perfil; abrir y guardar layouts; paleta; Configuración |
 | `Ctrl+B` | Mostrar / ocultar el explorador de archivos |
 | Clic en carpeta / archivo del explorador | `cd` en el panel activo (si está libre) o solo navegar (según la configuración) / insertar la ruta |
 | Arrastrar del explorador (o del Explorador de Windows) a un panel | Pegar la ruta con comillas en ese panel |
@@ -653,8 +822,8 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom de fuente |
 | `Ctrl+clic` en un link | Abrir en el navegador |
 
-Los atajos de tabs y paneles se escuchan en fase de captura sobre `window`: ganan sobre xterm y el
-programa nunca los recibe. Por eso siguen el estilo de Windows Terminal (`Ctrl+Shift+…`,
+Todos los atajos se escuchan en fase de captura sobre `window` (`lib/appShortcuts.ts`): ganan
+sobre xterm y el programa nunca recibe una tecla que la app tomó. Por eso siguen el estilo de Windows Terminal (`Ctrl+Shift+…`,
 `Alt+Shift+…`): `Ctrl+T` y `Ctrl+W` llegan al programa (readline, nano; verificado en e2e). Siguen
 tomados por la app: `F2`, `Ctrl+1..9`, `Ctrl+Tab`, `Alt+flechas`, `Ctrl+B` (como en VS Code;
 readline pierde su "carácter atrás", que tiene la flecha, y tmux su prefijo por defecto) y
@@ -668,8 +837,9 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   y no dibuja nada hasta recibir respuesta. xterm responde vía `onData`, que puede dispararse antes
   de que `create_session` devuelva el id: `TerminalSession` encola ese input y lo envía apenas
   conoce el id. Los tests de Rust responden a mano.
-- `Ctrl+V` en xterm envía `^V` por defecto: el key handler devuelve `false` para dejar que el
-  navegador dispare el evento `paste` nativo, que xterm sí maneja (incluye bracketed paste).
+- `Ctrl+V` en xterm envía `^V` por defecto: el despacho de atajos frena la propagación (xterm no
+  la ve) sin `preventDefault`, así el navegador dispara el evento `paste` nativo, que xterm sí
+  maneja (incluye bracketed paste).
 - **"Ignorar Ctrl+C" se hereda.** Si quien lanzó la app tenía `SetConsoleCtrlHandler(NULL, TRUE)`
   (o fue creado con `CREATE_NEW_PROCESS_GROUP`, como hacen muchas herramientas y launchers), todas
   las shells heredaban el flag y `^C` no interrumpía nada. `session.rs` lo limpia antes de cada
@@ -749,6 +919,17 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   WebView2 de dev conserva el `localStorage` entre corridas (y entre la e2e y el uso a mano), así
   que la primera corrida tras la Fase 5 migró de verdad. `initSettings()` nunca rechaza: las
   terminales la esperan para arrancar.
+- **jsonc-parser borra el comentario de arriba** al quitar una propiedad (el rango de la edición
+  lo incluye). Por eso `editText` solo borra una sección que quedó vacía si en lo que se borra
+  no hay `//` ni `/*` (test en `settingsSchema.test.ts`).
+- **Dos escritores de settings.json**: `Ctrl+B` y "ver ocultos" guardan al instante. Una prueba
+  que escribe el archivo justo después puede quedar debajo de la escritura de la app (que llegó
+  después); `writeSettings()` de la e2e espera a que el texto de la app y el del disco coincidan
+  antes de escribir.
+- **Prompt largo después de un cambio de fuente/padding**: en la corrida completa, con la tab
+  restaurada en la carpeta larga de la prueba, `run()` una vez no vio el prompt de PowerShell a
+  tiempo tras cambiar fuente y padding (ConPTY redibuja al cambiar el tamaño). Sola no se
+  reprodujo; `run()` ahora muestra la línea del cursor si falla.
 
 ## Estado
 
@@ -938,12 +1119,42 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   - Binario release 8,6 → 8,9 MB (`serde_json` y el registro de WSL); JS 904 KB.
   - **No verificado**: pwsh 7 y WSL reales (no están instalados acá); ligaduras a ojo con
     Cascadia Code (la e2e verifica que el joiner se registre).
+- **Fase 6B — atajos, paleta, sesión y layouts; la app pasa a llamarse Brisa: completa y
+  verificada (2026-11-19).** Renombre (nombre visible, título, `brisa.exe`, `dev.brisa.desktop`,
+  `BRISA_CONFIG_DIR`) con migración automática de `%APPDATA%\dev.terminal.desktop`. Atajos
+  configurables en `keybindings` y en Configuración → Atajos (agregar grabando la tecla, quitar,
+  varios por acción, reasignar, restaurar), con conflictos entre acciones, con teclas que
+  bloquean la escritura y con las que usan los programas; un solo despacho en captura para todos
+  los atajos (también los que antes manejaba xterm). Paleta `Ctrl+Shift+P` con búsqueda difusa,
+  atajos, recientes primero y acciones dinámicas (tabs, paneles, perfiles, temas, layouts).
+  Sesión restaurada al abrir (tabs, grupos, nombres, colores, layout con tamaños, perfil y carpeta
+  de cada panel), guardada con escritura atómica, desactivable. Layouts de una tab o de la
+  ventana en `layouts.json` (editable a mano, en vivo), con comandos iniciales que se escriben
+  solo cuando OSC 133 dice que la shell está lista.
+  - `npm test`: 92 (17 nuevos: atajos —parseo, eventos en teclados US/español/Dvorak/AltGr,
+    resolución, conflictos, esquema, tecla grabada—, búsqueda difusa, formato de sesión y
+    layouts —ida y vuelta, grupos por tramos, atajos de una tab, errores por layout, sesión
+    rota—, secciones vacías que se borran sin perder comentarios).
+  - `cargo test`: 47 unitarios (2 nuevos: la carpeta vieja se mueve; con la nueva existente se
+    copia sin pisar) + 3 de explorador + 21 de PTY.
+  - `npm run e2e`: 307/307 en 222 s con el código final (la corrida anterior, 302/305: ver abajo). Etapas nuevas `keybindings` (15 checks), `palette` (13),
+    `session` (13), `layouts` (12) y `reopen` (2: cierra la ventana con la X, relanza `tauri dev`
+    y comprueba lo restaurado). `npm run e2e:smoke` suma `keybindings` y `session`: 118/118 en 80 s.
+  - **Release** (`--no-bundle`, CSP de producción, carpeta de config descartable): paleta,
+    `session.json` guardado por IPC, `layouts.schema.json` escrito, sin errores de consola,
+    cerrar y reabrir → vuelven las tabs (8/8, script por CDP). `brisa.exe` 8,9 MB (+3 KB); JS
+    904 → 956 KB.
+  - Sin dependencias nuevas.
+  - Visto en una corrida completa (no en las parciales ni en la siguiente completa): los dos
+    arrastres de `groups` (al chip y entre dos tabs del grupo) fallaron juntos, como en las Fases
+    4 y 5; y `behavior` no vio el prompt a tiempo tras cambiar fuente y padding (ver Gotchas).
+  - **No verificado**: la migración con la carpeta real del usuario (la e2e nunca la toca; está
+    cubierta por los tests de Rust con carpetas temporales). Queda en el smoke manual. Los datos
+    de WebView2 de `dev.terminal.desktop` (caché) no se migran ni se borran.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
-- Próximas fases (ideas): Fase 6B (persistencia de la sesión: tabs, grupos, paneles y su cwd
-  entre reinicios), atajos configurables en settings.json, navegación por teclado en el árbol
-  del explorador, arrastrar paneles a otra tab o a una tab nueva (modelo listo: `movePane`),
+- Próximas fases (ideas): navegación por teclado en el árbol del explorador, arrastrar paneles a otra tab o a una tab nueva (modelo listo: `movePane`),
   integración para zsh/fish en WSL, saltar entre comandos y seleccionar la salida de uno (marcas
   133 ya disponibles), notificaciones al terminar comandos largos (133;D), flow control con ACKs
   para salidas gigantes, `conpty.dll` + `OpenConsole.exe` empaquetados (ConPTY más nuevo que el

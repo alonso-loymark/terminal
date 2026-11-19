@@ -94,8 +94,15 @@ export interface ShellIntegrationHandle extends IDisposable {
   promptInput(): string | null;
 }
 
-/** Registers the OSC handlers on a terminal; events go to `emit`. */
-export function registerShellIntegration(term: Terminal, emit: (event: ShellEvent) => void): ShellIntegrationHandle {
+/**
+ * Registers the OSC handlers on a terminal; events go to `emit`. `onInputStart` runs when the
+ * prompt has been drawn (133;B): the moment a command can be typed.
+ */
+export function registerShellIntegration(
+  term: Terminal,
+  emit: (event: ShellEvent) => void,
+  onInputStart?: () => void,
+): ShellIntegrationHandle {
   // Where the input starts: the cursor when the prompt-end mark arrives.
   let inputStart: { marker: IMarker; x: number } | null = null;
   const clearInput = () => {
@@ -117,6 +124,7 @@ export function registerShellIntegration(term: Terminal, emit: (event: ShellEven
         clearInput();
         const marker = term.registerMarker(0);
         if (marker) inputStart = { marker, x: term.buffer.active.cursorX };
+        if (onInputStart) queueMicrotask(onInputStart);
       } else if (data === 'C' || data.startsWith('D')) {
         clearInput();
       }

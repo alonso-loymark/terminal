@@ -6,6 +6,7 @@ import { useUi, type CloseTarget } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { panesOf, tabOfPane, tabTitle, type PaneId, type TabId } from '../store/workspaceModel';
 import { sessionBusy } from './pty';
+import { flushSession } from './sessionSync';
 import { getPane } from './terminalRegistry';
 
 /**
@@ -27,7 +28,16 @@ export function focusActiveTerminal(): void {
 /** True when done: focused, or another widget (rename, menu, dialog) owns the keyboard. */
 function focusNow(): boolean {
   const ui = useUi.getState();
-  if (ui.renamingTabId || ui.renamingGroupId || ui.menu || ui.confirm || ui.settings || useExplorer.getState().editing) {
+  if (
+    ui.renamingTabId ||
+    ui.renamingGroupId ||
+    ui.menu ||
+    ui.confirm ||
+    ui.settings ||
+    ui.palette ||
+    ui.layoutDialog ||
+    useExplorer.getState().editing
+  ) {
     return true;
   }
   const pane = getPane(selectActivePaneId(useWorkspace.getState()));
@@ -130,7 +140,8 @@ export function closeTarget(target: Exclude<CloseTarget, { kind: 'trash' }>): vo
 
 function afterClose(): void {
   if (useWorkspace.getState().tabOrder.length === 0) {
-    void getCurrentWindow().close();
+    // Nothing left to restore next time: save that first (a fresh tab then).
+    void flushSession().finally(() => void getCurrentWindow().close());
     return;
   }
   focusActiveTerminal();

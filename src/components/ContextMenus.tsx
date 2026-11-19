@@ -14,7 +14,11 @@ import { parentDir } from '../lib/explorerModel';
 import { copySelection } from '../lib/keybindings';
 import { closeOtherTabs, focusActiveTerminal, groupTab, requestClosePane, requestCloseTabs } from '../lib/tabActions';
 import { getPane } from '../lib/terminalRegistry';
+import { openLayout } from '../lib/layoutActions';
+import { openLayoutsJson } from '../lib/layoutsSync';
 import { useExplorer } from '../store/explorer';
+import { shortcutLabel } from '../store/keymap';
+import { useLayouts } from '../store/layouts';
 import { useProfiles } from '../store/profiles';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
@@ -91,9 +95,10 @@ function ExplorerMenu({ path, isDir, isRoot, x, y }: { path: string; isDir: bool
   );
 }
 
-/** "▾" next to "+": a new tab with any profile (hidden ones aside), and the settings. */
+/** "▾" next to "+": a new tab with any profile (hidden ones aside), the saved layouts, and the settings. */
 function ShellMenu({ x, y }: { x: number; y: number }) {
   const { profiles, defaultId } = useProfiles();
+  const layouts = useLayouts((s) => s.layouts);
   return (
     <Menu x={x} y={y} label="Nueva tab con" onClose={dismiss}>
       <MenuLabel>Nueva tab con</MenuLabel>
@@ -104,7 +109,7 @@ function ShellMenu({ x, y }: { x: number; y: number }) {
             key={profile.id}
             action="new-tab-profile"
             data-profile={profile.id}
-            shortcut={profile.id === defaultId ? 'Ctrl+Shift+T' : undefined}
+            shortcut={profile.id === defaultId ? shortcutLabel('tab.new') : undefined}
             onSelect={run(() => {
               useWorkspace.getState().newTab({ profile: profile.id });
               focusActiveTerminal();
@@ -115,7 +120,34 @@ function ShellMenu({ x, y }: { x: number; y: number }) {
           </MenuItem>
         ))}
       <MenuSeparator />
-      <MenuItem action="open-settings" shortcut="Ctrl+," onSelect={run(() => useUi.getState().openSettings('profiles'))}>
+      <MenuLabel>Layouts</MenuLabel>
+      {layouts.map((layout) => (
+        <MenuItem key={layout.name} action="open-layout" data-layout={layout.name} onSelect={run(() => void openLayout(layout.name))}>
+          {layout.name}
+        </MenuItem>
+      ))}
+      <MenuItem
+        action="save-tab-layout"
+        shortcut={shortcutLabel('layout.saveTab')}
+        onSelect={run(() => useUi.getState().openLayoutDialog({ scope: 'tab', tabId: useWorkspace.getState().activeTabId }))}
+      >
+        Guardar la tab como layout…
+      </MenuItem>
+      <MenuItem
+        action="save-window-layout"
+        shortcut={shortcutLabel('layout.saveWindow')}
+        onSelect={run(() => useUi.getState().openLayoutDialog({ scope: 'window', tabId: null }))}
+      >
+        Guardar la ventana como layout…
+      </MenuItem>
+      <MenuItem action="open-layouts-json" onSelect={run(() => void openLayoutsJson().catch((e: unknown) => console.warn('[brisa] layouts.json', e)))}>
+        Abrir layouts.json
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem action="open-palette" shortcut={shortcutLabel('app.commandPalette')} onSelect={run(() => useUi.getState().openPalette())}>
+        Paleta de comandos
+      </MenuItem>
+      <MenuItem action="open-settings" shortcut={shortcutLabel('app.settings')} onSelect={run(() => useUi.getState().openSettings('profiles'))}>
         Configuración
       </MenuItem>
     </Menu>
@@ -148,12 +180,12 @@ function PaneMenu({ paneId, x, y, clipboard = false }: { paneId: PaneId; x: numb
     <Menu x={x} y={y} label="Acciones del panel" onClose={dismiss}>
       {clipboard && term && (
         <>
-          <MenuItem action="copy" shortcut="Ctrl+C" disabled={!hasSelection} onSelect={act(() => copySelection(term))}>
+          <MenuItem action="copy" shortcut={shortcutLabel('terminal.copySelection')} disabled={!hasSelection} onSelect={act(() => copySelection(term))}>
             Copiar
           </MenuItem>
           <MenuItem
             action="paste"
-            shortcut="Ctrl+V"
+            shortcut={shortcutLabel('terminal.paste')}
             onSelect={act(() => {
               void readText().then((text) => {
                 if (text) term.paste(text);
@@ -165,7 +197,7 @@ function PaneMenu({ paneId, x, y, clipboard = false }: { paneId: PaneId; x: numb
           <MenuItem action="select-all" onSelect={act(() => term.selectAll())}>
             Seleccionar todo
           </MenuItem>
-          <MenuItem action="find" shortcut="Ctrl+Shift+F" onSelect={run(() => useUi.getState().openSearch())}>
+          <MenuItem action="find" shortcut={shortcutLabel('terminal.find')} onSelect={run(() => useUi.getState().openSearch())}>
             Buscar
           </MenuItem>
           <MenuItem action="clear" onSelect={act(() => term.clear())}>
@@ -174,15 +206,15 @@ function PaneMenu({ paneId, x, y, clipboard = false }: { paneId: PaneId; x: numb
           <MenuSeparator />
         </>
       )}
-      <MenuItem action="split-right" shortcut="Alt+Shift+D" onSelect={act(() => ws.splitPane('horizontal', paneId))}>
+      <MenuItem action="split-right" shortcut={shortcutLabel('pane.splitRight')} onSelect={act(() => ws.splitPane('horizontal', paneId))}>
         Dividir a la derecha
       </MenuItem>
-      <MenuItem action="split-down" shortcut="Alt+Shift+-" onSelect={act(() => ws.splitPane('vertical', paneId))}>
+      <MenuItem action="split-down" shortcut={shortcutLabel('pane.splitDown')} onSelect={act(() => ws.splitPane('vertical', paneId))}>
         Dividir hacia abajo
       </MenuItem>
       <MenuItem
         action="zoom"
-        shortcut="Ctrl+Shift+Z"
+        shortcut={shortcutLabel('pane.toggleZoom')}
         disabled={tab.layout.type === 'pane'}
         onSelect={act(() => {
           ws.focusPane(paneId);
@@ -195,7 +227,7 @@ function PaneMenu({ paneId, x, y, clipboard = false }: { paneId: PaneId; x: numb
         Igualar tamaños
       </MenuItem>
       <MenuSeparator />
-      <MenuItem action="close-pane" shortcut="Ctrl+Shift+W" onSelect={run(() => void requestClosePane(paneId))}>
+      <MenuItem action="close-pane" shortcut={shortcutLabel('pane.close')} onSelect={run(() => void requestClosePane(paneId))}>
         Cerrar panel
       </MenuItem>
     </Menu>
@@ -212,7 +244,7 @@ function TabMenu({ tabId, x, y }: { tabId: TabId; x: number; y: number }) {
 
   return (
     <Menu x={x} y={y} label="Acciones de la tab" onClose={dismiss}>
-      <MenuItem action="rename" shortcut="F2" onSelect={run(() => useUi.getState().startRenameTab(tabId))}>
+      <MenuItem action="rename" shortcut={shortcutLabel('tab.rename')} onSelect={run(() => useUi.getState().startRenameTab(tabId))}>
         Renombrar
       </MenuItem>
       <MenuLabel>Color</MenuLabel>
@@ -232,7 +264,7 @@ function TabMenu({ tabId, x, y }: { tabId: TabId; x: number; y: number }) {
       </MenuItem>
       <MenuSeparator />
       <MenuLabel>Mover a grupo</MenuLabel>
-      <MenuItem action="new-group" shortcut="Ctrl+Shift+G" onSelect={run(() => groupTab(tabId))}>
+      <MenuItem action="new-group" shortcut={shortcutLabel('tab.newGroup')} onSelect={run(() => groupTab(tabId))}>
         Nuevo grupo
       </MenuItem>
       {otherGroups.map((group) => (

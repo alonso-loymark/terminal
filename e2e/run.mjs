@@ -12,6 +12,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as parseJsoncText } from 'jsonc-parser';
 import { chromium } from 'playwright-core';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,9 +28,9 @@ const STARTED = Date.now();
  * stages, to close a phase (CLAUDE.md, "Regla de fases").
  */
 const SMOKE = process.argv.includes('--smoke');
-const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'close'];
+const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'keybindings', 'session', 'close'];
 const only = SMOKE ? SMOKE_STAGES : process.argv[2]?.split(',').filter(Boolean);
-const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'terminal-e2e-'));
+const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'brisa-e2e-'));
 const CONFIG_DIR = path.join(WORK, 'config');
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json');
 fs.mkdirSync(ARTIFACTS, { recursive: true });
@@ -68,61 +69,89 @@ const portInUse = (port) =>
 
 // ---------------------------------------------------------------- app lifecycle
 let dev;
-if (!ATTACH) {
-  for (const port of [1420, CDP_PORT]) {
-    if (await portInUse(port)) {
-      console.error(`El puerto ${port} está ocupado: cerrá la otra instancia de dev o usá E2E_ATTACH=1.`);
-      process.exit(2);
-    }
-  }
-  // Agent session variables must not leak into the shells under test.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^CLAUDE/i.test(k)));
-  env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${CDP_PORT}`;
-  // A throwaway settings.json: the suite never touches the user's own configuration.
-  env.TERMINAL_CONFIG_DIR = CONFIG_DIR;
-  const logFd = fs.openSync(path.join(ARTIFACTS, 'tauri-dev.log'), 'w');
-  dev = spawn('npm run tauri dev', { cwd: ROOT, env, shell: true, stdio: ['ignore', logFd, logFd] });
-  console.log(`tauri dev lanzado (log en e2e/artifacts/tauri-dev.log); esperando la app...`);
-}
-
 let browser;
-for (let i = 0; i < 300 && !browser; i++) {
-  try {
-    browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-  } catch {
-    await sleep(1000);
-  }
-}
-if (!browser) throw new Error('El endpoint CDP nunca apareció (¿falló la compilación? ver tauri-dev.log)');
-const page = browser.contexts()[0].pages()[0];
+let page;
+let cdp;
+let appPid = 0;
+let launches = 0;
 /** Console warnings/errors of the page, e.g. Chromium's "Too many active WebGL contexts". */
 const consoleLog = [];
-page.on('console', (message) => {
-  if (['warning', 'error'].includes(message.type())) consoleLog.push(message.text());
-});
-// If the page goes away mid-run, say how (renderer crash, window closed, CDP lost) and when.
 const stamp = () => new Date().toTimeString().slice(0, 8);
-page.on('crash', () => console.log(`!! ${stamp()} la página crasheó (renderer)`));
-page.on('close', () => {
-  console.log(`!! ${stamp()} la página se cerró (app viva: ${alive(appPid)})`);
-  for (const line of consoleLog.slice(-6)) console.log(`!!   consola: ${line.slice(0, 300)}`);
-});
-page.on('pageerror', (error) => console.log(`!! ${stamp()} error no atrapado en la página: ${String(error).slice(0, 300)}`));
-browser.on('disconnected', () => console.log(`!! ${stamp()} CDP desconectado`));
-await page.waitForFunction(() => window.__terminal, null, { timeout: 60000 });
 // The user may keep working in other windows while the suite runs. Chromium does not fire
 // focus events in an unfocused window, which made focus checks flaky; CDP's focus emulation
 // (meant for automation) keeps the page behaving as focused without stealing the real focus.
-const cdp = await page.context().newCDPSession(page);
 const emulateFocus = () => cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true });
-await emulateFocus();
-const targetDir = path.join(ROOT, 'src-tauri', 'target').replace(/'/g, "''");
-const appPid = Number(
-  powershell(
-    `Get-CimInstance Win32_Process -Filter "Name='terminal.exe'" | Where-Object { $_.ExecutablePath -like '${targetDir}\\*' } | Sort-Object CreationDate -Descending | Select-Object -First 1 -ExpandProperty ProcessId`,
-  ),
-);
-if (!appPid) throw new Error('No encontré el proceso terminal.exe de este repo');
+
+/**
+ * Starts `tauri dev` (unless attaching) and connects to the app's page. Called again by the
+ * `reopen` stage, after the app was closed, to check what comes back.
+ */
+async function launch() {
+  launches++;
+  if (!ATTACH) {
+    for (const port of [1420, CDP_PORT]) {
+      if (await portInUse(port)) {
+        if (launches > 1) throw new Error(`el puerto ${port} sigue ocupado: no se puede relanzar la app`);
+        console.error(`El puerto ${port} está ocupado: cerrá la otra instancia de dev o usá E2E_ATTACH=1.`);
+        process.exit(2);
+      }
+    }
+    // Agent session variables must not leak into the shells under test.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^CLAUDE/i.test(k)));
+    env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${CDP_PORT}`;
+    // A throwaway settings.json: the suite never touches the user's own configuration.
+    env.BRISA_CONFIG_DIR = CONFIG_DIR;
+    const logName = launches === 1 ? 'tauri-dev.log' : `tauri-dev-${launches}.log`;
+    const logFd = fs.openSync(path.join(ARTIFACTS, logName), 'w');
+    dev = spawn('npm run tauri dev', { cwd: ROOT, env, shell: true, stdio: ['ignore', logFd, logFd] });
+    console.log(`tauri dev lanzado (log en e2e/artifacts/${logName}); esperando la app...`);
+  }
+  browser = undefined;
+  for (let i = 0; i < 300 && !browser; i++) {
+    try {
+      browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+    } catch {
+      await sleep(1000);
+    }
+  }
+  if (!browser) throw new Error('El endpoint CDP nunca apareció (¿falló la compilación? ver tauri-dev.log)');
+  page = browser.contexts()[0].pages()[0];
+  page.on('console', (message) => {
+    if (['warning', 'error'].includes(message.type())) consoleLog.push(message.text());
+  });
+  // If the page goes away mid-run, say how (renderer crash, window closed, CDP lost) and when.
+  page.on('crash', () => console.log(`!! ${stamp()} la página crasheó (renderer)`));
+  page.on('close', () => {
+    console.log(`!! ${stamp()} la página se cerró (app viva: ${alive(appPid)})`);
+    for (const line of consoleLog.slice(-6)) console.log(`!!   consola: ${line.slice(0, 300)}`);
+  });
+  page.on('pageerror', (error) => console.log(`!! ${stamp()} error no atrapado en la página: ${String(error).slice(0, 300)}`));
+  browser.on('disconnected', () => console.log(`!! ${stamp()} CDP desconectado`));
+  await page.waitForFunction(() => window.__terminal, null, { timeout: 60000 });
+  cdp = await page.context().newCDPSession(page);
+  await emulateFocus();
+  const targetDir = path.join(ROOT, 'src-tauri', 'target').replace(/'/g, "''");
+  appPid = Number(
+    powershell(
+      `Get-CimInstance Win32_Process -Filter "Name='brisa.exe'" | Where-Object { $_.ExecutablePath -like '${targetDir}\\*' } | Sort-Object CreationDate -Descending | Select-Object -First 1 -ExpandProperty ProcessId`,
+    ),
+  );
+  if (!appPid) throw new Error('No encontré el proceso brisa.exe de este repo');
+}
+
+/** Ends `tauri dev` (and Vite) after the app closed, so the ports are free for another launch. */
+async function stopDev() {
+  if (!dev || ATTACH) return;
+  try {
+    execFileSync('taskkill', ['/PID', String(dev.pid), '/T', '/F'], { stdio: 'ignore' });
+  } catch {
+    // already gone
+  }
+  dev = undefined;
+  for (let i = 0; i < 50 && ((await portInUse(1420)) || (await portInUse(CDP_PORT))); i++) await sleep(200);
+}
+
+await launch();
 
 // ---------------------------------------------------------------- helpers
 /** Whole buffer, with soft-wrapped rows joined back into logical lines. */
@@ -201,7 +230,7 @@ const focusReport = () =>
   });
 /** Types a command at the shell prompt. Refuses to type anywhere else (e.g. into a TUI). */
 async function run(cmd, { waitPrompt = true } = {}) {
-  if (!(await waitUntil(atShellPrompt, 5000))) throw new Error(`sin prompt de PowerShell; no se tipea: ${cmd}`);
+  if (!(await waitUntil(atShellPrompt, 5000))) throw new Error(`sin prompt de PowerShell; no se tipea: ${cmd} (línea del cursor: «${await cursorLine()}»)`);
   if (!(await waitUntil(terminalFocused, 3000))) {
     throw new Error(`la terminal activa no tiene el foco (${await focusReport()}); no se tipea: ${cmd}`);
   }
@@ -284,6 +313,9 @@ async function isolateAfterFailure() {
     ui.closeConfirm();
     ui.closeSearch();
     ui.stopRename();
+    ui.closePalette();
+    ui.closeLayoutDialog();
+    ui.closeSettings();
     const s = window.__workspace.getState();
     const fresh = s.newTab({ cwd: null });
     s.closeTabs(s.tabOrder.filter((id) => id !== fresh));
@@ -576,6 +608,9 @@ const settingsOnDisk = () => fs.readFileSync(SETTINGS_FILE, 'utf8');
 /** Writes settings.json like an editor would (an object gets the $schema line) and waits until the app read it. */
 async function writeSettings(content) {
   const text = typeof content === 'string' ? content : `${JSON.stringify({ $schema: './settings.schema.json', ...content }, null, 2)}\n`;
+  // A write of the app's own still in flight (Ctrl+B saves the explorer at once) would land
+  // after this one: let it finish first.
+  await waitUntil(async () => (await settingsState()).text === (fs.existsSync(SETTINGS_FILE) ? settingsOnDisk() : null), 3000);
   fs.writeFileSync(SETTINGS_FILE, text);
   if (!(await waitUntil(async () => (await settingsState()).text === text, 8000))) {
     throw new Error(`la app no leyó settings.json: ${String((await settingsState()).text).slice(0, 200)}`);
@@ -649,6 +684,65 @@ const textPosition = (id, needle) =>
     },
     { id, needle },
   );
+
+// ---------------------------------------------------------------- keybindings, palette, session, layouts
+const SESSION_FILE = path.join(CONFIG_DIR, 'session.json');
+const LAYOUTS_FILE = path.join(CONFIG_DIR, 'layouts.json');
+/** session.json as saved; null if missing or unreadable. */
+const sessionOnDisk = () => {
+  try {
+    return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+};
+const layoutsOnDisk = () => (fs.existsSync(LAYOUTS_FILE) ? fs.readFileSync(LAYOUTS_FILE, 'utf8') : '');
+const parseJsonc = (text) => parseJsoncText(text, [], { allowTrailingComma: true });
+const keyRow = (id) => `.key-row[data-action-id="${id}"]`;
+/** Settings screen, Atajos: "+" on an action and a key press. */
+async function recordKey(id, combo) {
+  await page.click(`${keyRow(id)} [data-action="add-key"]`);
+  await page.waitForSelector(`${keyRow(id)} .key-recorder`, { timeout: 3000 });
+  await waitUntil(() => page.evaluate(() => document.activeElement?.classList.contains('key-recorder')), 2000);
+  await page.keyboard.press(combo);
+}
+async function openPalette() {
+  if (!(await page.$('.palette'))) await page.keyboard.press('Control+Shift+P');
+  await page.waitForSelector('.palette-input', { timeout: 3000 });
+}
+const paletteRows = () =>
+  page.$$eval('.palette-item', (items) =>
+    items.map((item) => ({ id: item.dataset.command, recent: item.dataset.recent !== undefined, keys: [...item.querySelectorAll('kbd')].map((k) => k.textContent) })),
+  );
+/** Runs a palette command by searching for it: Enter when it is the first match (`first`), else a click. */
+async function paletteRun(query, id, first = true) {
+  await openPalette();
+  await page.fill('.palette-input', query);
+  const sel = `.palette-item[data-command="${attrValue(id)}"]`;
+  await page.waitForSelector(sel, { timeout: 3000 });
+  if (first) {
+    const top = (await paletteRows())[0]?.id;
+    if (top !== id) throw new Error(`paleta: "${query}" da primero ${top}, no ${id}`);
+    await page.keyboard.press('Enter');
+  } else {
+    await page.click(sel);
+  }
+  await waitUntil(async () => !(await page.$('.palette')), 3000);
+}
+/** A pane's buffer as logical lines (rows a long prompt wraps over joined back). */
+const paneLines = (id) =>
+  page.evaluate((id) => {
+    const b = window.__paneTerminal(id)?.buffer.active;
+    if (!b) return [];
+    const lines = [];
+    for (let i = 0; i < b.length; i++) {
+      const line = b.getLine(i);
+      const s = line?.translateToString(true) ?? '';
+      if (line?.isWrapped && lines.length) lines[lines.length - 1] += s;
+      else lines.push(s);
+    }
+    return lines.filter((l) => l.trim());
+  }, id);
 
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
 function agentExe(name) {
@@ -2399,7 +2493,9 @@ const stages = {
     const legacy = await page.evaluate(() => localStorage.getItem('terminal.explorer'));
     check('migración: ancho y "ver ocultos" de localStorage pasan a settings.json', migrated && legacy === null && (await explorerState()).width === 333, settingsOnDisk());
 
-    // Ligatures and padding.
+    // Ligatures and padding. The reloads restored the session (a tab in the long test folder):
+    // measure in a fresh one, as before.
+    await freshTab();
     id = await activePane();
     await writeSettings({ appearance: { ligatures: true, padding: 20, fontFamily: '"Cascadia Code", Consolas, monospace' } });
     check('ligaduras: el joiner se registra en las terminales', await waitUntil(() => page.evaluate((pid) => window.__paneLigatures(pid), id), 3000));
@@ -2421,6 +2517,392 @@ const stages = {
     await closeSettings();
     await resetSettings();
     check('sin ligaduras ni efectos al volver a los valores por defecto', !(await page.evaluate((pid) => window.__paneLigatures(pid), id)) && !(await settingsState()).restartRequired);
+    await freshTab();
+  },
+
+  async keybindings() {
+    if (!(await ownSettings())) return skip('keybindings', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await resetSettings();
+
+    // The settings screen: a second key for "Nueva tab", recorded with the keyboard.
+    await openSettings('keybindings');
+    await recordKey('tab.new', 'Control+Shift+N');
+    const added = await waitUntil(() => /"tab\.new": \[\s*"ctrl\+shift\+t",\s*"ctrl\+shift\+n"\s*\]/.test(settingsOnDisk()), 3000);
+    check('Atajos: agregar una tecla la guarda en settings.json (keybindings)', added, settingsOnDisk());
+    await closeSettings();
+    let tabs = (await wsState()).order.length;
+    await page.keyboard.press('Control+Shift+N');
+    check('... y la tecla nueva funciona al instante (Ctrl+Shift+N abre una tab)', await waitUntil(async () => (await wsState()).order.length === tabs + 1, 3000));
+    await waitUntil(atShellPrompt, 20000);
+
+    // Ctrl+B removed from the explorer: it reaches the program again.
+    await openSettings('keybindings');
+    await page.click(`${keyRow('explorer.toggle')} [data-key="ctrl+b"] [data-action="remove-key"]`);
+    check('quitar Ctrl+B del explorador: "explorer.toggle": []', await waitUntil(() => /"explorer\.toggle": \[\]/.test(settingsOnDisk()), 3000), settingsOnDisk());
+    await closeSettings();
+    const visible = (await explorerState()).visible;
+    const log = path.join(WORK, 'keys-ctrlb.log');
+    await run(`$env:FAKE_AGENT_LOG = '${log}'`);
+    await run(`& '${process.execPath}' '${FAKE_AGENT}' probe`, { waitPrompt: false });
+    try {
+      await waitFor('FAKE-AGENT probe listo', { source: screen });
+      await page.keyboard.press('Control+b');
+      await sleep(500);
+      const bytes = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '';
+      check('... y Ctrl+B llega al programa (0x02) sin tocar el explorador', /(^|\s)02(\s|$)/m.test(bytes) && (await explorerState()).visible === visible, bytes.trim());
+    } finally {
+      await exitToPrompt();
+    }
+
+    // A key another action has: the screen says so and "Reasignar" moves it.
+    await openSettings('keybindings');
+    await recordKey('explorer.toggleHidden', 'Control+Shift+N');
+    const proposal = await page.locator('.key-proposal').textContent({ timeout: 3000 }).catch(() => '');
+    check('una tecla de otra acción: avisa el conflicto antes de guardar', /Nueva tab/.test(proposal ?? ''), proposal ?? '');
+    await page.click('[data-action="reassign-key"]');
+    await waitUntil(() => /"explorer\.toggleHidden": \[\s*"ctrl\+shift\+n"\s*\]/.test(settingsOnDisk()), 3000);
+    let disk = settingsOnDisk();
+    check('... "Reasignar" la saca de la otra acción (y la que vuelve a su default no queda en el archivo)', /"explorer\.toggleHidden"/.test(disk) && !/"tab\.new"/.test(disk), disk);
+
+    // A key programs need: a warning, nothing saved unless confirmed.
+    await recordKey('tab.duplicate', 'Control+r');
+    const reserved = await page.locator('.key-proposal [data-kind="reserved"]').textContent({ timeout: 3000 }).catch(() => '');
+    check('una tecla que usan los programas (Ctrl+R): avisa para qué la usan', /historial/.test(reserved ?? ''), reserved ?? '');
+    await page.click('[data-action="cancel-key"]');
+    // A key that types: refused.
+    await recordKey('tab.duplicate', 'a');
+    const typing = await page.locator(`${keyRow('tab.duplicate')} [data-kind="typing"]`).textContent({ timeout: 3000 }).catch(() => '');
+    await page.keyboard.press('Escape');
+    await sleep(200);
+    disk = settingsOnDisk();
+    check('una tecla sin Ctrl/Alt que escribe se rechaza; Esc cancela', /no se podría escribir/.test(typing ?? '') && !/"tab\.duplicate"/.test(disk), typing ?? '');
+    check('... y Esc en la grabación no cierra la configuración', !!(await page.$('.settings')));
+
+    // Conflicts written by hand are shown; a typo is an error that keeps the last valid file.
+    await writeSettings({ keybindings: { 'pane.close': ['ctrl+shift+w', 'ctrl+shift+t'] } });
+    await waitUntil(async () => !!(await page.$('.settings-banner[data-conflicts]')), 3000);
+    const chip = await page.getAttribute(`${keyRow('pane.close')} [data-key="ctrl+shift+t"]`, 'data-conflict').catch(() => null);
+    check('conflicto escrito a mano: aviso en la pantalla y la tecla marcada', chip === 'error');
+    const st = await writeSettings({ keybindings: { 'tab.new': 'ctrl+shfit+t' } });
+    check('una tecla mal escrita es un error: sigue la última configuración válida', st.status === 'invalid' && st.issues.some((i) => i.path === 'keybindings.tab.new'), JSON.stringify(st.issues));
+    await closeSettings();
+
+    // Edited by hand: applies live, and the menus show the new key.
+    await writeSettings({ keybindings: { 'pane.splitRight': 'alt+shift+r' } });
+    await page.keyboard.press('Alt+Shift+R');
+    await waitPanes(2);
+    const id = await activePane();
+    await page.keyboard.press('Alt+Shift+D');
+    await sleep(400);
+    check('atajo cambiado a mano: Alt+Shift+R divide y Alt+Shift+D ya no', leaves((await activeTab()).layout).length === 2);
+    await page.keyboard.press('Shift+F10');
+    const label = await page.locator('[role="menu"] [data-action="split-right"] kbd').textContent({ timeout: 3000 }).catch(() => null);
+    check('... y el menú del panel muestra el atajo nuevo', label === 'Alt+Shift+R', label ?? '');
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => (await activePane()) === id && (await terminalFocused()), 3000);
+
+    // "Restaurar los valores por defecto": the section disappears from the file.
+    await openSettings('keybindings');
+    await page.click('[data-action="reset-keybindings"]');
+    check('"Restaurar los valores por defecto" borra keybindings del archivo', await waitUntil(() => !settingsOnDisk().includes('keybindings'), 3000), settingsOnDisk());
+    await closeSettings();
+    tabs = (await wsState()).order.length;
+    await page.keyboard.press('Control+Shift+T');
+    const tabOk = await waitUntil(async () => (await wsState()).order.length === tabs + 1, 3000);
+    await waitUntil(atShellPrompt, 20000);
+    const shown = (await explorerState()).visible;
+    await page.keyboard.press('Control+b');
+    const explorerOk = await waitUntil(async () => (await explorerState()).visible !== shown, 3000);
+    await page.keyboard.press('Control+b');
+    check('... y vuelven los de siempre (Ctrl+Shift+T, Ctrl+B)', tabOk && explorerOk);
+    await resetSettings();
+    await freshTab();
+  },
+
+  async palette() {
+    await freshTab();
+    await openPalette();
+    check('Ctrl+Shift+P abre la paleta con el foco en la búsqueda', await page.evaluate(() => document.activeElement?.classList.contains('palette-input')));
+    const all = await paletteRows();
+    const newTab = all.find((r) => r.id === 'tab.new');
+    check(
+      'lista las acciones con su atajo, más tabs, perfiles y temas',
+      newTab?.keys.includes('Ctrl+Shift+T') &&
+        all.some((r) => r.id === 'explorer.toggle' && r.keys.includes('Ctrl+B')) &&
+        all.some((r) => r.id.startsWith('tab:')) &&
+        all.some((r) => r.id === 'profile:cmd') &&
+        all.some((r) => r.id === 'theme:dracula'),
+      `${all.length} items`,
+    );
+    await page.keyboard.type('ntab');
+    let first = (await paletteRows())[0];
+    check('búsqueda difusa: "ntab" → Nueva tab primero', first?.id === 'tab.new', JSON.stringify(first));
+    let tabs = (await wsState()).order.length;
+    await page.keyboard.press('Enter');
+    const opened = await waitUntil(async () => (await wsState()).order.length === tabs + 1, 3000);
+    await waitUntil(atShellPrompt, 20000);
+    check('Enter ejecuta la acción, cierra la paleta y el foco vuelve a la terminal', opened && !(await page.$('.palette')) && (await waitUntil(terminalFocused, 3000)));
+    await openPalette();
+    first = (await paletteRows())[0];
+    check('lo usado recientemente aparece primero', first?.id === 'tab.new' && first.recent, JSON.stringify(first));
+    check('... y se recuerda en session.json', await waitUntil(() => sessionOnDisk()?.recent?.[0] === 'tab.new', 3000));
+    await page.keyboard.type('dvd drch');
+    first = (await paletteRows())[0];
+    check('búsqueda difusa por iniciales: "dvd drch" → Dividir el panel a la derecha', first?.id === 'pane.splitRight', JSON.stringify(first));
+    await page.fill('.palette-input', 'zzzqqqxx');
+    check('sin coincidencias lo dice', !!(await page.$('.palette-empty')));
+    await page.keyboard.press('Escape');
+    check('Esc cierra la paleta y devuelve el foco', !(await page.$('.palette')) && (await waitUntil(terminalFocused, 3000)));
+
+    // Dynamic: tabs and panes by name.
+    const target = (await wsState()).active;
+    await page.evaluate((id) => window.__workspace.getState().renameTab(id, 'Servidor e2e'), target);
+    await openTab();
+    await paletteRun('servidor', `tab:${target}`);
+    check('"Ir a la tab" por nombre', await waitUntil(async () => (await wsState()).active === target, 3000));
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const [left] = leaves((await activeTab()).layout);
+    await paletteRun('ir al panel servidor', `pane:${left}`, false);
+    check('"Ir al panel" de una tab dividida', await waitUntil(async () => (await activePane()) === left && (await terminalFocused()), 3000));
+
+    // A profile, a theme.
+    tabs = (await wsState()).order.length;
+    await paletteRun('nueva tab cmd', 'profile:cmd');
+    const cmdOk = await waitUntil(async () => (await paneState(await activePane()))?.shell === 'cmd', 15000);
+    check('"Nueva tab con" un perfil', cmdOk && (await wsState()).order.length === tabs + 1);
+    if (await ownSettings()) {
+      await paletteRun('dracula tema', 'theme:dracula');
+      check('"Tema:" lo aplica y lo guarda', await waitUntil(() => /"theme": "dracula"/.test(settingsOnDisk()), 3000));
+      await resetSettings();
+    }
+    await freshTab();
+  },
+
+  async session() {
+    if (!(await ownSettings())) return skip('session', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await resetSettings();
+    const tricky = trickyDir(...TRICKY_DIR);
+    const home = await homeDir();
+    // Tab A: renamed, colored, split with its own sizes; the new pane in the tricky folder.
+    const a = (await wsState()).active;
+    await page.evaluate((id) => {
+      const s = window.__workspace.getState();
+      s.renameTab(id, 'Sesión A');
+      s.setTabColor(id, 'purple');
+    }, a);
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    await cdTricky();
+    const splitId = (await activeTab()).layout.id;
+    await page.evaluate((id) => window.__workspace.getState().setSplitSizes(id, [30, 70]), splitId);
+    // Tab B: cmd. Tabs C and D: a collapsed group.
+    await page.evaluate(() => window.__workspace.getState().newTab({ profile: 'cmd', cwd: null }));
+    await waitUntil(async () => (await paneState(await activePane()))?.shell === 'cmd', 15000);
+    const c = await openTab();
+    const d = await openTab();
+    await page.evaluate(
+      ({ a, c, d }) => {
+        const s = window.__workspace.getState();
+        const g = s.createGroup(c);
+        s.renameGroup(g, 'Grupo sesión');
+        s.setGroupColor(g, 'green');
+        s.moveTabToGroup(d, g);
+        s.activateTab(a);
+        s.toggleGroupCollapsed(g);
+        window.__ui.getState().stopRename();
+      },
+      { a, c, d },
+    );
+    const saved = await waitUntil(() => {
+      const w = sessionOnDisk()?.window;
+      return w?.tabs?.length === 4 && w.groups?.[0]?.collapsed === true && JSON.stringify(w).includes(JSON.stringify(tricky).slice(1, -1));
+    }, 5000);
+    check('la sesión se guarda sola en session.json (tabs, grupos, layout, perfiles, carpetas)', saved, JSON.stringify(sessionOnDisk()).slice(0, 600));
+    check('... con escritura atómica (sin temporales)', !fs.existsSync(`${SESSION_FILE}.tmp`));
+
+    await reloadApp();
+    let st = await wsState();
+    const [ta, tb, tc, td] = st.order.map((id) => st.tabs[id]);
+    const group = tc?.groupId ? st.groups[tc.groupId] : null;
+    check(
+      'al reabrir: las 4 tabs con nombre, color, grupo (nombre, color, colapsado) y la activa',
+      st.order.length === 4 &&
+        ta.customTitle === 'Sesión A' &&
+        ta.color === 'purple' &&
+        st.active === ta.id &&
+        group?.name === 'Grupo sesión' &&
+        group.color === 'green' &&
+        group.collapsed === true &&
+        td?.groupId === tc.groupId &&
+        !tb.groupId,
+      JSON.stringify({ order: st.order.length, a: ta?.customTitle, group }),
+    );
+    const sizes = ta.layout.sizes?.map(Math.round);
+    check('... el layout de paneles con sus tamaños', ta.layout.type === 'split' && ta.layout.direction === 'horizontal' && sizes?.join() === '30,70', JSON.stringify(sizes));
+    const [left, right] = leaves(ta.layout);
+    const cwds = [await paneCwd(left), await paneCwd(right)];
+    check('... la carpeta de cada panel', cwds[0]?.toLowerCase() === home.toLowerCase() && cwds[1] === tricky, JSON.stringify(cwds));
+    const cmdPane = leaves(tb.layout)[0];
+    await waitUntil(async () => (await paneState(cmdPane))?.shell === 'cmd', 15000);
+    check('... y el perfil de cada panel (cmd)', (await paneState(cmdPane))?.profile === 'cmd' && (await paneState(cmdPane))?.shell === 'cmd');
+    check('... el panel activo de la tab', (await activePane()) === right);
+
+    // A folder that no longer exists: the user's folder.
+    const gone = trickyDir('se va a borrar');
+    await runIdle(`Set-Location -LiteralPath ${psQuote(gone)}`);
+    await waitUntil(() => JSON.stringify(sessionOnDisk() ?? {}).includes(JSON.stringify(gone).slice(1, -1)), 5000);
+    let removed = false;
+    for (let i = 0; i < 10 && !removed; i++) {
+      try {
+        fs.rmSync(gone, { recursive: true });
+        removed = true;
+      } catch {
+        await sleep(200);
+      }
+    }
+    await reloadApp();
+    const restoredId = await activePane();
+    const fallback = await paneCwd(restoredId);
+    check('una carpeta que ya no existe: abre en la del usuario', removed && fallback?.toLowerCase() === home.toLowerCase(), `${removed} ${fallback}`);
+
+    // Restore off: nothing kept, one fresh tab.
+    await writeSettings({ session: { restore: false } });
+    check('session.restore: false → session.json sin tabs', await waitUntil(() => sessionOnDisk()?.window === null, 3000));
+    await reloadApp();
+    st = await wsState();
+    check('... y al abrir, una sola tab nueva', st.order.length === 1 && !st.tabs[st.active].customTitle, `${st.order.length} tabs`);
+    await resetSettings();
+    check('al reactivarlo se vuelve a guardar', await waitUntil(() => sessionOnDisk()?.window?.tabs?.length === 1, 3000));
+
+    // A broken file (whatever happened to it) never stops the app.
+    fs.writeFileSync(SESSION_FILE, '{ "version": 1, "window": { "tabs": [ { "layout": ');
+    await reloadApp();
+    st = await wsState();
+    check('un session.json roto: arranca con una tab nueva', st.order.length === 1);
+    await openTab();
+    check('... y se reemplaza por uno válido en el próximo cambio', await waitUntil(() => sessionOnDisk()?.window?.tabs?.length === 2, 3000));
+    await freshTab();
+  },
+
+  async layouts() {
+    if (!(await ownSettings())) return skip('layouts', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    const tricky = trickyDir(...TRICKY_DIR);
+    const command = "Write-Output ('layout-' + 'listo')";
+    // A tab with two panes, the right one in the tricky folder.
+    const tab = (await wsState()).active;
+    await page.evaluate((id) => window.__workspace.getState().renameTab(id, 'Layout e2e'), tab);
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    await cdTricky();
+    const right = await activePane();
+
+    // Saved from the palette, with a command for the right pane.
+    await paletteRun('guardar tab layout', 'layout.saveTab');
+    await page.waitForSelector('.layout-dialog', { timeout: 3000 });
+    const suggested = await page.inputValue('.layout-dialog [name="layout-name"]');
+    await page.fill('.layout-dialog [name="layout-name"]', 'E2E tab');
+    await page.fill(`[data-pane-command="${right}"]`, command);
+    await page.click('[data-action="save-layout"]');
+    await waitUntil(() => fs.existsSync(LAYOUTS_FILE) && layoutsOnDisk().includes('E2E tab'), 3000);
+    const file = parseJsonc(layoutsOnDisk());
+    const saved = file?.layouts?.[0];
+    check(
+      'guardar la tab como layout: nombre (sugerido: el de la tab), paneles, carpetas y comando en layouts.json',
+      suggested === 'Layout e2e' &&
+        saved?.name === 'E2E tab' &&
+        saved.tabs?.[0]?.title === 'Layout e2e' &&
+        saved.tabs[0].layout?.split === 'horizontal' &&
+        saved.tabs[0].layout.panes?.[1]?.cwd === tricky &&
+        saved.tabs[0].layout.panes[1].command === command &&
+        !saved.tabs[0].layout.panes[0].command,
+      JSON.stringify(saved),
+    );
+    check('... con su JSON Schema al lado (VS Code)', fs.existsSync(path.join(CONFIG_DIR, 'layouts.schema.json')));
+    const toast = await page.locator('.toast').textContent({ timeout: 3000 }).catch(() => '');
+    check('... y lo confirma', /guardado/.test(toast ?? ''), toast ?? '');
+
+    // Opened from the palette: same panes and folders; the command once the shell is ready.
+    let tabs = (await wsState()).order.length;
+    await paletteRun('abrir layout e2e tab', 'layout:E2E tab');
+    await waitUntil(async () => (await wsState()).order.length === tabs + 1, 3000);
+    const opened = await activeTab();
+    const [l2, r2] = leaves(opened.layout);
+    const out = await waitUntil(async () => (await paneLines(r2)).includes('layout-listo'), 20000);
+    const lines = await paneLines(r2);
+    // Typed once, right after a prompt (never echoed before the shell was ready).
+    const typed = lines.filter((l) => l.includes("'layout-'"));
+    check(
+      'abrir el layout: misma tab, paneles y carpetas; el comando se escribe cuando la shell está lista',
+      out &&
+        opened.customTitle === 'Layout e2e' &&
+        (await paneCwd(r2)) === tricky &&
+        typed.length === 1 &&
+        /^PS [A-Za-z]:\\.*> /.test(typed[0]) &&
+        typed[0].endsWith(`> ${command}`),
+      lines.join(' ⏎ ').slice(0, 400),
+    );
+    check('... solo en su panel', !(await paneLines(l2)).some((l) => l.includes('layout-')) && (await page.evaluate(() => window.__pendingCommands().length)) === 0);
+
+    // Edited by hand (with comments): applies live; a shell that does not report its prompt
+    // (cmd) never gets the command.
+    const edited = layoutsOnDisk().replace('"layouts": [', '// mi comentario\n  "layouts": [\n    { "name": "E2E cmd", "tabs": [{ "title": "cmd e2e", "profile": "cmd", "command": "echo nunca-se-escribe" }] },');
+    fs.writeFileSync(LAYOUTS_FILE, edited);
+    check('editar layouts.json a mano se aplica en vivo', await waitUntil(() => page.evaluate(() => window.__layouts.getState().layouts.some((l) => l.name === 'E2E cmd')), 5000));
+    await page.click('.tab-new-menu');
+    await page.click('[role="menu"] [data-action="open-layout"][data-layout="E2E cmd"]');
+    const warned = await waitUntil(async () => /cmd no avisa/.test((await page.locator('.toast').textContent({ timeout: 500 }).catch(() => '')) ?? ''), 15000);
+    await sleep(1500);
+    const cmdText = await paneText(await activePane(), 20);
+    check('un perfil sin integración (cmd): el comando no se escribe, y avisa', warned && !cmdText.includes('nunca-se-escribe'), cmdText.slice(0, 200));
+
+    // Saved from the "▾" menu (the whole window): the hand-written comment stays.
+    await waitUntil(atCmdPrompt, 15000);
+    await page.click('.tab-new-menu');
+    await page.click('[role="menu"] [data-action="save-window-layout"]');
+    await page.waitForSelector('.layout-dialog', { timeout: 3000 });
+    await page.fill('.layout-dialog [name="layout-name"]', 'E2E ventana');
+    await page.click('[data-action="save-layout"]');
+    await waitUntil(() => layoutsOnDisk().includes('E2E ventana'), 3000);
+    const all = parseJsonc(layoutsOnDisk())?.layouts ?? [];
+    const windowLayout = all.find((l) => l.name === 'E2E ventana');
+    check(
+      'guardar la ventana desde el menú "▾": todas las tabs, sin perder los comentarios del archivo',
+      windowLayout?.tabs?.length === (await wsState()).order.length && layoutsOnDisk().includes('// mi comentario') && all.length === 3,
+      JSON.stringify(all.map((l) => [l.name, l.tabs?.length])),
+    );
+
+    // A fresh window: the layout replaces its untouched tab.
+    await freshTab();
+    await waitUntil(async () => idle(await activePane()), 20000);
+    await paletteRun('abrir layout e2e tab', 'layout:E2E tab');
+    await waitUntil(async () => (await activeTab()).customTitle === 'Layout e2e', 3000);
+    await sleep(300);
+    check('una ventana recién abierta: el layout reemplaza la tab sin usar', (await wsState()).order.length === 1, `${(await wsState()).order.length} tabs`);
+
+    // Broken JSON: the last good layouts stay, a notice, and the app does not write.
+    const good = layoutsOnDisk();
+    fs.writeFileSync(LAYOUTS_FILE, '{ "layouts": [ ');
+    const notice = await waitUntil(async () => !!(await page.$('.status-bar [data-layouts="invalid"]')), 5000);
+    const kept = await page.evaluate(() => window.__layouts.getState().layouts.length);
+    await page.evaluate(() => window.__ui.getState().openLayoutDialog({ scope: 'tab', tabId: window.__workspace.getState().activeTabId }));
+    await page.fill('.layout-dialog [name="layout-name"]', 'No se guarda');
+    await page.click('[data-action="save-layout"]');
+    await sleep(500);
+    check('layouts.json roto: aviso en la barra de estado, siguen los de antes y no se escribe encima', notice && kept === 3 && layoutsOnDisk() === '{ "layouts": [ ', `${notice} ${kept}`);
+    if (await page.$('.layout-dialog')) await page.click('.layout-dialog [data-action="cancel"]');
+    fs.writeFileSync(LAYOUTS_FILE, good);
+    check('... al corregirlo el aviso desaparece', await waitUntil(async () => !(await page.$('.status-bar [data-layouts]')), 5000));
+
+    // Deleted from the settings screen (asks once more).
+    await openSettings('session');
+    await page.click('[data-layout="E2E cmd"] [data-action="delete-layout"]');
+    await page.click('[data-layout="E2E cmd"] [data-action="confirm-delete-layout"]');
+    check('eliminar un layout desde la configuración', await waitUntil(() => !layoutsOnDisk().includes('E2E cmd') && layoutsOnDisk().includes('// mi comentario'), 3000));
+    await closeSettings();
     await freshTab();
   },
 
@@ -2507,6 +2989,60 @@ const stages = {
     await waitFor((s) => prompts(s) > before, { timeout: 20000 });
     const pid2 = await shellPid();
     check('Enter abre una sesión nueva', pid2 !== pid && alive(pid2));
+  },
+
+  async reopen() {
+    if (ATTACH) return skip('reopen', 'con E2E_ATTACH la app no la lanzó la prueba');
+    if (!(await ownSettings())) return skip('reopen', 'la app no usa la carpeta de config de la prueba');
+    await freshTab();
+    const tricky = trickyDir(...TRICKY_DIR);
+    const a = (await wsState()).active;
+    await page.evaluate((id) => {
+      const s = window.__workspace.getState();
+      s.renameTab(id, 'Reabrir A');
+      s.setTabColor(id, 'red');
+    }, a);
+    await page.keyboard.press('Alt+Shift+-');
+    await waitPanes(2);
+    const b = await openTab();
+    await cdTricky();
+    await page.evaluate((id) => {
+      const s = window.__workspace.getState();
+      const g = s.createGroup(id);
+      s.renameGroup(g, 'Reabrir G');
+      s.setGroupColor(g, 'cyan');
+      window.__ui.getState().stopRename();
+    }, b);
+    const ready = await waitUntil(() => {
+      const w = sessionOnDisk()?.window;
+      return w?.tabs?.length === 2 && w.groups?.[0]?.name === 'Reabrir G' && JSON.stringify(w).includes(JSON.stringify(tricky).slice(1, -1));
+    }, 5000);
+    const before = sessionOnDisk()?.window;
+    // Closed like a user would (the window's close button), then started again.
+    const oldPid = appPid;
+    win('close', appPid);
+    await waitUntil(async () => !alive(oldPid), 15000);
+    check('cerrar la ventana conserva la sesión guardada', ready && !alive(oldPid) && JSON.stringify(sessionOnDisk()?.window) === JSON.stringify(before));
+    await stopDev();
+    await launch();
+    await waitFor(/PS [A-Za-z]:\\.*>/, { timeout: 30000 });
+    const st = await wsState();
+    const [ta, tb] = st.order.map((id) => st.tabs[id]);
+    const group = tb?.groupId ? st.groups[tb.groupId] : null;
+    const cwd = tb ? await paneCwd(tb.activePaneId) : null;
+    check(
+      'al reabrir la app: las tabs con nombre y color, el grupo, los paneles y las carpetas',
+      st.order.length === 2 &&
+        ta.customTitle === 'Reabrir A' &&
+        ta.color === 'red' &&
+        ta.layout.type === 'split' &&
+        ta.layout.direction === 'vertical' &&
+        group?.name === 'Reabrir G' &&
+        group.color === 'cyan' &&
+        cwd === tricky,
+      JSON.stringify({ tabs: st.order.length, title: ta?.customTitle, group, cwd }),
+    );
+    await freshTab();
   },
 
   async close() {

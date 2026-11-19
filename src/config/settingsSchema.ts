@@ -1,6 +1,7 @@
 // The settings.json schema: types, defaults, validation and the JSON Schema written next to the
 // file (VS Code completes and documents it). Only what differs from the defaults is written.
 // Pure (tested with node --test).
+import { keybindingsSchema } from './keybindings.ts';
 import type { ProfileEntry } from './profiles.ts';
 import {
   array,
@@ -103,8 +104,18 @@ export const settingsSchema = object(
       },
       { description: 'Perfiles de shell.' },
     ),
+    session: object(
+      {
+        restore: boolean({
+          default: true,
+          description: 'Al abrir la app, restaurar las tabs, los grupos y los paneles de la última vez (con su perfil y su carpeta). Sin esto, no se guarda la sesión.',
+        }),
+      },
+      { description: 'Sesión: lo que se restaura al abrir la app.' },
+    ),
+    keybindings: keybindingsSchema(),
   },
-  { description: 'Configuración de Terminal. Ctrl+, abre la pantalla de configuración.' },
+  { description: 'Configuración de Brisa. Ctrl+, abre la pantalla de configuración.' },
 );
 
 type RawSettings = Infer<typeof settingsSchema>;
@@ -134,7 +145,7 @@ export function settingsJsonSchema(profileIds: readonly string[], themeNames: re
   const properties = (schema.properties ?? {}) as Record<string, unknown>;
   return cleanJson({
     $schema: 'http://json-schema.org/draft-07/schema#',
-    title: 'Terminal: settings.json',
+    title: 'Brisa: settings.json',
     ...schema,
     properties: { $schema: { type: 'string' }, ...properties },
     allowComments: true,

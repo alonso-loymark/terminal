@@ -5,7 +5,9 @@ import { focusActiveTerminal } from '../lib/tabActions';
 import { useSettings } from '../store/settings';
 import { useUi, type SettingsSection } from '../store/ui';
 import { AppearanceSection, ExplorerSection, TerminalSection } from './settings/GeneralSections';
+import { KeybindingsSection } from './settings/KeybindingsSection';
 import { ProfilesSection } from './settings/ProfilesSection';
+import { SessionSection } from './settings/SessionSection';
 import { ThemesSection } from './settings/ThemesSection';
 
 const SECTIONS: readonly (readonly [SettingsSection, string])[] = [
@@ -14,6 +16,8 @@ const SECTIONS: readonly (readonly [SettingsSection, string])[] = [
   ['profiles', 'Perfiles'],
   ['terminal', 'Terminal'],
   ['explorer', 'Explorador'],
+  ['keybindings', 'Atajos'],
+  ['session', 'Sesión y layouts'],
 ];
 
 const describe = (issue: Issue) =>
@@ -25,7 +29,7 @@ const close = () => {
 };
 
 const openJson = () =>
-  void openSettingsJson().catch((error: unknown) => console.warn('[terminal] no se pudo abrir settings.json', error));
+  void openSettingsJson().catch((error: unknown) => console.warn('[brisa] no se pudo abrir settings.json', error));
 
 /** Problems in the file: errors (the file is not applied) or warnings (it is). */
 function IssuesBanner() {
@@ -113,6 +117,8 @@ export function SettingsPage() {
           {section === 'profiles' && <ProfilesSection />}
           {section === 'terminal' && <TerminalSection />}
           {section === 'explorer' && <ExplorerSection />}
+          {section === 'keybindings' && <KeybindingsSection />}
+          {section === 'session' && <SessionSection />}
         </div>
         <footer className="settings-footer">
           <span className="settings-path" title={path ?? undefined}>

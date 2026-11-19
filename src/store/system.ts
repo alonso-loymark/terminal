@@ -17,7 +17,7 @@ export function loadSystemInfo(): Promise<void> {
   return (loading ??= getSystemInfo()
     .then((info) => useSystem.setState({ homeDir: info.homeDir, shells: info.shells, loaded: true }))
     .catch((error: unknown) => {
-      console.warn('[terminal] system_info falló', error);
+      console.warn('[brisa] system_info falló', error);
       useSystem.setState({ loaded: true });
     }));
 }

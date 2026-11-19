@@ -302,7 +302,7 @@ function clearActivity(panes: Record<PaneId, Pane>, ids: PaneId[]): Record<PaneI
   return next;
 }
 
-const newPane = (id: PaneId, spawn: PaneSpawn = { profile: null, cwd: null }): Pane => ({
+export const newPane = (id: PaneId, spawn: PaneSpawn = { profile: null, cwd: null }): Pane => ({
   id,
   sessionId: null,
   title: '',
@@ -580,7 +580,7 @@ const containsPane = (node: Layout, paneId: PaneId): boolean =>
   node.type === 'pane' ? node.paneId === paneId : node.children.some((child) => containsPane(child, paneId));
 
 /** Scales sizes to sum 100, keeping proportions; then lifts tiny ones to about MIN_SIZE. */
-function normalizeSizes(sizes: number[]): number[] {
+export function normalizeSizes(sizes: number[]): number[] {
   const scale = (values: number[]) => {
     const total = values.reduce((a, b) => a + b, 0) || 1;
     return values.map((v) => (v / total) * 100);
@@ -595,7 +595,7 @@ function normalizeSizes(sizes: number[]): number[] {
  * split of the same direction is merged into its parent (sizes scaled), so dividers act
  * on the visible arrangement.
  */
-function normalizeLayout(node: Layout): Layout {
+export function normalizeLayout(node: Layout): Layout {
   if (node.type === 'pane') return node;
   const children: Layout[] = [];
   const sizes: number[] = [];

@@ -2,7 +2,9 @@
 import type { Terminal } from '@xterm/xterm';
 import type { useExplorer } from './store/explorer';
 import type { useGit } from './store/git';
+import type { useLayouts } from './store/layouts';
 import type { currentProfiles } from './store/profiles';
+import type { useSession } from './store/session';
 import type { useSettings } from './store/settings';
 import type { useSystem } from './store/system';
 import type { useUi } from './store/ui';
@@ -21,6 +23,10 @@ declare global {
     __paneTerminal?: (paneId: string) => Terminal | undefined;
     __settings?: typeof useSettings;
     __profiles?: typeof currentProfiles;
+    __layouts?: typeof useLayouts;
+    __session?: typeof useSession;
+    /** Panes whose layout command still waits for the shell to be ready. */
+    __pendingCommands?: () => string[];
     /** Whether a pane's terminal has the ligature joiner registered. */
     __paneLigatures?: (paneId: string) => boolean;
   }

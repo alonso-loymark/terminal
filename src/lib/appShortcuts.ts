@@ -1,111 +1,96 @@
-// App-level shortcuts (tabs, groups, panes). Listened in the capture phase on window, so they
-// win over xterm wherever the focus is, and the terminal never receives them.
+// App shortcuts: one listener in the capture phase on window, so they win over xterm wherever
+// the focus is, and the program never receives a key the app took. Which key does what comes
+// from the keymap (defaults + settings.json `keybindings`, see config/keybindings.ts); what each
+// action does, from lib/appActions.ts.
 //
-// Windows Terminal style: tab shortcuts use Ctrl+Shift so plain Ctrl+T / Ctrl+W keep reaching
-// programs (readline, nano...). F2 and Ctrl+1..9 stay as they are. Ctrl+B (explorer) is taken
-// like in VS Code, so programs no longer get it.
-//
-// Holding a key down repeats keydown (event.repeat): actions that create, close or toggle run
-// once per press. Only moving between tabs and panes repeats.
-import { useExplorer } from '../store/explorer';
+// Defaults follow Windows Terminal: tab shortcuts use Ctrl+Shift so plain Ctrl+T / Ctrl+W keep
+// reaching programs (readline, nano...). Holding a key down repeats keydown (event.repeat):
+// actions that create, close or toggle run once per press; only moving between tabs and panes
+// repeats.
+import { actionById, eventKeys, type ActionDef } from '../config/keybindings';
+import { currentKeymap } from '../store/keymap';
 import { useUi } from '../store/ui';
-import { useWorkspace } from '../store/workspace';
-import type { FocusDirection } from '../store/workspaceModel';
-import { focusActiveTerminal, groupTab, openPaneMenu, requestClosePane } from './tabActions';
+import { runAction } from './appActions';
+import { focusActiveTerminal } from './tabActions';
 
-type Action = () => void;
+/** Where the key was pressed. */
+type KeyContext =
+  | { kind: 'terminal'; paneId: string }
+  | { kind: 'explorer' }
+  /** A text field of the app (renaming, search, settings, palette). */
+  | { kind: 'input' }
+  | { kind: 'other' };
 
-/** What a key does, and whether holding it down keeps doing it. */
-interface Shortcut {
-  run: Action;
-  repeatable?: true;
+function contextOf(target: EventTarget | null): KeyContext {
+  if (!(target instanceof Element)) return { kind: 'other' };
+  const pane = target.closest<HTMLElement>('.terminal-pane');
+  if (pane?.dataset.paneId && target.closest('.xterm')) return { kind: 'terminal', paneId: pane.dataset.paneId };
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  ) {
+    return { kind: 'input' };
+  }
+  if (target.closest('.file-tree')) return { kind: 'explorer' };
+  return { kind: 'other' };
 }
 
-const once = (run: Action): Shortcut => ({ run });
-const repeating = (run: Action): Shortcut => ({ run, repeatable: true });
+function applies(action: ActionDef, ctx: KeyContext, event: KeyboardEvent): boolean {
+  if (action.scope === 'terminal') return ctx.kind === 'terminal';
+  if (action.scope === 'explorer') return ctx.kind === 'explorer';
+  // In a text field, keys without Ctrl/Alt (F2, Supr) belong to the field.
+  return ctx.kind !== 'input' || event.ctrlKey || event.altKey || event.metaKey;
+}
 
-const ARROWS: Record<string, FocusDirection> = {
-  ArrowLeft: 'left',
-  ArrowRight: 'right',
-  ArrowUp: 'up',
-  ArrowDown: 'down',
-};
-
-function actionFor(event: KeyboardEvent): Shortcut | null {
-  const ws = useWorkspace.getState();
-  const active = ws.activeTabId;
-  // AltGr arrives as Ctrl+Alt on Windows: never treat it as Ctrl or Alt shortcuts.
-  const ctrl = event.ctrlKey && !event.altKey && !event.metaKey;
-  const alt = event.altKey && !event.ctrlKey && !event.metaKey;
-  const plain = !event.ctrlKey && !event.altKey && !event.metaKey;
-  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-
-  // Settings (like VS Code). While the screen is open it owns the keyboard.
-  if (ctrl && !event.shiftKey && key === ',') {
-    return once(() => {
-      const ui = useUi.getState();
-      if (ui.settings) {
-        ui.closeSettings();
-        focusActiveTerminal();
-      } else {
-        ui.openSettings();
-      }
-    });
-  }
-  if (useUi.getState().settings) return null;
-
-  // Tabs
-  if (ctrl && event.shiftKey && key === 't') return once(() => ws.newTab());
-  if (ctrl && event.shiftKey && key === 'w') return once(() => void requestClosePane());
-  if (ctrl && key === 'Tab') return repeating(() => ws.cycleTab(event.shiftKey ? -1 : 1));
-  if (ctrl && !event.shiftKey && /^Digit[1-9]$/.test(event.code)) {
-    return once(() => ws.activateIndex(Number(event.code.slice(5))));
-  }
-  if (ctrl && event.shiftKey && key === 'g') return once(() => active && groupTab(active));
-  if (plain && !event.shiftKey && key === 'F2') {
-    // Not while typing in an input (renaming, search), nor in the explorer (F2 renames a file there).
-    if (event.target instanceof HTMLInputElement) return null;
-    if (event.target instanceof Element && event.target.closest('.sidebar')) return null;
-    return once(() => active && useUi.getState().startRenameTab(active));
-  }
-
-  // Explorer
-  if (ctrl && !event.shiftKey && key === 'b') return once(() => useExplorer.getState().toggleVisible());
-
-  // Panes
-  if (alt && event.shiftKey && key === 'd') return once(() => void ws.splitPane('horizontal'));
-  // Shift+'-' is '_' on US and Spanish layouts alike; the numpad minus works too.
-  if (alt && event.shiftKey && (key === '-' || key === '_' || event.code === 'NumpadSubtract')) {
-    return once(() => void ws.splitPane('vertical'));
-  }
-  const arrow = ARROWS[event.key];
-  if (alt && !event.shiftKey && arrow) return repeating(() => ws.focusDirection(arrow));
-  if (ctrl && event.shiftKey && key === 'z') return once(() => ws.toggleZoom());
-  if ((plain && event.shiftKey && key === 'F10') || (plain && !event.shiftKey && key === 'ContextMenu')) {
-    return once(() => {
-      const paneId = active ? ws.tabs[active]?.activePaneId : undefined;
-      if (paneId) openPaneMenu(paneId);
-    });
+/** The action a key press triggers here: a scoped action of this context wins over a global one. */
+export function actionForEvent(event: KeyboardEvent): { action: ActionDef; ctx: KeyContext } | null {
+  const keymap = currentKeymap();
+  const ctx = contextOf(event.target);
+  for (const key of eventKeys(event)) {
+    const candidates = (keymap.byKey.get(key) ?? [])
+      .map(actionById)
+      .filter((a): a is ActionDef => !!a && applies(a, ctx, event));
+    const action = candidates.find((a) => a.scope !== 'global') ?? candidates[0];
+    if (action) return { action, ctx };
   }
   return null;
 }
 
+/** After these, the keyboard goes back to the active terminal (a new tab, another pane...). */
+const REFOCUS = new Set(['tabs', 'panes', 'explorer']);
+
 /** Installs the listener; returns the uninstaller. */
 export function installAppShortcuts(): () => void {
   const onKeyDown = (event: KeyboardEvent) => {
-    // A modal dialog owns the keyboard.
-    if (useUi.getState().confirm) return;
-    const shortcut = actionFor(event);
-    if (!shortcut) return;
-    // Swallowed either way: a held shortcut must not leak its key to the terminal.
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.repeat && !shortcut.repeatable) return;
-    shortcut.run();
-    // Tab/pane switches and new terminals land with the keyboard in the active pane, unless a
-    // rename or a menu took it.
+    if (event.isComposing) return;
     const ui = useUi.getState();
-    if (!ui.renamingTabId && !ui.renamingGroupId && !ui.menu && !ui.settings) focusActiveTerminal();
+    // A modal dialog owns the keyboard, and so does the settings screen while recording a key.
+    if (ui.confirm || ui.layoutDialog || ui.capturingKeys) return;
+    const found = actionForEvent(event);
+    if (!found) return;
+    const { action, ctx } = found;
+    // While the settings screen or the palette is open, only its own shortcut works (to close it).
+    if (ui.settings && action.id !== 'app.settings') return;
+    if (ui.palette && action.id !== 'app.commandPalette') return;
+    // The file tree handles its own (it knows the selected entry).
+    if (action.scope === 'explorer') return;
+    if (event.repeat && !action.repeat) {
+      // Held down: once is enough, and the key must not leak to the terminal either.
+      if (action.passthrough) return;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const result = runAction(action.id, { paneId: ctx.kind === 'terminal' ? ctx.paneId : null, event });
+    if (result === 'pass') return;
+    event.stopPropagation();
+    if (result === 'handled') event.preventDefault();
+    const now = useUi.getState();
+    if (REFOCUS.has(action.category) && !now.renamingTabId && !now.renamingGroupId && !now.menu && !now.settings) {
+      focusActiveTerminal();
+    }
   };
   window.addEventListener('keydown', onKeyDown, { capture: true });
   return () => window.removeEventListener('keydown', onKeyDown, { capture: true });

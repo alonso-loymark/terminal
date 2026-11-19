@@ -1,13 +1,15 @@
 // What the settings screen does to settings.json beyond single values: importing and deleting
 // themes, and editing the profile list (entries are matched by id; a detected profile gets an
 // entry the first time it is customized).
+import { defaultKeys } from '../config/keybindings';
 import type { ProfileEntry } from '../config/profiles';
 import type { Issue } from '../config/schema';
 import { findTheme, themesFromImport, themeToJson } from '../config/themes';
+import { currentKeymap } from '../store/keymap';
 import { useSettings } from '../store/settings';
 import { readThemeFile } from './settingsApi';
 import { setSetting, update } from './settingsSync';
-import { parseText, type Edit } from './settingsText';
+import { parseText, settingEdit, type Edit } from './settingsText';
 
 export interface ImportResult {
   imported: string[];
@@ -125,3 +127,27 @@ export const formatEnv = (env: Record<string, string> | undefined) =>
   Object.entries(env ?? {})
     .map(([key, value]) => `${key}=${value}`)
     .join('\n');
+
+// ---------------------------------------------------------------- keybindings
+
+/** An action's keys; the defaults remove the entry (the file keeps only what was changed). */
+export function setKeybindings(id: string, keys: string[]): boolean {
+  return update([settingEdit(['keybindings', id], keys, defaultKeys(id))]);
+}
+
+/** Moves `key` to `id`, taking it from the actions that had it. */
+export function reassignKey(id: string, key: string): boolean {
+  const { bindings } = currentKeymap();
+  const edits: Edit[] = [];
+  for (const [other, keys] of Object.entries(bindings)) {
+    if (other !== id && keys.includes(key)) edits.push(settingEdit(['keybindings', other], keys.filter((k) => k !== key), defaultKeys(other)));
+  }
+  const own = bindings[id] ?? [];
+  edits.push(settingEdit(['keybindings', id], own.includes(key) ? own : [...own, key], defaultKeys(id)));
+  return update(edits);
+}
+
+/** Every shortcut back to its default. */
+export function resetKeybindings(): boolean {
+  return update([[['keybindings'], undefined]]);
+}

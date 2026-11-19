@@ -25,9 +25,24 @@ export interface ConfirmState {
   target: CloseTarget;
 }
 
-export type SettingsSection = 'appearance' | 'themes' | 'profiles' | 'terminal' | 'explorer';
+export type SettingsSection = 'appearance' | 'themes' | 'profiles' | 'terminal' | 'explorer' | 'keybindings' | 'session';
 
-/** Transient UI state: what is being renamed, open menus and dialogs, the search bar, settings. */
+/** Saving the active tab, or the whole window, as a named layout. */
+export interface LayoutDialogState {
+  scope: 'tab' | 'window';
+  tabId: TabId | null;
+}
+
+export interface Toast {
+  id: number;
+  message: string;
+  kind: 'info' | 'warning';
+}
+
+/**
+ * Transient UI state: what is being renamed, open menus and dialogs, the search bar, settings,
+ * the command palette, the layout dialog and the toast.
+ */
 interface UiState {
   renamingTabId: TabId | null;
   renamingGroupId: GroupId | null;
@@ -38,6 +53,12 @@ interface UiState {
   searchRequest: number;
   /** The settings screen (Ctrl+,) and its section; null when closed. */
   settings: SettingsSection | null;
+  /** The command palette (Ctrl+Shift+P). */
+  palette: boolean;
+  layoutDialog: LayoutDialogState | null;
+  toast: Toast | null;
+  /** The settings screen is recording a shortcut: no shortcut runs meanwhile. */
+  capturingKeys: boolean;
   startRenameTab: (id: TabId) => void;
   startRenameGroup: (id: GroupId) => void;
   stopRename: () => void;
@@ -49,7 +70,16 @@ interface UiState {
   closeSearch: () => void;
   openSettings: (section?: SettingsSection) => void;
   closeSettings: () => void;
+  openPalette: () => void;
+  closePalette: () => void;
+  openLayoutDialog: (dialog: LayoutDialogState) => void;
+  closeLayoutDialog: () => void;
+  showToast: (message: string, kind?: Toast['kind']) => void;
+  dismissToast: () => void;
+  setCapturingKeys: (capturing: boolean) => void;
 }
+
+let toasts = 0;
 
 export const useUi = create<UiState>()((set) => ({
   renamingTabId: null,
@@ -59,6 +89,10 @@ export const useUi = create<UiState>()((set) => ({
   searchOpen: false,
   searchRequest: 0,
   settings: null,
+  palette: false,
+  layoutDialog: null,
+  toast: null,
+  capturingKeys: false,
   startRenameTab: (id) => set({ renamingTabId: id, renamingGroupId: null, menu: null }),
   startRenameGroup: (id) => set({ renamingGroupId: id, renamingTabId: null, menu: null }),
   stopRename: () => set({ renamingTabId: null, renamingGroupId: null }),
@@ -69,5 +103,12 @@ export const useUi = create<UiState>()((set) => ({
   openSearch: () => set((s) => ({ searchOpen: true, searchRequest: s.searchRequest + 1 })),
   closeSearch: () => set({ searchOpen: false }),
   openSettings: (section) => set((s) => ({ settings: section ?? s.settings ?? 'appearance', menu: null })),
-  closeSettings: () => set({ settings: null }),
+  closeSettings: () => set({ settings: null, capturingKeys: false }),
+  openPalette: () => set({ palette: true, menu: null }),
+  closePalette: () => set({ palette: false }),
+  openLayoutDialog: (layoutDialog) => set({ layoutDialog, palette: false, menu: null }),
+  closeLayoutDialog: () => set({ layoutDialog: null }),
+  showToast: (message, kind = 'info') => set({ toast: { id: ++toasts, message, kind } }),
+  dismissToast: () => set({ toast: null }),
+  setCapturingKeys: (capturingKeys) => set({ capturingKeys }),
 }));

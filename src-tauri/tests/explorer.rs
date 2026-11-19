@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use terminal_lib::explorer::{EntryKind, GitFileStatus, Hidden, git_status, list_dir};
-use terminal_lib::pty::find_on_path;
+use brisa_lib::explorer::{EntryKind, GitFileStatus, Hidden, git_status, list_dir};
+use brisa_lib::pty::find_on_path;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("terminal explorer {tag} {}", std::process::id()));

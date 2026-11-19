@@ -51,7 +51,7 @@ export class TerminalSession {
       item.kind === 'text' ? writeToSession(id, item.data) : sendShiftEnter(id).then(() => undefined),
     {
       onRetry: (item, error) =>
-        console.warn('[terminal] reintentando una escritura a la sesión', item.kind, String(error)),
+        console.warn('[brisa] reintentando una escritura a la sesión', item.kind, String(error)),
     },
   );
   /** Distinguishes the current session from earlier ones after a restart. */

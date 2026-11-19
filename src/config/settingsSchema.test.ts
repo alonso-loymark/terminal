@@ -100,3 +100,13 @@ test('the JSON Schema documents every setting and suggests names', () => {
   assert.match(JSON.stringify(schema.properties.profiles), /"pwsh"/);
   assert.doesNotMatch(JSON.stringify(schema), /undefined/);
 });
+
+test('a section left empty by going back to the defaults is removed, unless it has a comment', () => {
+  const on = editText(NEW_FILE, [settingEdit(['explorer', 'visible'], false, true)]);
+  assert.match(on, /"visible": false/);
+  assert.equal(editText(on, [settingEdit(['explorer', 'visible'], true, true)]), NEW_FILE);
+  const keys = editText(NEW_FILE, [[['keybindings', 'tab.new'], ['ctrl+shift+n']]]);
+  assert.equal(editText(keys, [[['keybindings', 'tab.new'], undefined]]), NEW_FILE);
+  const commented = '{\n  // mi explorador\n  "explorer": { "visible": false }\n}\n';
+  assert.match(editText(commented, [settingEdit(['explorer', 'visible'], true, true)]), /\/\/ mi explorador/);
+});
