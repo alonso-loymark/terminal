@@ -31,7 +31,7 @@ export interface ConfirmState {
   target: CloseTarget;
 }
 
-export type SettingsSection = 'appearance' | 'themes' | 'profiles' | 'terminal' | 'explorer' | 'agents' | 'keybindings' | 'session';
+export type SettingsSection = 'appearance' | 'themes' | 'profiles' | 'terminal' | 'explorer' | 'agents' | 'ai' | 'keybindings' | 'session';
 
 /** Saving the active tab, or the whole window, as a named layout. */
 export interface LayoutDialogState {

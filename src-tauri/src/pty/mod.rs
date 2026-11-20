@@ -4,8 +4,9 @@
 mod agents;
 mod error;
 #[cfg(windows)]
-mod job;
+pub(crate) mod job;
 mod manager;
+mod nested;
 mod platform;
 #[cfg(windows)]
 mod procs;
@@ -17,6 +18,7 @@ mod wsl;
 pub use agents::ShiftEnterTarget;
 pub use error::PtyError;
 pub use manager::{PtyManager, SessionId};
+pub use nested::{NESTED_SESSION_VARS, is_nested_session_var};
 pub use platform::{PtyBackend, backend};
 pub use session::{FLUSH_INTERVAL, MAX_BATCH_BYTES, SessionEvents, SpawnOptions};
 pub use shell::{

@@ -1,3 +1,5 @@
+pub mod ai;
+mod ai_commands;
 mod commands;
 pub mod explorer;
 mod explorer_commands;
@@ -11,6 +13,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::window::{Color, Effect, EffectsBuilder};
 use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+use crate::ai::{AiConfig, AiManager, Endpoint};
 use crate::explorer::WatchManager;
 use crate::notifications::NotificationState;
 use crate::pty::PtyManager;
@@ -50,10 +53,38 @@ fn create_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The AI layer's fixed settings. Dev builds take overrides from the environment so the e2e can
+/// point it at its fakes (a fake `claude`, a local fake API, a throwaway credential): release
+/// builds ignore them.
+fn ai_config() -> AiConfig {
+    let dev = |name: &str| {
+        if cfg!(debug_assertions) {
+            std::env::var(name).ok().filter(|v| !v.is_empty())
+        } else {
+            None
+        }
+    };
+    AiConfig {
+        work_dir: std::env::temp_dir().join("brisa-ai"),
+        credential_target: dev("BRISA_CREDENTIAL_TARGET")
+            .unwrap_or_else(|| AiConfig::CREDENTIAL_TARGET.to_owned()),
+        api: dev("BRISA_ANTHROPIC_BASE_URL")
+            .and_then(|url| Endpoint::parse(&url))
+            .unwrap_or_else(|| Endpoint {
+                secure: true,
+                host: "api.anthropic.com".to_owned(),
+                port: 443,
+                base_path: String::new(),
+            }),
+        claude_override: dev("BRISA_CLAUDE_PATH").map(std::path::PathBuf::from),
+    }
+}
+
 pub fn run() -> tauri::Result<()> {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PtyManager::new())
+        .manage(AiManager::new(ai_config()))
         .manage(WatchManager::new())
         .manage(NotificationState::default())
         .setup(|app| create_main_window(app))
@@ -91,6 +122,13 @@ pub fn run() -> tauri::Result<()> {
             settings_commands::config_open,
             settings_commands::read_theme_file,
             settings_commands::set_window_look,
+            ai_commands::ai_configure,
+            ai_commands::ai_query,
+            ai_commands::ai_cancel,
+            ai_commands::ai_status,
+            ai_commands::ai_set_api_key,
+            ai_commands::ai_delete_api_key,
+            ai_commands::ai_scrub_env,
         ])
         .on_page_load(|webview, payload| {
             #[cfg(debug_assertions)]
@@ -109,6 +147,9 @@ pub fn run() -> tauri::Result<()> {
                 webview
                     .state::<WatchManager>()
                     .stop_owned_by(webview.label());
+                webview
+                    .state::<AiManager>()
+                    .cancel_owned_by(webview.label());
             }
         })
         .on_window_event(|window, event| {
@@ -123,6 +164,7 @@ pub fn run() -> tauri::Result<()> {
             if let WindowEvent::Destroyed = event {
                 window.state::<PtyManager>().close_owned_by(window.label());
                 window.state::<WatchManager>().stop_owned_by(window.label());
+                window.state::<AiManager>().cancel_owned_by(window.label());
             }
         })
         .build(tauri::generate_context!())?;
@@ -135,6 +177,7 @@ pub fn run() -> tauri::Result<()> {
         if let RunEvent::Exit = event {
             app.state::<PtyManager>().shutdown();
             app.state::<WatchManager>().shutdown();
+            app.state::<AiManager>().shutdown();
         }
     });
     Ok(())

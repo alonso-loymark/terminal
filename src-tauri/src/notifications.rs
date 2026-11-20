@@ -96,12 +96,17 @@ pub async fn notify(
     tag: String,
 ) -> Result<(), String> {
     if let Some(log) = std::env::var_os(LOG_VAR).filter(|v| !v.is_empty()) {
-        let line = serde_json::json!({ "title": title, "body": body, "tag": tag });
+        // One write per line: formatting a Value straight into the file writes it token by
+        // token, and the e2e could read half a line.
+        let line = format!(
+            "{}\n",
+            serde_json::json!({ "title": title, "body": body, "tag": tag })
+        );
         return std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(PathBuf::from(log))
-            .and_then(|mut file| writeln!(file, "{line}"))
+            .and_then(|mut file| file.write_all(line.as_bytes()))
             .map_err(|e| e.to_string());
     }
     tauri::async_runtime::spawn_blocking(move || show(&app, &title, &body, &tag))

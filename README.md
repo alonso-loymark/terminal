@@ -30,6 +30,13 @@ TypeScript y xterm.js sobre ConPTY.
   esperando tu respuesta, terminado) y notificaciones de Windows cuando un panel que no está a
   la vista pide atención (BEL, OSC 9, OSC 777); el clic trae ese panel al frente. Preset
   "multi-agente aquí" con un git worktree por panel, que se limpia al cerrar. Todo local.
+- IA (desactivable con `"ai.enabled": false`): "Explicar / arreglar" en los comandos que
+  fallaron, lenguaje natural a comando (`Ctrl+I`) y un chat corto sobre la terminal
+  (`Ctrl+Shift+I`). Usa Claude Code (`claude -p`, con tu suscripción, sin herramientas ni
+  acceso a archivos) o la API de Anthropic (la API key queda en el Administrador de credenciales
+  de Windows). Antes de enviar nada oculta tokens, API keys, contraseñas, connection strings y
+  archivos .env; "Ver qué se envía" muestra exactamente qué sale; ningún comando sugerido se
+  ejecuta solo y los destructivos se marcan.
 - Renderizado con WebGL (fallback DOM), búsqueda, links clickeables, copiar/pegar estilo Windows
   Terminal (o menú contextual) y zoom.
 

@@ -1,6 +1,7 @@
 // Tab and pane operations that involve more than state: asking before closing busy tabs or
 // panes, closing the window with the last tab, focusing the terminal afterwards.
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { useAi } from '../store/ai';
 import { useExplorer } from '../store/explorer';
 import { useUi, type CloseTarget } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
@@ -38,7 +39,9 @@ function focusNow(): boolean {
     ui.palette ||
     ui.layoutDialog ||
     ui.multiAgent ||
-    useExplorer.getState().editing
+    useExplorer.getState().editing ||
+    useAi.getState().bar ||
+    useAi.getState().preview
   ) {
     return true;
   }

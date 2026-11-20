@@ -8,6 +8,7 @@
 // e2e/fake-agent.mjs. Never type unless the shell prompt is idle (`run` enforces it).
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,7 +29,7 @@ const STARTED = Date.now();
  * stages, to close a phase (CLAUDE.md, "Regla de fases").
  */
 const SMOKE = process.argv.includes('--smoke');
-const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'keybindings', 'session', 'blocks', 'close'];
+const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'keybindings', 'session', 'blocks', 'ai', 'close'];
 const only = SMOKE ? SMOKE_STAGES : process.argv[2]?.split(',').filter(Boolean);
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'brisa-e2e-'));
 const CONFIG_DIR = path.join(WORK, 'config');
@@ -36,6 +37,72 @@ const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json');
 /** Native notifications go here during the suite (never to the user's screen). */
 const NOTIFY_LOG = path.join(WORK, 'notifications.jsonl');
 fs.mkdirSync(ARTIFACTS, { recursive: true });
+
+// ---------------------------------------------------------------- AI fakes (Fase 7B)
+// No test reaches a real claude or the real Anthropic API. The app's claude is the fake agent
+// in print mode through a .cmd (like an npm install), given by BRISA_CLAUDE_PATH at launch, so
+// even before settings load nothing else can run; the API is a local fake server; the API key
+// goes to a throwaway Credential Manager entry, deleted at the end.
+const FAKE_CLAUDE_CMD = path.join(WORK, 'fake-claude.cmd');
+const FAKE_CLAUDE_LOG = path.join(WORK, 'fake-claude.jsonl');
+const FAKE_CLAUDE_STATE = path.join(WORK, 'fake-claude-state.json');
+const E2E_CREDENTIAL = `Brisa/e2e-${process.pid}-${Date.now()}`;
+// Built from pieces: no key-shaped literal in the repository.
+const E2E_API_KEY = ['sk-', 'ant-', 'api03-', 'e2e-', 'k'.repeat(24), 'Q7Zx'].join('');
+fs.writeFileSync(FAKE_CLAUDE_CMD, `@echo off\r\n"${process.execPath}" "${FAKE_AGENT}" print %*\r\n`);
+fs.writeFileSync(FAKE_CLAUDE_STATE, JSON.stringify({ loggedIn: true }));
+const fakeClaudeRuns = () =>
+  fs.existsSync(FAKE_CLAUDE_LOG)
+    ? fs
+        .readFileSync(FAKE_CLAUDE_LOG, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+    : [];
+/** Requests the fake Messages API received. */
+const apiRequests = [];
+const FENCE = '```';
+const fakeApi = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (chunk) => (body += chunk));
+  req.on('end', async () => {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      // recorded as null
+    }
+    apiRequests.push({ method: req.method, url: req.url, headers: req.headers, body: parsed });
+    if (req.headers['x-api-key'] !== E2E_API_KEY) {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const text = `Respuesta de la API falsa.\n\n${FENCE}powershell\nGet-Date\n${FENCE}`;
+    const event = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+    event('message_start', { type: 'message_start', message: { model: parsed?.model } });
+    event('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
+    for (let i = 0; i < text.length; i += 5) {
+      event('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: text.slice(i, i + 5) } });
+      await sleep(5);
+    }
+    event('content_block_stop', { type: 'content_block_stop', index: 0 });
+    event('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' } });
+    event('message_stop', { type: 'message_stop' });
+    res.end();
+  });
+});
+await new Promise((resolve) => fakeApi.listen(0, '127.0.0.1', resolve));
+const FAKE_API_URL = `http://127.0.0.1:${fakeApi.address().port}`;
+/** The throwaway credential, as Windows lists it (cmdkey prints the target twice when it exists). */
+const credentialStored = () => {
+  try {
+    return execFileSync('cmdkey', [`/list:${E2E_CREDENTIAL}`], { encoding: 'utf8' }).split(E2E_CREDENTIAL).length - 1 >= 2;
+  } catch {
+    return false;
+  }
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
@@ -104,6 +171,15 @@ async function launch() {
     // A throwaway settings.json: the suite never touches the user's own configuration.
     env.BRISA_CONFIG_DIR = CONFIG_DIR;
     env.BRISA_NOTIFY_LOG = NOTIFY_LOG;
+    env.BRISA_CLAUDE_PATH = FAKE_CLAUDE_CMD;
+    env.FAKE_CLAUDE_LOG = FAKE_CLAUDE_LOG;
+    env.FAKE_CLAUDE_STATE = FAKE_CLAUDE_STATE;
+    env.BRISA_ANTHROPIC_BASE_URL = FAKE_API_URL;
+    env.BRISA_CREDENTIAL_TARGET = E2E_CREDENTIAL;
+    // As if Brisa were started from inside a Claude Code session: the app must keep these
+    // away from its shells and from claude -p (checked in the "ai" stage).
+    env.CLAUDECODE = '1';
+    env.CLAUDE_CODE_ENTRYPOINT = 'e2e';
     const logName = launches === 1 ? 'tauri-dev.log' : `tauri-dev-${launches}.log`;
     const logFd = fs.openSync(path.join(ARTIFACTS, logName), 'w');
     dev = spawn('npm run tauri dev', { cwd: ROOT, env, shell: true, stdio: ['ignore', logFd, logFd] });
@@ -319,6 +395,7 @@ async function isolateAfterFailure() {
     ui.closePalette();
     ui.closeLayoutDialog();
     ui.closeSettings();
+    ui.dismissToast();
     const s = window.__workspace.getState();
     const fresh = s.newTab({ cwd: null });
     s.closeTabs(s.tabOrder.filter((id) => id !== fresh));
@@ -374,6 +451,9 @@ async function ptyMatches(id) {
 /** Starts from a single fresh tab in the home folder (closing the rest, without dialogs). */
 async function freshTab() {
   await page.evaluate(() => {
+    // A toast left by the previous stage covers part of the terminal (it took the pointer away
+    // from the block under it: the "hovered mark goes missing" seen in blocks).
+    window.__ui.getState().dismissToast();
     const s = window.__workspace.getState();
     const fresh = s.newTab({ cwd: null });
     s.closeTabs(s.tabOrder.filter((id) => id !== fresh));
@@ -688,6 +768,11 @@ const textPosition = (id, needle) =>
     { id, needle },
   );
 
+/** Closes the AI panel if open. */
+async function closeAiPanel() {
+  await page.evaluate(() => window.__ai.setState({ panelOpen: false, bar: null, preview: null }));
+}
+
 // ---------------------------------------------------------------- keybindings, palette, session, layouts
 const SESSION_FILE = path.join(CONFIG_DIR, 'session.json');
 const LAYOUTS_FILE = path.join(CONFIG_DIR, 'layouts.json');
@@ -759,7 +844,14 @@ const notificationsLogged = () =>
         .readFileSync(NOTIFY_LOG, 'utf8')
         .split('\n')
         .filter(Boolean)
-        .map((line) => JSON.parse(line))
+        // A line still being written is read next time.
+        .flatMap((line) => {
+          try {
+            return [JSON.parse(line)];
+          } catch {
+            return [];
+          }
+        })
     : [];
 
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
@@ -2952,18 +3044,43 @@ const stages = {
     const at = await textPosition(id, 'uno-bloque');
     await page.mouse.move(at.x, at.y);
     check('al pasar el mouse sobre un bloque aparece su marca', await waitUntil(async () => (await blockMarks(id, '[data-hover]')) === 1, 3000));
+    // Seen now and then: the hovered mark goes missing. Record what the pane's host sees (mouse
+    // events, gutter redraws) to tell why if it happens again.
+    await page.evaluate((sel) => {
+      const host = document.querySelector(sel);
+      const gutter = host?.querySelector('.block-gutter');
+      if (!host || !gutter || window.__hoverLog) return;
+      const log = (window.__hoverLog = []);
+      const t0 = performance.now();
+      const add = (s) => {
+        log.push(`${Math.round(performance.now() - t0)} ${s}`);
+        if (log.length > 60) log.shift();
+      };
+      host.addEventListener('mousemove', (e) => add(`move y=${Math.round(e.clientY)} target=${String(e.target.className).slice(0, 24)}`), true);
+      host.addEventListener('mouseleave', (e) => add(`leave related=${String(e.relatedTarget?.className ?? null).slice(0, 24)}`), true);
+      new MutationObserver(() => add(`draw hover=${gutter.querySelectorAll('[data-hover]').length} explain=${gutter.querySelectorAll('.block-explain').length}`)).observe(gutter, { childList: true });
+    }, paneSel(id));
     const blockMenu = async () => {
-      const box = await page.locator(`${paneSel(id)} .block-mark[data-hover]`).boundingBox({ timeout: 3000 }).catch(() => null);
+      let error = null;
+      const box = await page
+        .locator(`${paneSel(id)} .block-mark[data-hover]`)
+        .boundingBox({ timeout: 3000 })
+        .catch((e) => ((error = e), null));
       if (!box) {
-        const marks = await page.$$eval(`${paneSel(id)} .block-mark`, (els) => els.map((e) => `${e.dataset.blockId}:${e.dataset.status}:${e.style.top}`));
-        throw new Error(`sin marca bajo el mouse; marcas ${marks.join(' ')}; ${await paneText(id, 14)}`);
+        const marks = await page.$$eval(`${paneSel(id)} .block-mark`, (els) => els.map((e) => `${e.dataset.blockId}:${e.dataset.status}:${e.style.top}:${'hover' in e.dataset}`));
+        const log = await page.evaluate(() => (window.__hoverLog ?? []).slice(-25).join(' | '));
+        throw new Error(`sin marca bajo el mouse (${String(error?.message ?? error).split('\n')[0]}); marcas ${marks.join(' ')}; registro: ${log}; ${await paneText(id, 14)}`);
       }
       await page.mouse.click(box.x + box.width / 2, box.y + 2);
       await page.waitForSelector('[role="menu"] [data-action="copy-command"]', { timeout: 3000 });
     };
     await blockMenu();
     const actions = await page.$$eval('[role="menu"] [data-action]', (els) => els.map((e) => e.dataset.action));
-    check('menú del bloque: copiar comando, salida, ambos y volver a ejecutar', ['copy-command', 'copy-output', 'copy-both', 'rerun'].every((x) => actions.includes(x)) && !actions.includes('explain-block'), actions.join(','));
+    check(
+      'menú del bloque: copiar comando, salida, ambos, volver a ejecutar y agregar al chat de IA (explicar, solo si falló)',
+      ['copy-command', 'copy-output', 'copy-both', 'rerun', 'ai-attach'].every((x) => actions.includes(x)) && !actions.includes('explain-block'),
+      actions.join(','),
+    );
     await page.click('[role="menu"] [data-action="copy-output"]');
     check('copiar salida', await waitUntil(async () => (await getClipboard()) === 'uno-bloque', 3000), await getClipboard());
     await page.mouse.move(at.x, at.y + 1);
@@ -2985,7 +3102,7 @@ const stages = {
     await page.mouse.move(failedAt.x, failedAt.y);
     await waitUntil(async () => (await blockMarks(id, '[data-hover][data-status="error"]')) === 1, 3000);
     const explain = await page.$eval(`${paneSel(id)} .block-explain`, (el) => el.hidden).catch(() => null);
-    check('"Explicar / arreglar" está preparado en los que fallaron, pero oculto', explain === true, String(explain));
+    check('"Explicar / arreglar" aparece sobre los que fallaron (IA activada)', explain === false, String(explain));
     await blockMenu();
     await page.click('[role="menu"] [data-action="rerun"]');
     await sleep(1200);
@@ -3001,7 +3118,8 @@ const stages = {
     const s1 = await page.evaluate((p) => window.__selectedBlock(p), id);
     await page.keyboard.press('Control+ArrowUp');
     const s2 = await page.evaluate((p) => window.__selectedBlock(p), id);
-    const band = await page.$(`${paneSel(id)} .block-selection`);
+    // Drawn on the next frame (Chromium slows frames down while the window is covered).
+    const band = await waitUntil(async () => !!(await page.$(`${paneSel(id)} .block-selection`)), 1500);
     await page.keyboard.press('Control+ArrowDown');
     const s3 = await page.evaluate((p) => window.__selectedBlock(p), id);
     await page.keyboard.press('Control+ArrowDown');
@@ -3052,6 +3170,8 @@ const stages = {
     if (!(await ownSettings())) return skip('agents', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
     await freshTab();
     await writeSettings({ agents: { idleSeconds: 2 } });
+    // Earlier stages may leave legitimate notifications (an agent that finished in a hidden pane).
+    const notifiedBefore = notificationsLogged().length;
     const agentTab = (await wsState()).active;
     const id = await activePane();
     await run(`& '${agentExe('claude')}' '${FAKE_AGENT}'`, { waitPrompt: false });
@@ -3071,7 +3191,7 @@ const stages = {
     check('trabajando mientras produce salida: en la tab y en el panel', working === 'working' && tabWorking === 'agent-working' && badge === 'Claude Code · trabajando' && (await agentState()) === 'working', `${working} ${tabWorking} ${badge}`);
     const waited = await waitUntil(async () => (await agentState()) === 'waiting', 8000);
     check('sin salida por agents.idleSeconds: espera tu respuesta', waited && (await tabAttr(agentTab, 'data-indicator')) === 'agent-waiting');
-    check('con el panel a la vista no hay notificación', notificationsLogged().length === 0, JSON.stringify(notificationsLogged()));
+    check('con el panel a la vista no hay notificación', notificationsLogged().length === notifiedBefore, JSON.stringify(notificationsLogged().slice(notifiedBefore)));
 
     // Hidden (another tab): bell, OSC 9 and OSC 777 become native notifications.
     const fromHidden = async (line, label) => {
@@ -3238,6 +3358,290 @@ const stages = {
     const two = await activeTab();
     const cwd2 = await paneCwd(leaves(two.layout)[1]);
     check('fuera de un repositorio: sin worktrees; 2 paneles en la carpeta actual', disabled && cwd2 === trickyDir(...PARENT_DIR), `${disabled} ${cwd2}`);
+    await resetSettings();
+    await freshTab();
+  },
+
+  async ai() {
+    if (!(await ownSettings())) return skip('ai', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await resetSettings();
+    fs.writeFileSync(FAKE_CLAUDE_STATE, JSON.stringify({ loggedIn: true }));
+    const id = await activePane();
+    const home = await homeDir();
+    const panel = '.ai-panel';
+    const lastTurn = `${panel} .ai-turn:last-of-type`;
+    const turnDone = async (status = 'done') => waitUntil(async () => (await page.getAttribute(lastTurn, 'data-status').catch(() => null)) === status, 15000);
+    const lastRun = () => fakeClaudeRuns().at(-1);
+
+    // The app was started with Claude Code's session variables (as if launched from inside it):
+    // its shells do not see them.
+    check('las shells no heredan las variables de una sesión de Claude Code (CLAUDECODE)', (await value("'[' + $env:CLAUDECODE + $env:CLAUDE_CODE_ENTRYPOINT + ']'", 'cc')) === '[]');
+
+    // A failed command whose command line and output carry secrets.
+    const ghRest = 'Zx81Kd93LmXp02Qw7Er4Ty6Ui8Op1As3Df5G';
+    const ghToken = `ghp_${ghRest}`;
+    const password = 'Sup3r$ecreto-2026';
+    await runIdle(`Write-Output ('deploy token ' + 'ghp_' + '${ghRest}'); Write-Output 'Server=db.acme.local;User Id=sa;Password=${password};'; cmd /c exit 4`);
+    const failed = (await paneBlocksOf(id)).at(-1);
+    check('un comando fallido con secretos en el comando y en la salida', failed?.exitCode === 4 && failed.output.includes(ghToken) && failed.command.includes(password), JSON.stringify(failed));
+
+    // "Explicar / arreglar": over the failed block, on hover.
+    const runsBefore = fakeClaudeRuns().length;
+    // A short output line of the block (the long command line may wrap in the middle of a word).
+    const at = await textPosition(id, 'User Id=sa');
+    await page.mouse.move(at.x, at.y);
+    const button = await page.waitForSelector(`${paneSel(id)} .block-explain`, { timeout: 3000 }).catch(() => null);
+    check('"Explicar / arreglar" aparece al pasar el mouse por el bloque fallido', !!button);
+    await page.click(`${paneSel(id)} .block-explain`);
+    await page.waitForSelector(panel, { timeout: 3000 });
+    const sawThinking = await page.waitForSelector(`${lastTurn} [data-part="thinking"]`, { timeout: 3000 }).then(() => true).catch(() => false);
+    const done = await turnDone();
+    const answer = await page.textContent(`${lastTurn} .ai-answer`).catch(() => '');
+    check('la respuesta llega en streaming al panel lateral (indicador mientras piensa)', done && answer.includes('Explicación falsa: el comando terminó con código 4'), `thinking=${sawThinking} ${answer.slice(0, 120)}`);
+    check('... con un comando sugerido y su botón "Insertar"', !!(await page.$(`${lastTurn} .ai-command [data-action="ai-insert"]`)));
+
+    // What the fake claude received: isolated, clean, redacted.
+    const run1 = lastRun();
+    check('claude -p corrió una vez, con los flags de aislamiento (el falso los exige)', fakeClaudeRuns().length === runsBefore + 1 && run1?.args.includes('--safe-mode') && run1.args.includes('--tools'), JSON.stringify(run1?.args));
+    check('... sin las variables de la sesión anidada y sin memoria automática', run1?.env.CLAUDECODE === null && run1.env.CLAUDE_CODE_ENTRYPOINT === null && run1.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === '1', JSON.stringify(run1?.env));
+    check('... en una carpeta vacía propia (sin el proyecto ni su CLAUDE.md)', run1?.cwd.toLowerCase() === path.join(os.tmpdir(), 'brisa-ai').toLowerCase(), run1?.cwd);
+    const prompt1 = run1?.prompt ?? '';
+    check(
+      'el contexto lleva comando, salida, código, carpeta, shell y rama',
+      prompt1.includes('Código de salida: 4') && prompt1.includes(`- Carpeta: ${home}`) && prompt1.includes('- Shell: ') && prompt1.includes('- Rama de git: ') && prompt1.includes('deploy token'),
+      prompt1.slice(0, 300),
+    );
+    check('los secretos no salen: token de GitHub y contraseña redactados', !prompt1.includes(ghToken) && !prompt1.includes(password) && prompt1.includes('[REDACTED:github_token]') && prompt1.includes('[REDACTED:connection_string]'), prompt1);
+
+    // "Ver qué se envía": exactly that.
+    await page.click(`${lastTurn} [data-action="ai-show-context"]`);
+    await page.waitForSelector('.ai-context', { timeout: 3000 });
+    const shown = await page.$eval('.ai-context [data-part="message"]', (el) => el.textContent);
+    const shownSystem = await page.$eval('.ai-context [data-part="system"]', (el) => el.textContent);
+    const summary = await page.$eval('.ai-context [data-part="redactions"]', (el) => el.textContent);
+    check('"Ver qué se envía" muestra exactamente lo enviado (ya redactado)', shown === prompt1 && shownSystem === run1?.system, `${shown?.length} vs ${prompt1.length}`);
+    check('... y qué secretos se ocultaron', summary.includes('token de GitHub') && summary.includes('connection string'), summary);
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => !(await page.$('.ai-context')), 2000);
+
+    // "Insertar": at the prompt, never run.
+    const blocksBefore = (await paneBlocksOf(id)).length;
+    await page.click(`${lastTurn} .ai-command [data-action="ai-insert"]`);
+    const inserted = await waitUntil(async () => (await cursorLine()).endsWith('Write-Output arreglado'), 3000);
+    await sleep(700);
+    check('"Insertar" escribe el comando en el prompt SIN ejecutarlo', inserted && (await paneBlocksOf(id)).length === blocksBefore && !(await paneState(id)).commandRunning, await cursorLine());
+    await page.keyboard.press('Escape');
+    await lineMatches(/^PS [A-Za-z]:\\.*>$/);
+
+    // The smoke run stops here (Ctrl+I shares this pipeline; the full run covers it).
+    if (SMOKE) {
+      await closeAiPanel();
+      await resetSettings();
+      return;
+    }
+
+    // Ctrl+I: natural language → a command for this shell.
+    await page.keyboard.press('Control+i');
+    const bar = await page.waitForSelector('.ai-bar input', { timeout: 3000 }).catch(() => null);
+    check('Ctrl+I abre el pedido en lenguaje natural sobre el panel, con el foco', !!bar && (await page.evaluate(() => document.activeElement?.closest('.ai-bar') !== null)));
+    await page.keyboard.type('matá el proceso que usa el puerto 3000');
+    await page.keyboard.press('Enter');
+    const proposed = await page.waitForSelector('[data-part="proposed-command"]', { timeout: 15000 }).then((el) => el.textContent()).catch(() => null);
+    const explanation = await page.textContent('.ai-bar [data-part="explanation"]').catch(() => null);
+    const run2 = lastRun();
+    check('propone un comando de PowerShell con una línea de explicación', proposed?.includes('Get-NetTCPConnection -LocalPort 3000') && explanation?.includes('puerto 3000') && !(await page.$('.ai-bar [data-part="destructive-warning"]')), `${proposed} | ${explanation}`);
+    check('... pidiendo un comando (esfuerzo bajo) para la shell del panel', run2?.system.includes('Convertís un pedido') && run2.args.includes('low') && run2.prompt.includes('Pedido: matá el proceso que usa el puerto 3000') && run2.prompt.includes('(powershell)'), run2?.prompt.slice(0, 200));
+    const blocksBefore2 = (await paneBlocksOf(id)).length;
+    await page.keyboard.press('Enter');
+    const inserted2 = await waitUntil(async () => !(await page.$('.ai-bar')) && (await cursorLine()).includes('Get-NetTCPConnection -LocalPort 3000'), 3000);
+    await sleep(700);
+    check('Enter lo inserta sin ejecutar y cierra la barra', inserted2 && (await paneBlocksOf(id)).length === blocksBefore2 && (await terminalFocused()), await cursorLine());
+    await page.keyboard.press('Escape');
+    await lineMatches(/^PS [A-Za-z]:\\.*>$/);
+
+
+    // Destructive: the warning is visible before inserting; Escape inserts nothing.
+    await page.keyboard.press('Control+i');
+    await page.waitForSelector('.ai-bar input', { timeout: 3000 });
+    await page.keyboard.type('FAKE_DESTRUCTIVE borrá la carpeta build');
+    await page.keyboard.press('Enter');
+    const warning = await page.waitForSelector('.ai-bar [data-part="destructive-warning"]', { timeout: 15000 }).then((el) => el.textContent()).catch(() => null);
+    const danger = await page.getAttribute('.ai-bar [data-action="ai-insert"]', 'data-danger').catch(() => null);
+    check('un comando destructivo se marca con una advertencia antes de insertarlo', warning?.includes('borrado recursivo') && danger === '', warning);
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => !(await page.$('.ai-bar')), 2000);
+    check('Escape cancela: no se inserta nada', /^PS [A-Za-z]:\\.*>$/.test(await cursorLine()) && (await terminalFocused()), await cursorLine());
+
+    // Cancelling a query in flight kills claude.
+    await page.keyboard.press('Control+i');
+    await page.waitForSelector('.ai-bar input', { timeout: 3000 });
+    await page.keyboard.type('FAKE_SLOW pensalo despacio');
+    await page.keyboard.press('Enter');
+    const thinking = await page.waitForSelector('.ai-bar [data-part="thinking"]', { timeout: 3000 }).then(() => true).catch(() => false);
+    await waitUntil(() => lastRun()?.prompt.includes('FAKE_SLOW'), 10000);
+    const slowPid = lastRun()?.pid;
+    await sleep(500);
+    const wasAlive = !!slowPid && alive(slowPid);
+    await page.keyboard.press('Escape');
+    const cancelledUi = await waitUntil(async () => (await page.getAttribute('.ai-bar', 'data-state').catch(() => null)) === 'cancelled', 3000);
+    const killed = await waitUntil(() => !alive(slowPid), 4000);
+    check('Escape cancela la consulta en curso y mata a claude (sin bloquear la UI)', thinking && wasAlive && cancelledUi && killed, `thinking=${thinking} vivo=${wasAlive} ui=${cancelledUi} muerto=${killed}`);
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => !(await page.$('.ai-bar')), 2000);
+
+    // Ctrl+Shift+I toggles the panel (it is also WebView2's DevTools key in dev builds: the
+    // app takes it first, so DevTools must not open).
+    await closeAiPanel();
+    await waitUntil(terminalFocused, 3000);
+    const devtools = async () => ((await cdp.send('Target.getTargets')).targetInfos ?? []).filter((t) => t.url.startsWith('devtools://')).length;
+    const devtoolsBefore = await devtools();
+    await page.keyboard.press('Control+Shift+I');
+    const panelOpened = await waitUntil(async () => !!(await page.$(panel)), 2000);
+    const inputFocused = await waitUntil(() => page.evaluate(() => document.activeElement?.matches('.ai-input textarea') ?? false), 2000);
+    await page.keyboard.press('Control+Shift+I');
+    const panelClosed = await waitUntil(async () => !(await page.$(panel)), 2000);
+    await sleep(500);
+    check('Ctrl+Shift+I abre (con el foco en la pregunta) y cierra el panel de IA, sin abrir DevTools', panelOpened && inputFocused && panelClosed && (await devtools()) === devtoolsBefore && (await terminalFocused()), `${panelOpened} ${inputFocused} ${panelClosed} devtools ${devtoolsBefore}→${await devtools()}`);
+    await page.keyboard.press('Control+Shift+I');
+    await page.waitForSelector(panel, { timeout: 3000 });
+
+    // The chat, with a block added as context.
+    const chatInput = `${panel} .ai-input textarea`;
+    const turnCount = () => page.$$eval(`${panel} .ai-turn`, (els) => els.length);
+    /** Sends from the chat input and waits for the new turn to show up. */
+    const send = async (question = '') => {
+      const before = await turnCount();
+      await page.click(chatInput);
+      if (question) await page.keyboard.type(question);
+      await page.keyboard.press('Enter');
+      await waitUntil(async () => (await turnCount()) > before, 3000);
+    };
+    const ask = (question) => send(question);
+    const blockMenuOf = async (needle) => {
+      // Opening the panel resized the terminal (ConPTY redraws): find the text once it settles.
+      let hovered = false;
+      for (let i = 0; i < 4 && !hovered; i++) {
+        await sleep(400);
+        const pos = await textPosition(id, needle);
+        if (!pos) continue;
+        await page.mouse.move(pos.x, pos.y);
+        hovered = await waitUntil(async () => (await blockMarks(id, '[data-hover]')) === 1, 1500);
+      }
+      if (!hovered) throw new Error(`sin hover sobre «${needle}»: ${await paneText(id, 14)}`);
+      const box = await page.locator(`${paneSel(id)} .block-mark[data-hover]`).boundingBox({ timeout: 3000 });
+      await page.mouse.click(box.x + box.width / 2, box.y + 2);
+      await page.waitForSelector('[role="menu"] [data-action="ai-attach"]', { timeout: 3000 });
+    };
+    await blockMenuOf('User Id=sa');
+    await page.click('[role="menu"] [data-action="ai-attach"]');
+    const chip = await page.waitForSelector(`${panel} .ai-chip`, { timeout: 3000 }).then(() => true).catch(() => false);
+    check('"Agregar al chat" desde el menú del bloque lo suma como contexto', chip);
+    await page.click(`${panel} .ai-input textarea`);
+    await page.keyboard.type('¿por qué falló?');
+    await page.click(`${panel} [data-action="ai-preview"]`);
+    await page.waitForSelector('.ai-context', { timeout: 3000 });
+    const draft = await page.$eval('.ai-context [data-part="message"]', (el) => el.textContent);
+    check('"Ver qué se envía" antes de enviar: el bloque adjunto, ya redactado', draft.includes('### Bloque 1') && draft.includes('Pregunta: ¿por qué falló?') && !draft.includes(ghToken) && !draft.includes(password), draft.slice(0, 200));
+    await page.keyboard.press('Escape');
+    await send();
+    await turnDone();
+    const chatAnswer = await page.textContent(`${lastTurn} .ai-answer`).catch(() => '');
+    check('el chat responde con el bloque como contexto (y se vacían los adjuntos)', chatAnswer.includes('bloques adjuntos: 1') && !(await page.$(`${panel} .ai-chip`)), chatAnswer.slice(0, 80));
+    await ask('¿y cómo lo evito?');
+    await turnDone();
+    const followUp = lastRun()?.prompt ?? '';
+    check('... una pregunta siguiente lleva la conversación corta', followUp.includes('--- Tu respuesta anterior ---') && followUp.includes('Nueva pregunta del usuario') && followUp.includes('Pregunta: ¿y cómo lo evito?'), followUp.slice(-200));
+
+    // Without a login: a clear message on how to fix it.
+    fs.writeFileSync(FAKE_CLAUDE_STATE, JSON.stringify({ loggedIn: false }));
+    await ask('hola');
+    await turnDone('error');
+    const authError = await page.textContent(`${lastTurn} .ai-error`).catch(() => '');
+    check('sin sesión iniciada: "no tiene una sesión iniciada" y cómo resolverlo', authError.includes('no tiene una sesión iniciada') && authError.includes('/login'), authError);
+    fs.writeFileSync(FAKE_CLAUDE_STATE, JSON.stringify({ loggedIn: true }));
+
+    // claude not installed (a path that does not exist): never another claude.
+    const runsBeforeMissing = fakeClaudeRuns().length;
+    await writeSettings({ ai: { claudePath: 'C:\\no\\existe\\claude.exe' } });
+    await ask('¿estás?');
+    await turnDone('error');
+    const missing = await page.textContent(`${lastTurn} .ai-error`).catch(() => '');
+    check('claude no instalado: mensaje claro con cómo instalarlo', missing.includes('No se encontró Claude Code') && missing.includes('install.ps1') && fakeClaudeRuns().length === runsBeforeMissing, missing);
+
+    // The Anthropic API: the key goes to the Credential Manager, never to settings.json.
+    await writeSettings({ ai: { provider: 'anthropic-api' } });
+    await openSettings('ai');
+    await page.waitForSelector('[data-part="api-key-state"]', { timeout: 3000 });
+    const noKey = await page.textContent('[data-part="api-key-state"]');
+    await page.fill('[data-part="api-key"] input[type="password"]', E2E_API_KEY);
+    await page.click('[data-action="ai-save-key"]');
+    const saved = await waitUntil(async () => (await page.textContent('[data-part="api-key-state"]')).includes(E2E_API_KEY.slice(-4)), 5000);
+    check('la API key se guarda en el Administrador de credenciales de Windows', noKey.includes('No hay') && saved && credentialStored());
+    check('... y nunca en settings.json', !settingsOnDisk().includes(E2E_API_KEY) && !(await page.content()).includes(E2E_API_KEY));
+    await closeSettings();
+    const apiBefore = apiRequests.length;
+    await ask('pregunta por la API');
+    await turnDone();
+    const apiAnswer = await page.textContent(`${lastTurn} .ai-answer`).catch(() => '');
+    const req = apiRequests.at(-1);
+    check('anthropic-api: la respuesta llega en streaming', apiAnswer.includes('Respuesta de la API falsa') && apiRequests.length === apiBefore + 1, apiAnswer.slice(0, 80));
+    check(
+      '... con la key del Administrador de credenciales y el contexto redactado',
+      req?.headers['x-api-key'] === E2E_API_KEY && req.body?.model === 'claude-opus-5-5' && req.body.stream === true && JSON.stringify(req.body.messages).includes('pregunta por la API') && !JSON.stringify(req.body).includes(ghToken),
+      JSON.stringify({ model: req?.body?.model, n: req?.body?.messages?.length }),
+    );
+    await openSettings('ai');
+    await page.click('[data-action="ai-delete-key"]');
+    const deleted = await waitUntil(async () => (await page.textContent('[data-part="api-key-state"]')).includes('No hay') && !credentialStored(), 5000);
+    check('borrar la key la saca del Administrador de credenciales', deleted);
+    await closeSettings();
+    await ask('sin clave');
+    await turnDone('error');
+    check('... y sin key, un mensaje claro', (await page.textContent(`${lastTurn} .ai-error`).catch(() => '')).includes('No hay una API key'));
+
+    // Esc in the terminal cancels the pane's query (the shell is idle at its prompt).
+    await writeSettings({ ai: { provider: 'claude-cli' } });
+    await clickPane(id);
+    await runIdle('cmd /c "echo FAKE_SLOW & exit 5"');
+    const slowAt = await textPosition(id, 'exit 5');
+    await page.mouse.move(slowAt.x, slowAt.y);
+    await page.waitForSelector(`${paneSel(id)} .block-explain`, { timeout: 3000 });
+    await page.click(`${paneSel(id)} .block-explain`);
+    await waitUntil(() => lastRun()?.prompt.includes('exit 5'), 10000);
+    const explainPid = lastRun()?.pid;
+    await waitUntil(terminalFocused, 3000);
+    await sleep(400);
+    const running = ['thinking', 'streaming'].includes(await page.getAttribute(lastTurn, 'data-status')) && alive(explainPid);
+    await page.keyboard.press('Escape');
+    const escCancelled = await turnDone('cancelled');
+    const escKilled = await waitUntil(() => !alive(explainPid), 4000);
+    check('Esc en la terminal cancela la consulta del panel (con la shell libre) y mata a claude', running && escCancelled && escKilled && (await cursorLine()).match(/^PS [A-Za-z]:\\.*>$/) !== null, `${running} ${escCancelled} ${escKilled}`);
+
+    // The command bar belongs to its pane: switching tabs closes it and the keyboard follows.
+    const otherTab = await openTab();
+    await page.keyboard.press('Control+i');
+    await page.waitForSelector('.ai-bar input', { timeout: 3000 });
+    await page.keyboard.press('Control+Tab');
+    const barGone = await waitUntil(async () => !(await page.$('.ai-bar')) && (await terminalFocused()) && (await activePane()) === id, 3000);
+    check('cambiar de tab con la barra Ctrl+I abierta la cierra y el teclado va a la otra terminal', barGone, await focusReport());
+    await page.evaluate((tabId) => window.__workspace.getState().closeTabs([tabId]), otherTab);
+    await waitUntil(async () => (await activePane()) === id && (await terminalFocused()), 3000);
+
+    // ai.enabled: false → nothing launches, nothing goes out.
+    await writeSettings({ ai: { enabled: false } });
+    const closed = await waitUntil(async () => !(await page.$(panel)), 3000);
+    await page.mouse.move(at.x, at.y + 1);
+    await sleep(400);
+    const noExplain = !(await page.$(`${paneSel(id)} .block-explain`));
+    const runsOff = fakeClaudeRuns().length;
+    const apiOff = apiRequests.length;
+    const refused = await page
+      .evaluate(() => window.__aiQuery({ provider: 'claude-cli', model: 'opus', system: 'x', messages: [{ role: 'user', content: 'hola' }], effort: null, maxTokens: 1000, claudePath: null }).then(() => 'ok', (e) => e?.code ?? String(e)))
+      .catch((e) => String(e));
+    await sleep(500);
+    check('ai.enabled: false → sin panel ni "Explicar", y el backend no lanza nada', closed && noExplain && refused === 'disabled' && fakeClaudeRuns().length === runsOff && apiRequests.length === apiOff, `${closed} ${noExplain} ${refused}`);
+    await page.mouse.move(5, 5);
     await resetSettings();
     await freshTab();
   },
@@ -3453,6 +3857,12 @@ try {
     } catch {
       // already gone
     }
+  }
+  fakeApi.close();
+  try {
+    execFileSync('cmdkey', [`/delete:${E2E_CREDENTIAL}`], { stdio: 'ignore' });
+  } catch {
+    // never created, or already deleted by the "ai" stage
   }
   fs.rmSync(WORK, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }

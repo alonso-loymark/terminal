@@ -6,6 +6,7 @@ import { useSettings } from '../store/settings';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { Layout, PaneId, SplitId } from '../store/workspaceModel';
+import { aiEnabled, cancelPaneQuery, explainLastFailed, toggleCommandBar, togglePanel } from './aiActions';
 import { navigateBlocks } from './blockActions';
 import { readText } from './clipboard';
 import { copySelection } from './keybindings';
@@ -141,6 +142,21 @@ const RUNNERS: Record<ActionId, Runner> = {
   'agents.multiAgent': () => {
     const pane = ws().panes[selectActivePaneId(ws()) ?? ''];
     useUi.getState().openMultiAgent(pane?.cwd ?? pane?.startCwd ?? null);
+  },
+  // With AI off the keys go on to the program (Ctrl+I is Tab there).
+  'ai.command': (ctx) => {
+    if (!aiEnabled()) return 'pass';
+    toggleCommandBar(ctx.paneId);
+  },
+  'ai.panel': () => {
+    if (!aiEnabled()) return 'pass';
+    togglePanel();
+  },
+  // Esc goes on to the program unless it cancels this pane's query at an idle prompt.
+  'ai.cancel': (ctx) => (cancelPaneQuery(ctx.paneId ?? selectActivePaneId(ws())) ? 'handled' : 'pass'),
+  'ai.explainLast': () => {
+    if (aiEnabled()) explainLastFailed();
+    else useUi.getState().showToast('La IA está desactivada (Configuración → IA).', 'info');
   },
   'explorer.toggle': () => useExplorer.getState().toggleVisible(),
   'explorer.toggleHidden': () => useExplorer.getState().toggleHidden(),

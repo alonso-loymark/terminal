@@ -74,6 +74,10 @@ impl Session {
         if let Some(cwd) = &options.cwd {
             command.cwd(cwd);
         }
+        // Another agent session's variables would make `claude` refuse to start in the shell.
+        for var in super::NESTED_SESSION_VARS {
+            command.env_remove(var);
+        }
         for (key, value) in &options.env {
             command.env(key, value);
         }

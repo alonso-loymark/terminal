@@ -1,5 +1,6 @@
 // Dev builds only (loaded with a dynamic import from main.tsx): handles for debugging and for
 // the end-to-end checks in e2e/run.mjs.
+import { useAi } from '../store/ai';
 import { useExplorer } from '../store/explorer';
 import { useGit } from '../store/git';
 import { useLayouts } from '../store/layouts';
@@ -9,6 +10,7 @@ import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
+import { aiQuery } from './aiApi';
 import { blockText, paneBlocks, selectedBlock } from './blockActions';
 import { worktreeList } from './fsApi';
 import { pendingInitialCommands } from './initialCommands';
@@ -36,6 +38,9 @@ export function installDevHooks(): void {
   window.__selectedBlock = selectedBlock;
   window.__notificationClick = debugNotificationClick;
   window.__worktrees = worktreeList;
+  window.__ai = useAi;
+  // Straight to the backend, past the UI: with ai.enabled false it must refuse.
+  window.__aiQuery = (payload) => aiQuery(payload, () => {});
   window.__paneLigatures = (paneId) => {
     const term = getPane(paneId)?.term;
     return !!term && hasLigatures(term);

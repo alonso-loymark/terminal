@@ -9,12 +9,6 @@
 import type { IDisposable, IMarker, Terminal } from '@xterm/xterm';
 import { unescapeOsc633 } from './shellIntegration';
 
-/**
- * Fase 7B connects "Explicar / arreglar" (failed blocks) with the AI. Until then the button and
- * the menu item exist but stay hidden.
- */
-export const BLOCK_AI_ACTIONS = false;
-
 /** Blocks kept per terminal (older ones are dropped; the scrollback drops them anyway). */
 const MAX_BLOCKS = 1000;
 
@@ -28,7 +22,7 @@ export interface BlockInfo {
   finishedAt: number;
 }
 
-/** A block with its output: the context Fase 7B gives the AI. */
+/** A block with its output: the context the AI gets (lib/aiActions.ts). */
 export interface BlockText extends BlockInfo {
   output: string;
 }
@@ -60,9 +54,25 @@ export interface BlockTrackerOptions {
   enabled: () => boolean;
   /** The mark of a block was clicked: open its menu there. */
   onMenu: (blockId: number, x: number, y: number) => void;
+  /** AI on (`ai.enabled`): failed blocks offer "Explicar / arreglar" on hover. */
+  aiEnabled: () => boolean;
+  onExplain: (blockId: number) => void;
 }
 
 let nextId = 0;
+
+/** One block as the gutter draws it. */
+interface GutterItem {
+  id: number;
+  exitCode: number | null;
+  failed: boolean;
+  hovered: boolean;
+  selected: boolean;
+  explain: boolean;
+  y: number;
+  height: number;
+  left: number;
+}
 
 export class BlockTracker implements IDisposable {
   readonly #term: Terminal;
@@ -76,6 +86,8 @@ export class BlockTracker implements IDisposable {
   #agent = false;
   readonly #gutter: HTMLDivElement;
   #frame = 0;
+  /** What the gutter shows now (skip redrawing the same thing). */
+  #drawn = '';
 
   constructor(term: Terminal, options: BlockTrackerOptions) {
     this.#term = term;
@@ -116,7 +128,11 @@ export class BlockTracker implements IDisposable {
         }
       }),
     );
-    const onMove = (event: MouseEvent) => this.#hover(this.#blockAtY(event.clientY));
+    const onMove = (event: MouseEvent) => {
+      // On the block's own buttons the block stays hovered (they may overlap other rows).
+      if (event.target instanceof Element && event.target.closest('.block-explain')) return;
+      this.#hover(this.#blockAtY(event.clientY));
+    };
     const onLeave = () => this.#hover(null);
     options.host.addEventListener('mousemove', onMove);
     options.host.addEventListener('mouseleave', onLeave);
@@ -347,24 +363,43 @@ export class BlockTracker implements IDisposable {
   #draw(): void {
     const gutter = this.#gutter;
     const geometry = this.#shown() ? this.#geometry() : null;
+    const items: GutterItem[] = [];
+    if (geometry) {
+      const { top, left, cell } = geometry;
+      const first = this.#term.buffer.active.viewportY;
+      const lastRow = first + this.#term.rows - 1;
+      for (const block of this.#alive()) {
+        const [start, last] = this.#span(block);
+        if (last < first || start > lastRow) continue;
+        const failed = block.exitCode !== null && block.exitCode !== 0;
+        const hovered = block.id === this.#hovered;
+        const selected = block.id === this.#selected;
+        if (!failed && !hovered && !selected) continue;
+        const from = Math.max(start, first);
+        const to = Math.min(last, lastRow);
+        items.push({
+          id: block.id,
+          exitCode: block.exitCode,
+          failed,
+          hovered,
+          selected,
+          explain: failed && hovered && this.#options.aiEnabled(),
+          y: top + (from - first) * cell,
+          height: (to - from + 1) * cell,
+          left,
+        });
+      }
+    }
+    // xterm renders on every echoed key and cursor blink: touch the DOM only when what the
+    // gutter shows changed. Replacing a mark between mousedown and mouseup loses the click.
+    const signature = JSON.stringify([!!geometry, items]);
+    if (signature === this.#drawn) return;
+    this.#drawn = signature;
     gutter.replaceChildren();
     gutter.hidden = !geometry;
-    if (!geometry) return;
-    const { top, left, cell } = geometry;
-    const first = this.#term.buffer.active.viewportY;
-    const lastRow = first + this.#term.rows - 1;
-    for (const block of this.#alive()) {
-      const [start, last] = this.#span(block);
-      if (last < first || start > lastRow) continue;
-      const failed = block.exitCode !== null && block.exitCode !== 0;
-      const hovered = block.id === this.#hovered;
-      const selected = block.id === this.#selected;
-      if (!failed && !hovered && !selected) continue;
-      const from = Math.max(start, first);
-      const to = Math.min(last, lastRow);
-      const y = top + (from - first) * cell;
-      const height = (to - from + 1) * cell;
-      if (selected) {
+    for (const item of items) {
+      const { y, height, left } = item;
+      if (item.selected) {
         const band = document.createElement('div');
         band.className = 'block-selection';
         band.style.cssText = `top:${y}px;height:${height}px;left:${left}px`;
@@ -373,28 +408,35 @@ export class BlockTracker implements IDisposable {
       const mark = document.createElement('button');
       mark.type = 'button';
       mark.className = 'block-mark';
-      mark.dataset.blockId = String(block.id);
-      mark.dataset.status = failed ? 'error' : 'ok';
-      if (hovered) mark.dataset.hover = '';
-      if (selected) mark.dataset.selected = '';
-      mark.title = failed ? `Falló (código ${block.exitCode}): acciones del bloque` : 'Acciones del bloque';
+      mark.dataset.blockId = String(item.id);
+      mark.dataset.status = item.failed ? 'error' : 'ok';
+      if (item.hovered) mark.dataset.hover = '';
+      if (item.selected) mark.dataset.selected = '';
+      mark.title = item.failed ? `Falló (código ${item.exitCode}): acciones del bloque` : 'Acciones del bloque';
       mark.setAttribute('aria-label', mark.title);
       mark.style.cssText = `top:${y}px;height:${height}px;left:${Math.max(0, left - 7)}px`;
       mark.addEventListener('pointerdown', (event) => event.preventDefault());
       mark.addEventListener('click', (event) => {
         event.stopPropagation();
-        this.#options.onMenu(block.id, event.clientX, event.clientY);
+        this.#options.onMenu(item.id, event.clientX, event.clientY);
       });
       gutter.appendChild(mark);
-      if (failed && hovered) {
-        // Fase 7B: explain / fix with the AI. Prepared, hidden until then.
+      if (item.explain) {
+        // Explain / fix with the AI (the answer streams in the AI panel).
         const explain = document.createElement('button');
         explain.type = 'button';
         explain.className = 'block-explain';
         explain.dataset.action = 'explain-block';
+        explain.dataset.blockId = String(item.id);
         explain.textContent = 'Explicar / arreglar';
-        explain.hidden = !BLOCK_AI_ACTIONS;
-        explain.style.cssText = `top:${y}px;left:${left}px`;
+        explain.title = 'Explicar por qué falló y proponer un arreglo (IA)';
+        // On the block's first row, at the right: hovering it keeps this block hovered.
+        explain.style.cssText = `top:${y}px;right:16px`;
+        explain.addEventListener('pointerdown', (event) => event.preventDefault());
+        explain.addEventListener('click', (event) => {
+          event.stopPropagation();
+          this.#options.onExplain(item.id);
+        });
         gutter.appendChild(explain);
       }
     }

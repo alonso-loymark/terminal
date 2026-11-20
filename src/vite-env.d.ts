@@ -35,5 +35,9 @@ declare global {
     __worktrees?: () => Promise<import('./lib/fsApi').Worktree[]>;
     /** Whether a pane's terminal has the ligature joiner registered. */
     __paneLigatures?: (paneId: string) => boolean;
+    /** The AI panel, conversations, command bar and "what is sent" dialog (store/ai.ts). */
+    __ai?: typeof import('./store/ai').useAi;
+    /** ai_query without the UI (the backend's own ai.enabled gate). */
+    __aiQuery?: (payload: import('./lib/aiApi').AiPayload) => Promise<number>;
   }
 }

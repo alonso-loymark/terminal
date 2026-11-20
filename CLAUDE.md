@@ -19,6 +19,7 @@ ejecutable `brisa.exe`, identificador `dev.brisa.desktop`.)
 | Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
 | Configuración | `settings.json` y `layouts.json` (JSONC) leídos con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`); `session.json` (JSON que escribe la app) |
 | Notificaciones | **windows** 0.62 (WinRT `ToastNotification`), solo con las features de toasts; ya estaba en el árbol por WebView2 (`webview2-com`), misma versión. Win32 sigue con `windows-sys` |
+| IA | El CLI de Claude Code (`claude -p`, la suscripción del usuario) o la API de Anthropic por **WinHTTP** (`windows-sys`, feature `Win32_Networking_WinHttp`: parte de Windows, sin crate HTTP); la API key en el **Administrador de credenciales** (`Win32_Security_Credentials`). Sin dependencias nuevas |
 
 ## Arquitectura
 
@@ -99,6 +100,9 @@ Reglas de la arquitectura:
   `notify` y, solo en desarrollo, `debug_notification_click` / `debug_notification_history`.
   Worktrees (`explorer_commands.rs` → `worktree.rs`): `worktree_create`, `worktree_status`,
   `worktree_remove` (solo los que Brisa registró) y `worktree_list`.
+  IA (`ai_commands.rs` → `ai/`): `ai_configure` (el frontend avisa `ai.enabled`; apagada, el
+  resto se niega a lanzar nada), `ai_query` (canal por consulta: deltas, después `done` o
+  `error`), `ai_cancel`, `ai_status`, `ai_set_api_key` / `ai_delete_api_key` y `ai_scrub_env`.
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -366,7 +370,8 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   efecto), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
   `explorer` (arranque, ancho, ocultos, clic en carpeta), `profiles` (`default`, `list`),
   `session` (`restore`), `blocks` (`enabled`), `agents` (`enabled`, `idleSeconds`, `commands`),
-  `notifications` (`enabled`, `bell`, `agents`) y `keybindings` (ver "Atajos configurables").
+  `notifications` (`enabled`, `bell`, `agents`), `ai` (`enabled`, `provider`, `model`,
+  `claudePath`, `redact`; ver "IA") y `keybindings` (ver "Atajos configurables").
 - **Errores**: JSON roto o un valor inválido (tipo, rango, opción) → el archivo entero se
   rechaza y **sigue la última configuración válida**; la barra de estado muestra
   "⚠ settings.json" (tooltip con línea/ruta y motivo; clic → la configuración, que lista los
@@ -381,7 +386,7 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 - **Migración**: `localStorage['terminal.explorer']` (Fase 5) pasa a `explorer.*` la primera vez
   (solo lo que el archivo no define) y se borra; si el archivo tiene errores, se conserva.
 - **Pantalla** (`Ctrl+,`, `SettingsPage.tsx` + `components/settings/`): Apariencia, Temas,
-  Perfiles, Terminal, Explorador, Bloques y agentes, Atajos y Sesión y layouts; números y textos se guardan con
+  Perfiles, Terminal, Explorador, Bloques y agentes, IA, Atajos y Sesión y layouts; números y textos se guardan con
   Enter o al salir del campo; "Abrir settings.json en VS Code" (si no está, la app asociada a
   .json). Mientras está abierta, los atajos de la app no corren (salvo el de la configuración) y
   nadie le roba el foco; Esc la cierra.
@@ -554,7 +559,10 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   bloque se descarta y, mientras corre, no se muestra ninguna marca.
 - **Margen**: un `div.block-gutter` sobre el panel (en el padding, a la izquierda del texto);
   posiciones calculadas desde `.xterm-screen` y redibujado en un `requestAnimationFrame` ante
-  render, scroll, cambio de buffer, hover o selección. Los que fallaron (código ≠ 0) tienen
+  render, scroll, cambio de buffer, hover o selección, pero el DOM solo se toca si cambió lo que
+  se ve (firma de marcas, posiciones, hover, selección y botón): xterm renderiza con cada tecla y
+  con el parpadeo del cursor, y una marca reemplazada entre mousedown y mouseup perdía el clic
+  (también lo veía la e2e: `boundingBox` de un elemento recién reemplazado). Los que fallaron (código ≠ 0) tienen
   siempre una marca roja; al pasar el mouse sobre cualquiera aparece su marca, y un clic abre el
   menú (`MenuState` `block`): copiar comando, salida o ambos (el portapapeles de Windows guarda
   CRLF) y volver a ejecutar (con la shell libre y el prompt vacío se ejecuta; si hay algo
@@ -563,11 +571,13 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   seleccionan el bloque anterior / siguiente (banda resaltada) y lo traen a la vista; pasado el
   último, vuelve al prompt. Sin bloques, con un programa de pantalla completa o un agente, la
   tecla sigue al programa. Tipear quita la selección.
-- **Fase 7B**: `BLOCK_AI_ACTIONS = false` en `lib/blocks.ts`. Con `true` aparecen el botón
-  "Explicar / arreglar" sobre la marca roja (hoy existe con `hidden`) y el ítem del menú.
-  **API para la 7B** (`lib/blockActions.ts`): `paneBlocks(paneId)` → `BlockInfo[]` (id,
-  comando, código, cwd, inicio y fin) y `blockText(paneId, blockId)` → lo mismo más `output`
-  (filas envueltas unidas, sin la línea del comando); `selectedBlock(paneId)` da el seleccionado.
+- **IA** (con `ai.enabled`): al pasar el mouse por un bloque fallido aparece "Explicar /
+  arreglar" a la derecha de su primera fila (sobre el botón el bloque sigue con hover: antes
+  estaba encima de la fila y desaparecía al ir a buscarlo); el menú del bloque suma "Explicar /
+  arreglar (IA)" (si falló) y "Agregar al chat de IA". Ver "IA". **API de bloques**
+  (`lib/blockActions.ts`): `paneBlocks(paneId)` → `BlockInfo[]` (id, comando, código, cwd,
+  inicio y fin) y `blockText(paneId, blockId)` → lo mismo más `output` (filas envueltas unidas,
+  sin la línea del comando); `selectedBlock(paneId)` da el seleccionado.
 - `blocks.enabled: false` apaga marcas, menú y navegación.
 
 ## Agentes de IA y notificaciones
@@ -643,6 +653,118 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   session.json, nunca en layouts). Los conservados se listan (y se borran) en Configuración →
   Bloques y agentes.
 
+## IA
+
+Tres funciones, todas con `ai.enabled` (un solo interruptor: apagado, Brisa no hace ninguna
+llamada de red ni lanza `claude`; además el backend se niega por su cuenta, ver `ai_configure`):
+"Explicar / arreglar" en los bloques fallidos, lenguaje natural a comando (`Ctrl+I`) y un chat
+corto sobre la terminal (`Ctrl+Shift+I`). No reemplaza a Claude Code: sin herramientas ni
+acceso a archivos, solo el contexto que Brisa arma (y muestra).
+
+- **Proveedores** (`ai.provider`, backend en `src-tauri/src/ai/`, sin Tauri, tests en
+  `tests/ai.rs`):
+  - `claude-cli` (por defecto, `ai/claude_cli.rs`): `claude -p` con la sesión del usuario
+    (suscripción, sin API key). Flags verificados contra la documentación
+    (code.claude.com/docs/en/cli-reference, /headless, /memory) y contra `claude` 2.1.329:
+    `-p --output-format stream-json --verbose --include-partial-messages` (deltas de texto),
+    `--tools ""` (ninguna herramienta), `--permission-mode dontAsk`, `--safe-mode` (sin
+    CLAUDE.md de usuario ni de proyecto, hooks, MCP, skills ni plugins; la autenticación sigue
+    igual: `--bare` **no sirve**, ignora el login OAuth), `--setting-sources user`,
+    `--strict-mcp-config`, `--disable-slash-commands`, `--no-session-persistence`,
+    `--max-turns 1`, `--model <ai.model>`, `--effort low` en lenguaje natural a comando y
+    `--system-prompt-file`. Corre en una carpeta vacía propia (`%TEMP%\brisa-ai`), el prompt va
+    por stdin, sin ventana, dentro de un Job Object (cancelar o cerrar la app mata el árbol,
+    también `claude.cmd` → node de una instalación npm) y sin las variables de sesión anidada
+    (ver abajo) + `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. El modelo se valida (letras, dígitos,
+    `.-_[]`, nunca algo que empiece con `-`). Sin sesión, el CLI responde un `assistant` con
+    `"error": "authentication_failed"` y un `result` con `is_error: true` (capturado con un
+    `CLAUDE_CONFIG_DIR` vacío: sin credenciales no hay llamada, no consume nada).
+    `claude` se busca en `ai.claudePath` (si está y no existe, error: nunca se cae a otro), en
+    el PATH (`claude.exe`, `claude.cmd`), `~\.local\bin` y `%APPDATA%\npm`. Una opción
+    desconocida (CLI viejo) → "actualizalo con `claude update`".
+  - `anthropic-api` (`ai/anthropic.rs` + `ai/http.rs`): Messages API con streaming SSE por
+    WinHTTP síncrono en el hilo de la consulta (proxy del sistema; cancelar cierra el handle
+    desde otro hilo, que WinHTTP admite). `anthropic-version: 2026-10-21`, alias → ids
+    (`opus` → `claude-opus-5-5`…), `output_config.effort` donde el modelo lo admite y
+    `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) en Opus 5.5 / Sonnet 5.5 /
+    Fable; `stop_reason: "refusal"` se informa. La API key vive en el **Administrador de
+    credenciales** (`ai/credentials.rs`, credencial genérica `Brisa/anthropic-api-key`, de este
+    usuario en este equipo): se escribe desde Configuración → IA, se lee en Rust al consultar y
+    el frontend solo ve sus últimos 4 caracteres.
+  - Una consulta = un hilo `ai-<id>`; eventos `delta`/`status` y exactamente un `done` o
+    `error` (códigos: `not-installed`, `outdated`, `auth`, `limit`, `no-key`, `api-key`,
+    `rate-limit`, `overloaded`, `network`, `refusal`, `timeout`, `cancelled`, `invalid`,
+    `failed`, `disabled`). Cada código tiene título y cómo resolverlo (`lib/aiErrors.ts`).
+    Pertenecen a la página como las sesiones: recargar o cerrar las cancela.
+- **Variables de sesión anidada** (`pty/nested.rs`): `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
+  `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_SESSION_ID`… (la lista es la que Claude Code 2.1.x pone
+  en sus hijos) se quitan de las shells **y** de `claude -p`. Hasta la 7B solo lo hacía la e2e
+  al lanzar la app (las shells las heredaban). Las de configuración (`CLAUDE_CONFIG_DIR`,
+  `CLAUDE_CODE_GIT_BASH_PATH`, `CLAUDE_CODE_USE_BEDROCK`…) quedan.
+- **Redacción de secretos** (`lib/redact.ts`, puro, con tests de formatos reales): todo lo que
+  se envía pasa por ahí, pieza por pieza (comando, salida, carpeta, rama, pregunta). Formatos
+  conocidos (GitHub `ghp_`/`gho_`/`github_pat_`, Anthropic `sk-ant-…`, OpenAI `sk-proj-…` y
+  legacy, AWS, Google, Slack, Stripe, npm, PyPI, Hugging Face, SendGrid, JWT, claves privadas,
+  webhooks, firmas SAS), credenciales por contexto (connection strings de SQL Server / Azure /
+  ODBC, URLs con usuario:clave, `NOMBRE=valor` / `"clave": "valor"` / `$env:X = '…'` / `set`
+  / `export` con un nombre sensible, flags `--password`/`-Token`, `ConvertTo-SecureString`,
+  `Authorization`/`Bearer`), **archivos .env enteros** (el comando lee un `.env*`, o la salida
+  tiene forma de .env: se ocultan todos los valores) y listados de entorno (`gci env:`, `set`,
+  `env`, `printenv`: los valores de nombres sensibles), y cadenas largas con forma de token por
+  entropía (no SHAs de git, UUIDs, digests ni identificadores CamelCase). Queda
+  `[REDACTED:<tipo>]`. Después Rust reemplaza los valores de las variables de entorno sensibles
+  del proceso (`ai/secrets.rs`: `echo $env:MI_TOKEN` no tiene formato conocido; los valores
+  nunca salen de Rust). `ai.redact`: patrones propios (regex) para nombres de clientes, dominios
+  internos…
+- **Contexto** (`lib/aiPrompts.ts`, puro): sistema, shell (perfil y tipo), carpeta, rama de git
+  (del store o `git_status` con 2,5 s de tope), comando, código de salida y la salida recortada
+  (`trimOutput`: líneas repetidas colapsadas; si es larga, el principio, el final y las líneas con
+  errores del medio, con marcas de lo omitido; tope de caracteres que conserva el final). Las
+  salidas van en un fence más largo que cualquier racha de backticks de adentro.
+- **"Ver qué se envía"** (`AiContextDialog`): el payload exacto (system prompt + mensajes, ya
+  redactados, con el resumen de lo oculto). Antes (botón del chat y de la barra, con el texto
+  escrito) o después (cada respuesta, "Ver qué se envió").
+- **Insertar, nunca ejecutar** (`lib/aiSafety.ts`, puro): `prepareInsert` saca todo carácter de
+  control (ESC, CR, C1: una respuesta no puede meter un Enter ni cerrar un bracketed paste) y no
+  deja saltos de línea salvo que el programa pidió bracketed paste; si no, une las líneas (`; `,
+  ` & ` en cmd, continuaciones `` ` `` `\` `^` y tuberías respetadas). `insertCommand` además se
+  niega con un comando corriendo (OSC 133), un agente o un programa de pantalla completa.
+  `destructiveReasons`: borrados recursivos (rm -r, Remove-Item -Recurse y alias, rd/del /s,
+  comodines, raíz o home), `git reset --hard`, `git clean -f`, `git push --force`/`+rama`/
+  `--delete`, `git branch -D`, `checkout/restore .`, formateos y particiones, `dd of=`,
+  registro (`reg add/delete`, `*-ItemProperty HKLM:`), apagar/reiniciar, `bcdedit`, política de
+  ejecución, permisos masivos, `DROP`/`TRUNCATE`/`DELETE` sin `WHERE`, `docker … prune`,
+  `kubectl delete`, `terraform destroy`, `| iex` y `curl | sh`: advertencia roja visible antes
+  de insertar.
+- **Panel** (`AiPanel.tsx`, a la derecha, ancho arrastrable): una conversación corta por panel
+  de terminal (la del panel activo; se borra al cerrar el panel). "Explicar / arreglar" abre el
+  panel con la respuesta en streaming. Cada bloque de código de una respuesta es una tarjeta con
+  "Insertar" y "Copiar". Adjuntos: "Agregar al chat" desde el menú de un bloque (se copia el
+  bloque al agregarlo); van en la siguiente pregunta. Historial: el primer mensaje y los últimos
+  6 (para el CLI, la conversación escrita en un solo prompt). Esc (en el panel) o "Cancelar"
+  cancela; "Pensando…" mientras no llega texto. **Esc en la terminal** (`ai.cancel`, alcance
+  terminal, `passthrough`) cancela la consulta en curso de ese panel solo si la shell está libre
+  en su prompt según la integración (sin comando, agente ni pantalla completa; en cmd, nunca): si
+  no, la tecla sigue al programa.
+- **Barra** (`AiCommandBar.tsx`, `Ctrl+I` = `ai.command`): sobre el panel activo. Enter propone
+  (esfuerzo bajo; el prompt pide un bloque de código y una línea de explicación, o "No: motivo");
+  Enter otra vez inserta sin ejecutar; cambiar el texto y Enter pide otro; Esc cancela la consulta
+  en curso o cierra. La barra es de su panel: si cambia el panel activo (otra tab, otro panel) se
+  cierra y el teclado va a la terminal nueva. Con `ai.enabled: false` `Ctrl+I` llega al programa
+  (es Tab).
+- **Estado** (`store/ai.ts`): panel, ancho, conversaciones por panel, barra y diálogo. Ids de
+  consulta, cancelaciones y el batching por frame de los deltas en `lib/aiActions.ts`. IPC solo
+  en `lib/aiApi.ts`.
+- **Settings** `ai`: `enabled`, `provider`, `model` (default `opus`), `claudePath`, `redact`.
+  Configuración → IA: además "Verificar Claude Code" (`claude --version` y `claude auth status
+  --json`: local, no le pregunta nada a ningún modelo) y la API key (guardar/borrar).
+- **e2e y tests**: el agente falso tiene modo `print` (`claude -p`: el stream-json real, errores
+  de login/límite/crash/versión vieja, respuesta lenta para cancelar, y un log por corrida con
+  argv, cwd, entorno, system prompt y stdin). La e2e lo usa por un `.cmd` en
+  `BRISA_CLAUDE_PATH`, levanta una API falsa (`BRISA_ANTHROPIC_BASE_URL`) y usa una credencial
+  descartable (`BRISA_CREDENTIAL_TARGET`, borrada al final; verificada con `cmdkey`). Las tres
+  variables solo se leen en builds de desarrollo.
+
 ## Estructura
 
 ```
@@ -662,12 +784,17 @@ src/                        Frontend (solo render + input)
   components/ProfileIcon.tsx   Ícono de un perfil (monogramas incluidos o emoji del usuario)
   components/SettingsPage.tsx  Ctrl+,: navegación, avisos del archivo, abrir settings.json
   components/settings/      Secciones (GeneralSections, ThemesSection, ProfilesSection, AgentsSection,
-                            KeybindingsSection, SessionSection) y Controls
+                            AiSection, KeybindingsSection, SessionSection) y Controls
   components/CommandPalette.tsx  Ctrl+Shift+P: búsqueda difusa, recientes primero, atajos a la derecha
   components/SaveLayoutDialog.tsx  Guardar la tab o la ventana como layout (nombre + comando por panel)
   components/Toast.tsx      Aviso breve abajo (layout guardado, comando inicial que no se escribió)
   components/AgentBadge.tsx Agente del panel y su estado (arriba a la derecha)
   components/MultiAgentDialog.tsx  Preset multi-agente: paneles, agente de cada uno, worktrees
+  components/AiPanel.tsx    Ctrl+Shift+I: chat corto por panel, respuestas de "Explicar / arreglar", adjuntos
+  components/AiCommandBar.tsx  Ctrl+I: lenguaje natural a comando sobre el panel activo (Enter propone / inserta)
+  components/AiAnswer.tsx   Respuesta de la IA: párrafos y tarjetas de comando (Insertar sin ejecutar, aviso destructivo)
+  components/AiErrorBox.tsx Error de una consulta con cómo resolverlo
+  components/AiContextDialog.tsx  "Ver qué se envía": el payload exacto, ya redactado
   config/schema.ts          Mini librería de esquema: valida, defaults, tipos inferidos, JSON Schema
   config/settingsSchema.ts  El esquema de settings.json (+ settingsSchema.test.ts)
   config/keybindings.ts     Acciones, teclas por defecto, parseo, eventos → teclas, conflictos, keybindings (+ test)
@@ -688,9 +815,15 @@ src/                        Frontend (solo render + input)
   lib/paletteItems.ts       Lo que ofrece la paleta: acciones, tabs, paneles, perfiles, temas, layouts
   lib/appActions.ts         Qué hace cada acción (desde su atajo o la paleta)
   lib/blocks.ts             BlockTracker: bloques de comandos (OSC 133), margen, navegación, texto
-  lib/blockActions.ts       Menú de un bloque (copiar, volver a ejecutar) y la API de bloques para la 7B
+  lib/blockActions.ts       Menú de un bloque (copiar, volver a ejecutar) y la API de bloques (contexto de la IA)
   lib/agentMonitor.ts       Agentes por panel (trabajando/esperando/terminado) y notificaciones nativas
   lib/multiAgent.ts         Preset multi-agente, worktrees por panel y su limpieza al cerrar
+  lib/aiApi.ts              Punto de IPC de la IA (consultas con canal, cancelar, estado, API key, entorno)
+  lib/aiActions.ts          Explicar / chat / comando: contexto, redacción, envío en streaming, cancelar, insertar
+  lib/aiPrompts.ts          Prompts, recorte de salidas, historial del chat, parseo de respuestas (puro, + test)
+  lib/aiSafety.ts           Comandos destructivos e inserción sin ejecutar (puro, + test)
+  lib/redact.ts             Redacción de secretos antes de enviar nada (puro, + test con formatos reales)
+  lib/aiErrors.ts           Qué decir ante cada error de la IA y cómo resolverlo
   lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
   lib/ligatures.ts          Ligaduras con un character joiner (+ test)
   lib/explorerModel.ts      Lógica pura del explorador (+ explorerModel.test.ts)
@@ -709,7 +842,7 @@ src/                        Frontend (solo render + input)
   lib/renderer.ts           GpuRenderer: WebGL solo mientras se ve, fallback al DOM, loseContext al ocultar
   lib/paneGeometry.ts       Rectángulos del layout → CSS de panes y divisores (gap, mínimo en px)
   lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui / __settings / __layouts /
-                            __session / __pendingCommands para e2e
+                            __session / __pendingCommands / __ai / __aiQuery para e2e
   store/workspaceModel.ts   Modelo puro de tabs/grupos/panes (+ workspaceModel.test.ts)
   store/workspace.ts        zustand sobre el modelo (ids, acciones; vacío hasta restaurar la sesión)
   store/layoutModel.ts      Formato de sesión y layouts: snapshot, validación, reconstrucción (puro, + test)
@@ -722,6 +855,7 @@ src/                        Frontend (solo render + input)
   store/git.ts              zustand: estado de git por repositorio + refreshGit (un proceso a la vez)
   store/settings.ts         zustand: settings en uso, estado del archivo, avisos, zoom de la sesión
   store/profiles.ts         Perfiles en uso (detectados + settings), memoizados
+  store/ai.ts               zustand: panel de IA, conversaciones por panel, barra Ctrl+I, diálogo "qué se envía"
 src-tauri/
   src/lib.rs                Builder de Tauri, ventana principal (transparente solo si se pide), ciclo de vida
   src/commands.rs           Comandos Tauri finos: validan y delegan en PtyManager
@@ -731,10 +865,16 @@ src-tauri/
   src/settings_commands.rs  Comandos de los archivos de config y del aspecto de la ventana (Mica/Acrylic)
   src/notifications.rs      Toasts de WinRT (AUMID registrado, clic → ventana al frente + panel), log de e2e
   src/worktree.rs           Worktrees del preset multi-agente: crear, estado, borrar (solo los de Brisa)
+  src/ai_commands.rs        Comandos de la IA (configurar, consultar con canal, cancelar, estado, API key)
+  src/ai/                   Capa de IA sin Tauri: manager.rs (hilos, cancelación, dueños), claude_cli.rs
+                            (claude -p aislado en un Job Object), anthropic.rs + http.rs (API por WinHTTP),
+                            credentials.rs (Administrador de credenciales), stream.rs (stream-json y SSE),
+                            secrets.rs (valores de variables de entorno sensibles)
   src/explorer/             list.rs, watch.rs, git.rs, ops.rs (sin Tauri; tests unitarios)
   src/pty/manager.rs        Registro de sesiones (create/write/resize/close/close_owned_by/shutdown)
   src/pty/session.rs        ConPTY + hilos reader/flusher/writer/waiter + batching
   src/pty/job.rs            Job Object: miembros, KILL_ON_JOB_CLOSE, kill verificado (solo Windows)
+  src/pty/nested.rs         Variables de una sesión de Claude Code que no pasan a shells ni a claude -p
   src/pty/teardown.rs       Cierre selectivo: consola muere, apps con ventana sobreviven
   src/pty/agents.rs         Shift+Enter por contexto: detección de agentes de IA y secuencias
   src/pty/procs.rs          Tabla de procesos (Toolhelp), dueños de ventanas, command lines (Windows)
@@ -746,10 +886,12 @@ src-tauri/
   tests/pty.rs              Tests de integración con procesos reales (PowerShell/Git Bash/ConPTY)
   tests/explorer.rs         Listado (.gitignore, ocultos, 5000 archivos) y git real
   tests/worktree.rs         Worktrees con git real (crear, cambios, ramas, solo los de Brisa)
+  tests/ai.rs               IA con el claude falso (.cmd) y una API falsa local: streaming, aislamiento,
+                            errores, cancelación del árbol, credenciales, IA apagada
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
   fake-agent.mjs            Agente de IA falso (claude/codex/gemini según el exe; /work, /bell, /osc9,
-                            /osc777, /after N: ver "Pruebas con agentes")
+                            /osc777, /after N; modo print = claude -p: ver "Pruebas con agentes")
   sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
   recycle.ps1               Verifica que lo borrado por la e2e está en la papelera y lo saca de ahí
@@ -814,6 +956,17 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
   `/osc9 texto`, `/osc777 título|texto` y `/after N <línea>` (lo mismo, N segundos después:
   la prueba mientras tanto oculta el panel). El preset multi-agente de la e2e corre el agente
   falso poniendo `agents.commands` en su settings.json descartable.
+- **IA** (Fase 7B): ninguna prueba lanza `claude -p` real ni llama a la API real de Anthropic.
+  El agente falso tiene modo `print` (`node fake-agent.mjs print <args>`): habla el stream-json
+  de claude 2.1.x (capturado del real), **exige** cada flag de aislamiento (si falta uno,
+  responde un error), simula sin sesión, límite, crash, versión vieja y respuestas lentas
+  (`FAKE_AUTH_ERROR`, `FAKE_LIMIT`, `FAKE_CRASH`, `FAKE_UNKNOWN_OPTION`, `FAKE_SLOW`,
+  `FAKE_DESTRUCTIVE` en el prompt; sesión por `FAKE_CLAUDE_STATE`) y anota cada corrida en
+  `FAKE_CLAUDE_LOG`. La e2e se lo da a la app como su claude desde el arranque
+  (`BRISA_CLAUDE_PATH`, solo dev: ni antes de leer settings.json puede correr otro), la API es
+  un servidor local (`BRISA_ANTHROPIC_BASE_URL`) y la key va a una credencial descartable
+  (`BRISA_CREDENTIAL_TARGET`). `tests/ai.rs` hace lo mismo sin la app. Probar con Claude Code
+  real queda a criterio del usuario, a mano.
 - `run()` en `e2e/run.mjs` se niega a tipear si el cursor no está en un prompt de PowerShell
   libre o si la terminal activa no tiene el foco; `runIdle()`, si la integración no dice que la
   shell está libre (ningún comando corriendo): un fallo nunca debe terminar mandando texto a un
@@ -915,6 +1068,11 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   panel muestran trabajando / esperando / terminado. **A mano**: con el panel en otra tab, una
   notificación de Windows real; el clic trae Brisa al frente con ese panel. "Abrir multi-agente
   aquí" en un repo con worktrees; al cerrar la tab, los limpios se borran y uno con cambios pregunta.
+- [ ] IA (automatizado con el claude falso y la API falsa; **a mano y a criterio del usuario**
+  con Claude Code real o una API key real): un comando que falla → "Explicar / arreglar" →
+  respuesta en el panel e "Insertar" lo escribe sin ejecutar; `Ctrl+I` con "matá el proceso que
+  usa el puerto 3000"; "Ver qué se envía" con un token en la salida (sale `[REDACTED:…]`);
+  Configuración → IA → "Verificar Claude Code"; `ai.enabled: false` → nada de IA.
 - [ ] Primer arranque tras el renombre: la configuración de `%APPDATA%\dev.terminal.desktop`
   aparece en `%APPDATA%\dev.brisa.desktop` (temas importados incluidos).
 
@@ -924,12 +1082,15 @@ Todos los atajos de la tabla (salvo los del mouse y los internos de un widget) s
 **valores por defecto** y se cambian en Configuración → Atajos o en `keybindings` de
 settings.json (ver "Atajos configurables"). Sin atajo por defecto, solo desde la paleta: cerrar
 tab, cerrar las demás, duplicar, quitar del grupo, igualar paneles, seleccionar todo, limpiar,
-ver ocultos, guardar layouts, abrir settings.json / layouts.json, abrir multi-agente aquí.
+ver ocultos, guardar layouts, abrir settings.json / layouts.json, abrir multi-agente aquí, explicar el
+último comando que falló (IA).
 
 | Atajo | Acción |
 |---|---|
 | `Ctrl+Shift+P` | Paleta de comandos (acciones, tabs, paneles, perfiles, temas, layouts) |
 | `Ctrl+,` | Configuración (otra vez o `Esc`: cerrar) |
+| `Ctrl+I` | IA: lenguaje natural a comando sobre el panel activo (`Enter` propone, `Enter` otra vez inserta sin ejecutar, `Esc` cancela) |
+| `Ctrl+Shift+I` | IA: panel de chat (también recibe "Explicar / arreglar"; `Esc` cancela la consulta en curso) |
 | `Ctrl+Shift+T` / botón `+` | Nueva tab con el perfil por defecto (en su carpeta inicial o la del panel activo) |
 | Botón `▾` junto al `+` | Nueva tab con cualquier perfil; abrir y guardar layouts; paleta; Configuración |
 | `Ctrl+B` | Mostrar / ocultar el explorador de archivos |
@@ -983,8 +1144,13 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   (o fue creado con `CREATE_NEW_PROCESS_GROUP`, como hacen muchas herramientas y launchers), todas
   las shells heredaban el flag y `^C` no interrumpía nada. `session.rs` lo limpia antes de cada
   spawn. Verificado: sin ese fix, 0/3 variantes interrumpían `ping -t`; con el fix, 3/3.
-- Si la app se lanza desde dentro de Claude Code, hereda `CLAUDECODE` y otras variables de sesión,
-  y `claude` se niega a arrancar anidado. Lanzar la app desde un entorno limpio.
+- Si la app se lanza desde dentro de Claude Code, hereda `CLAUDECODE` y otras variables de sesión.
+  Desde la 7B la app las quita al lanzar shells y `claude -p` (`pty/nested.rs`; la e2e lanza la app
+  con `CLAUDECODE=1` a propósito para probarlo); antes, `claude` se negaba a arrancar en sus
+  terminales. Si Claude Code agrega variables nuevas de ese tipo, sumarlas a la lista.
+- **`Ctrl+Shift+I` y DevTools**: en builds de desarrollo es también el atajo de DevTools de
+  WebView2. El despacho de atajos lo toma en captura con `preventDefault` y DevTools no se abre
+  (verificado en la e2e contando los targets `devtools://` por CDP).
 - **Versiones Tauri alineadas**: el crate `tauri` y `@tauri-apps/api` deben coincidir en
   major.minor (lo mismo `tauri-plugin-opener` con `@tauri-apps/plugin-opener`). Con edition 2024
   el resolver respeta `rust-version`: si se baja, cargo elige versiones viejas de Tauri en
@@ -1073,6 +1239,17 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   como CRLF; leído de vuelta trae `\r\n` (la e2e lo normaliza).
 - **El margen de bloques se dibuja en el siguiente frame**: una prueba que mira `.block-gutter`
   justo después de un cambio (agente detectado, setting) tiene que esperar un frame.
+- **Un toast tapa la terminal**: la "marca del bloque que no aparece bajo el mouse" (vista en la
+  7A y otra vez en la 7B) era un toast de la etapa anterior (`layouts`, `session`) justo bajo el
+  puntero: el panel recibía `mouseleave` con `relatedTarget = toast`. `freshTab()` y la
+  recuperación tras una falla descartan el toast. La etapa `blocks` guarda un registro de
+  `mousemove`/`mouseleave` y redibujos del margen y lo imprime si la marca vuelve a faltar.
+- **Escribir un `serde_json::Value` directo a un archivo** (`writeln!(file, "{value}")`) lo
+  escribe token por token (cada `write_str` es una escritura sin buffer): el log de
+  notificaciones de la e2e podía leerse a medias. Se serializa a un `String` y se escribe de una.
+- **Líneas largas en la e2e**: `textPosition` busca el texto en una fila; un comando largo puede
+  partirse en el medio de una palabra según el ancho (`exit` en una fila, `4` en la siguiente).
+  Anclar en una línea corta de la salida.
 
 ## Estado
 
@@ -1320,9 +1497,60 @@ entre tabs y paneles), y la tecla igual no llega al programa.
     errores de consola, reabrir (9/9). `brisa.exe` 8,9 → 9,15 MB (WinRT de `windows`); JS
     956 → 981 KB.
   - Visto una vez (smoke, no repetido en 3 corridas siguientes): en `blocks`, la marca del bloque
-    fallido no apareció bajo el mouse; la prueba ahora imprime las marcas y el buffer si vuelve.
+    fallido no apareció bajo el mouse. Explicado en la 7B: un toast de la etapa anterior bajo el
+    puntero (ver Gotchas).
   - **No verificado**: Claude Code, Codex y Gemini reales (regla de pruebas), ni qué secuencia
     manda cada canal de notificación de Claude Code; nombres reales del binario de Codex.
+- **Fase 7B — capa de IA: completa y verificada (2026-11-20).** "Explicar / arreglar" en los
+  bloques fallidos (comando, salida recortada, código, carpeta, shell y rama → respuesta en
+  streaming en un panel lateral, con "Insertar" que escribe el comando sin ejecutarlo), lenguaje
+  natural a comando (`Ctrl+I`, barra sobre el panel activo, para PowerShell / cmd / bash) y un
+  chat corto por panel (`Ctrl+Shift+I`) con bloques agregados desde su menú. Dos proveedores:
+  `claude -p` con la suscripción (sin herramientas, sin permisos, sin CLAUDE.md ni config del
+  proyecto, en una carpeta vacía y un Job Object) y la API de Anthropic (WinHTTP, key en el
+  Administrador de credenciales). Redacción de secretos obligatoria antes de enviar nada, "Ver qué
+  se envía" (antes y después), aviso en comandos destructivos, cancelar con Esc o botón, y todo
+  apagado con `ai.enabled: false` (también en el backend). Sin dependencias nuevas.
+  - Flags de `claude -p` verificados en la documentación y contra `claude` 2.1.329 (`--help`,
+    `auth status --json`, y el error sin sesión capturado con un `CLAUDE_CONFIG_DIR` vacío: sin
+    credenciales no hay llamada a la API).
+  - De paso: las shells ya no heredan `CLAUDECODE` y las demás variables de una sesión de Claude
+    Code (solo la e2e las limpiaba); el botón "Explicar / arreglar" preparado en la 7A estaba
+    encima de la fila y desaparecía al ir a buscarlo (ahora en la fila, con hover estable); el
+    margen de bloques reemplazaba sus elementos en cada render de xterm (clics perdidos); el log
+    de notificaciones de la e2e se escribía token por token.
+  - `npm test`: 116 (21 nuevos: redacción —tokens de GitHub classic/OAuth/fine-grained, keys de
+    Anthropic api03/oat01 y OpenAI proj/legacy, connection strings de SQL Server, Azure Storage,
+    Service Bus, postgres y mongodb, JWT, AWS, Google, Stripe, Slack, npm, claves privadas,
+    flags, .env, listados de entorno, entropía, y 15 salidas comunes que no se tocan—, seguridad
+    —destructivos y no destructivos, inserción sin saltos de línea ni caracteres de control— y
+    prompts —contexto, recorte, fences, historial, parseo de respuestas—).
+  - `cargo test`: 66 unitarios (16 nuevos: stream-json con las líneas reales capturadas, SSE con
+    cualquier troceo, errores de la API, flags de aislamiento, ruta configurada inexistente,
+    modelos, cuerpo de la API, variables anidadas, secretos de entorno, cancelación) + 6 de
+    `tests/ai.rs` (claude falso por `.cmd`: streaming, entorno limpio, carpeta propia, errores,
+    cancelación que mata a node a través de `cmd.exe`; IA apagada; API falsa local con la key
+    del Administrador de credenciales; sin servidor) + 3 explorador + 21 PTY + 2 worktrees.
+  - `npm run e2e`: 379/379 en 293 s. Etapa nueva `ai` (36 checks). `npm run e2e:smoke` suma la
+    parte esencial de `ai`: 144/144 en 97 s.
+  - Corridas del día con fallas, todas explicadas y corregidas en la prueba o en la app: un toast
+    bajo el puntero (la "marca que no aparece" de la 7A), marcas reemplazadas en cada render,
+    una línea larga partida en el medio de `exit 4`, el log de notificaciones leído a medias, y
+    una notificación legítima de una etapa anterior contada como nueva. Una vez cada una, sin
+    repetirse: `cd en el panel activo: el explorador lo sigue` (etapa `explorer`) y la campana en
+    un panel oculto de `agents`; en la misma máquina, con la ventana a veces tapada por otras
+    (Chromium frena los frames).
+  - **Release** (`--no-bundle`, CSP de producción, carpeta de config descartable con
+    `ai.claudePath` apuntando al claude falso: en release `BRISA_CLAUDE_PATH` se ignora, y una
+    ruta configurada nunca cae a otro claude): bloque fallido → "Explicar / arreglar" →
+    respuesta en streaming en el panel, el falso corrió aislado, sin errores de consola (5/5,
+    script por CDP). `brisa.exe` 9,15 → 9,40 MB (+250 KB; medido compilando también el commit
+    de la 7A); JS 981 → 1030 KB (Vite avisa que el chunk pasa de 1 MB).
+  - **No verificado**: `claude -p` real respondiendo (regla de pruebas: el stream con texto
+    —`stream_event` / `text_delta`, `result`— sale de la documentación y del falso, no de una
+    captura; el error sin sesión sí es real), la API real de Anthropic, versiones de `claude`
+    anteriores a 2.1.329 (si no conocen `--safe-mode` o `--effort`, la app pide actualizar).
+    Queda en el smoke manual, a criterio del usuario.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".

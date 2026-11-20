@@ -15,6 +15,7 @@ import { GpuRenderer } from '../lib/renderer';
 import { initSettings } from '../lib/settingsSync';
 import { registerShellIntegration } from '../lib/shellIntegration';
 import { noteAttention, noteInput, noteOutput } from '../lib/agentMonitor';
+import { explainBlock } from '../lib/aiActions';
 import { BlockTracker } from '../lib/blocks';
 import { promptReady } from '../lib/initialCommands';
 import { focusActiveTerminal } from '../lib/tabActions';
@@ -112,6 +113,8 @@ export const TerminalPane = memo(
         getCwd: () => workspace().panes[paneId]?.cwd ?? null,
         enabled: () => useSettings.getState().settings.blocks.enabled,
         onMenu: (blockId, x, y) => useUi.getState().openMenu({ kind: 'block', paneId, blockId, x, y }),
+        aiEnabled: () => useSettings.getState().settings.ai.enabled,
+        onExplain: (blockId) => void explainBlock(paneId, blockId),
       });
       const attention = [
         term.onBell(() => noteAttention(paneId, { source: 'bell' })),
@@ -237,7 +240,7 @@ export const TerminalPane = memo(
       };
       const unsubscribeSettings = useSettings.subscribe((s, prev) => {
         restyle();
-        if (s.settings.blocks !== prev.settings.blocks) blocks.render();
+        if (s.settings.blocks !== prev.settings.blocks || s.settings.ai.enabled !== prev.settings.ai.enabled) blocks.render();
       });
       const unsubscribeProfile = useWorkspace.subscribe((s, prev) => {
         const pane = s.panes[paneId];

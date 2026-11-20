@@ -7,6 +7,7 @@ import {
   array,
   boolean,
   cleanJson,
+  custom,
   nullable,
   number,
   object,
@@ -40,6 +41,28 @@ const profileEntry: Schema<ProfileEntry> = object(
 ) as Schema<ProfileEntry>;
 
 const themes = themeSchema();
+
+/** A regular expression (case-insensitive) the AI layer hides before sending anything. */
+const redactPattern: Schema<string> = custom({
+  default: '',
+  parse(value, path, issues) {
+    if (typeof value !== 'string' || value.trim() === '') {
+      issues.push({ path, message: 'tiene que ser texto (una expresión regular)', severity: 'error' });
+      return '';
+    }
+    try {
+      new RegExp(value, 'iu');
+      return value;
+    } catch (error) {
+      issues.push({ path, message: `expresión regular inválida: ${error instanceof Error ? error.message : String(error)}`, severity: 'error' });
+      return '';
+    }
+  },
+  json: () => ({ type: 'string', description: 'Expresión regular (sin distinguir mayúsculas). Ejemplos: "ACME", "\\bcliente-[a-z]+\\.local\\b".' }),
+});
+
+/** Model aliases offered in VS Code and in the settings screen (any full model id works too). */
+export const AI_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const;
 
 export const settingsSchema = object(
   {
@@ -156,6 +179,33 @@ export const settingsSchema = object(
         agents: boolean({ default: true, description: 'Avisar cuando un agente espera tu respuesta o termina.' }),
       },
       { description: 'Notificaciones nativas (OSC 9, OSC 777, BEL y agentes).' },
+    ),
+    ai: object(
+      {
+        enabled: boolean({
+          default: true,
+          description: 'La IA de Brisa: "Explicar / arreglar" en los bloques que fallaron, lenguaje natural a comando (Ctrl+I) y el panel de IA (Ctrl+Shift+I). Con false, Brisa no hace ninguna llamada de red ni lanza claude.',
+        }),
+        provider: oneOf(['claude-cli', 'anthropic-api'], {
+          default: 'claude-cli',
+          description: 'claude-cli: el CLI de Claude Code (claude -p) con tu sesión (suscripción), sin API key, sin herramientas ni acceso a archivos. anthropic-api: la API de Anthropic con una API key guardada en el Administrador de credenciales de Windows.',
+          labels: { 'claude-cli': 'Claude Code (tu suscripción)', 'anthropic-api': 'API de Anthropic (API key)' },
+        }),
+        model: string({
+          default: 'opus',
+          nonEmpty: true,
+          description: 'Modelo: un alias (opus, sonnet, haiku, fable) o el id completo (claude-opus-5-5…).',
+          examples: () => [...AI_MODELS, 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'],
+        }),
+        claudePath: string({
+          default: '',
+          description: 'Ruta de claude.exe o claude.cmd (admite %VARIABLES%). Vacío: se busca en el PATH y en las carpetas de instalación habituales.',
+        }),
+        redact: array(redactPattern, {
+          description: 'Más cosas a ocultar antes de enviar cualquier contexto, además de los secretos que Brisa reconoce sola (tokens, API keys, contraseñas, connection strings, .env): nombres de clientes, dominios internos…',
+        }),
+      },
+      { description: 'IA: proveedor, modelo y qué se oculta antes de enviar.' },
     ),
     keybindings: keybindingsSchema(),
   },

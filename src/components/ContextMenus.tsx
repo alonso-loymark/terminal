@@ -10,7 +10,7 @@ import {
   startCreate,
 } from '../lib/explorerActions';
 import { blockText, copyBlock, rerunBlock, type BlockPart } from '../lib/blockActions';
-import { BLOCK_AI_ACTIONS } from '../lib/blocks';
+import { attachBlock, explainBlock } from '../lib/aiActions';
 import { readText } from '../lib/clipboard';
 import { parentDir } from '../lib/explorerModel';
 import { copySelection } from '../lib/keybindings';
@@ -22,6 +22,7 @@ import { useExplorer } from '../store/explorer';
 import { shortcutLabel } from '../store/keymap';
 import { useLayouts } from '../store/layouts';
 import { useProfiles } from '../store/profiles';
+import { useSettings } from '../store/settings';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
 import { parentSplit, tabOfPane, tabsInGroup, type GroupId, type PaneId, type TabId } from '../store/workspaceModel';
@@ -39,8 +40,9 @@ const run = (action: () => void) => () => {
   action();
 };
 
-/** The mark of a command block: copy its parts, run it again ("Explicar / arreglar": Fase 7B). */
+/** The mark of a command block: copy its parts, run it again, and the AI (explain, add to the chat). */
 function BlockMenu({ paneId, blockId, x, y }: { paneId: PaneId; blockId: number; x: number; y: number }) {
+  const ai = useSettings((s) => s.settings.ai.enabled);
   const block = blockText(paneId, blockId);
   if (!block) return null;
   const failed = block.exitCode !== null && block.exitCode !== 0;
@@ -65,9 +67,15 @@ function BlockMenu({ paneId, blockId, x, y }: { paneId: PaneId; blockId: number;
       <MenuItem action="rerun" onSelect={run(() => rerunBlock(paneId, blockId))}>
         Volver a ejecutar
       </MenuItem>
-      {BLOCK_AI_ACTIONS && failed && (
-        <MenuItem action="explain-block" onSelect={run(() => focusActiveTerminal())}>
-          Explicar / arreglar
+      {ai && <MenuSeparator />}
+      {ai && failed && (
+        <MenuItem action="explain-block" onSelect={run(() => void explainBlock(paneId, blockId))}>
+          Explicar / arreglar (IA)
+        </MenuItem>
+      )}
+      {ai && (
+        <MenuItem action="ai-attach" onSelect={run(() => attachBlock(paneId, blockId))}>
+          Agregar al chat de IA
         </MenuItem>
       )}
     </Menu>

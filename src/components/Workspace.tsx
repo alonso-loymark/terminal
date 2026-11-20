@@ -1,9 +1,11 @@
 import { useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { focusActiveTerminal } from '../lib/tabActions';
+import { useAi } from '../store/ai';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { layoutDividers, layoutRects, panesOf, type PaneId, type Rect, type Tab, type TabId } from '../store/workspaceModel';
+import { AiCommandBar } from './AiCommandBar';
 import { PaneDivider } from './PaneDivider';
 import { SearchBar } from './SearchBar';
 import { TerminalPane } from './TerminalPane';
@@ -48,6 +50,7 @@ export function Workspace() {
   const paneIds = useWorkspace(useShallow((s) => Object.keys(s.panes)));
   const activePaneId = useWorkspace(selectActivePaneId);
   const searchOpen = useUi((s) => s.searchOpen);
+  const barPane = useAi((s) => s.bar?.paneId ?? null);
 
   const placement = useMemo(() => placePanes(tabs, activeTabId), [tabs, activeTabId]);
   const activeTab = activeTabId ? tabs[activeTabId] : undefined;
@@ -71,6 +74,7 @@ export function Workspace() {
         {dividers.map((divider) => (
           <PaneDivider key={`${divider.splitId}:${divider.index}`} divider={divider} area={areaRef} />
         ))}
+        {barPane && placement[barPane]?.visible && <AiCommandBar key={barPane} rect={placement[barPane].rect} />}
       </div>
       {searchOpen && activePaneId && <SearchBar key={activePaneId} paneId={activePaneId} onClose={closeSearch} />}
     </main>

@@ -8,6 +8,7 @@
 // actions that create, close or toggle run once per press; only moving between tabs and panes
 // repeats.
 import { actionById, eventKeys, type ActionDef } from '../config/keybindings';
+import { useAi } from '../store/ai';
 import { currentKeymap } from '../store/keymap';
 import { useUi } from '../store/ui';
 import { runAction } from './appActions';
@@ -67,7 +68,7 @@ export function installAppShortcuts(): () => void {
     if (event.isComposing) return;
     const ui = useUi.getState();
     // A modal dialog owns the keyboard, and so does the settings screen while recording a key.
-    if (ui.confirm || ui.layoutDialog || ui.multiAgent || ui.capturingKeys) return;
+    if (ui.confirm || ui.layoutDialog || ui.multiAgent || ui.capturingKeys || useAi.getState().preview) return;
     const found = actionForEvent(event);
     if (!found) return;
     const { action, ctx } = found;
