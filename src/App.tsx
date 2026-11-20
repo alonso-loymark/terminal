@@ -1,6 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect } from 'react';
 import { AiContextDialog } from './components/AiContextDialog';
+import { OrchestratorDialog } from './components/OrchestratorDialog';
 import { AiPanel } from './components/AiPanel';
 import { CommandPalette } from './components/CommandPalette';
 import { MultiAgentDialog } from './components/MultiAgentDialog';
@@ -15,6 +16,7 @@ import { Toast } from './components/Toast';
 import { Workspace } from './components/Workspace';
 import { installAgentMonitor } from './lib/agentMonitor';
 import { installAi } from './lib/aiActions';
+import { installOrchestrator } from './lib/orchestratorActions';
 import { installAppearance } from './lib/appearance';
 import { installAppShortcuts } from './lib/appShortcuts';
 import { installFileDrop } from './lib/dropTarget';
@@ -51,6 +53,7 @@ export function App() {
   useEffect(() => installGitRefreshOnCommands(), []);
   useEffect(() => installAgentMonitor(), []);
   useEffect(() => installAi(), []);
+  useEffect(() => installOrchestrator(), []);
   useEffect(() => installWindowChrome(), []);
 
   if (!ready) return <div className="app" />;
@@ -73,6 +76,7 @@ export function App() {
       <SaveLayoutDialog />
       <MultiAgentDialog />
       <AiContextDialog />
+      <OrchestratorDialog />
       <Toast />
     </div>
   );

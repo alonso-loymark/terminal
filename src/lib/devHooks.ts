@@ -10,7 +10,9 @@ import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
+import { useOrchestrator } from '../store/orchestrator';
 import { aiQuery } from './aiApi';
+import { orchRun } from './agentsApi';
 import { blockText, paneBlocks, selectedBlock } from './blockActions';
 import { worktreeList } from './fsApi';
 import { pendingInitialCommands } from './initialCommands';
@@ -41,6 +43,9 @@ export function installDevHooks(): void {
   window.__ai = useAi;
   // Straight to the backend, past the UI: with ai.enabled false it must refuse.
   window.__aiQuery = (payload) => aiQuery(payload, () => {});
+  window.__orch = useOrchestrator;
+  // Straight to the backend: with orchestrator.enabled false it must refuse.
+  window.__orchRun = (spec) => orchRun(spec, () => {});
   window.__paneLigatures = (paneId) => {
     const term = getPane(paneId)?.term;
     return !!term && hasLigatures(term);

@@ -30,7 +30,7 @@ const STARTED = Date.now();
  * stages, to close a phase (CLAUDE.md, "Regla de fases").
  */
 const SMOKE = process.argv.includes('--smoke');
-const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'chrome', 'keybindings', 'session', 'blocks', 'ai', 'close'];
+const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'chrome', 'keybindings', 'session', 'blocks', 'ai', 'orchestrator', 'close'];
 const only = SMOKE ? SMOKE_STAGES : process.argv[2]?.split(',').filter(Boolean);
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'brisa-e2e-'));
 const CONFIG_DIR = path.join(WORK, 'config');
@@ -169,6 +169,10 @@ async function launch() {
     // Agent session variables must not leak into the shells under test.
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^CLAUDE/i.test(k)));
     env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${CDP_PORT}`;
+    // Its own WebView2 data: a Brisa the user has open (same app id) keeps the default folder
+    // locked with other browser arguments, and the suite never touches the user's WebView2 data.
+    // A fixed folder (not the run's temp one): a new profile per run and deleting it cost ~1 min.
+    env.WEBVIEW2_USER_DATA_FOLDER = path.join(os.tmpdir(), 'brisa-e2e-webview2');
     // A throwaway settings.json: the suite never touches the user's own configuration.
     env.BRISA_CONFIG_DIR = CONFIG_DIR;
     env.BRISA_NOTIFY_LOG = NOTIFY_LOG;
@@ -2570,7 +2574,9 @@ const stages = {
 
     // Cards: the resize handles live in the gap between cards (a card must not clip them).
     await page.evaluate(() => window.__ai.setState({ panelOpen: true }));
-    const aiHandle = await page.waitForSelector('.ai-resizer', { timeout: 3000 }).then((el) => el.boundingBox());
+    // Measured once the layout settles (the radius just changed live: a stale box drags nothing).
+    await page.waitForSelector('.ai-resizer', { timeout: 3000 });
+    const aiHandle = await settledBox('.ai-resizer');
     const aiBefore = await page.evaluate(() => window.__ai.getState().panelWidth);
     await page.mouse.move(aiHandle.x + aiHandle.width / 2, aiHandle.y + 200);
     await page.mouse.down();
@@ -3809,6 +3815,262 @@ const stages = {
     await sleep(500);
     check('ai.enabled: false → sin panel ni "Explicar", y el backend no lanza nada', closed && noExplain && refused === 'disabled' && fakeClaudeRuns().length === runsOff && apiRequests.length === apiOff, `${closed} ${noExplain} ${refused}`);
     await page.mouse.move(5, 5);
+    await resetSettings();
+    await freshTab();
+  },
+
+  async orchestrator() {
+    if (!(await ownSettings())) return skip('orchestrator', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await resetSettings();
+    fs.writeFileSync(FAKE_CLAUDE_STATE, JSON.stringify({ loggedIn: true }));
+    // A client's project: git, build/test scripts, a secret in .env (ignored).
+    const project = trickyDir(`orquestador cliente ${SMOKE ? 's' : 'f'}`);
+    const git = (...args) => execFileSync('git', ['-C', project, ...args], { encoding: 'utf8' });
+    if (!fs.existsSync(path.join(project, '.git'))) {
+      fs.mkdirSync(path.join(project, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ name: 'cliente', scripts: { build: 'node -e 1', test: 'node -e 1', dev: 'node -e 1' } }, null, 2));
+      fs.writeFileSync(path.join(project, 'src', 'app.js'), "const total = 1;\nconsole.log(total);\n");
+      fs.writeFileSync(path.join(project, '.env'), 'API_TOKEN=valor-secreto-del-cliente\n');
+      fs.writeFileSync(path.join(project, '.gitignore'), '.env\n');
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'e2e@example.com');
+      git('config', 'user.name', 'e2e');
+      git('add', '.');
+      git('commit', '-q', '-m', 'inicio');
+    }
+    const workRuns = () => fakeClaudeRuns().filter((r) => r.kind === 'work');
+    const planRuns = () => fakeClaudeRuns().filter((r) => !r.kind && r.system?.includes('Sos el orquestador de Brisa'));
+    const input = '.orch-pane:not([hidden]) [data-orch-input]';
+    // The last card of a kind (no later sibling of the same kind; cards of other kinds may follow it).
+    const lastCard = (kind) => `.orch-pane:not([hidden]) [data-orch="${kind}"]:not(:has(~ [data-orch="${kind}"]))`;
+    const cardStatus = (kind) => page.getAttribute(lastCard(kind), 'data-status').catch(() => null);
+    const send = async (text) => {
+      await page.fill(input, text);
+      await page.press(input, 'Enter');
+    };
+    const proposed = () => waitUntil(async () => (await cardStatus('plan')) === 'proposed', 15000);
+    const runEnded = (status = 'done') => waitUntil(async () => (await cardStatus('run')) === status, 20000);
+    const project_ = () => page.evaluate(() => Object.values(window.__orch.getState().projects)[0] ?? null);
+
+    await runIdle(`Set-Location -LiteralPath ${psQuote(project)}`);
+    const runsBefore = fakeClaudeRuns().length;
+    await paletteRun('orquestador aqui', 'orchestrator.open');
+    await page.waitForSelector('.orch-pane:not([hidden])', { timeout: 5000 });
+    const tab = await activeTab();
+    const pane = await paneState(tab.activePaneId);
+    check(
+      'Abrir orquestador aquí: una tab "Orquestador" ligada a la carpeta del proyecto',
+      pane?.kind === 'orchestrator' && pane.cwd === project && (await tabLabel(tab.id)).includes('Orquestador'),
+      `${pane?.kind} ${pane?.cwd} ${await tabLabel(tab.id)}`,
+    );
+    const options = async () => page.$$eval('.orch-pane:not([hidden]) [data-orch="main-model"] option', (os) => os.map((o) => o.value));
+    await waitUntil(async () => (await options()).length >= 4, 15000);
+    const mainSelected = await page.$eval('.orch-pane:not([hidden]) [data-orch="main-model"]', (s) => s.value);
+    const init = fakeClaudeRuns().slice(runsBefore).find((r) => r.kind === 'init');
+    check(
+      'los modelos salen de Claude Code (initialize), no hardcodeados; el principal por defecto es sonnet',
+      JSON.stringify(await options()) === JSON.stringify(['haiku', 'sonnet', 'opus', 'fable']) && mainSelected === 'sonnet' && init?.args.includes('--input-format'),
+      `${JSON.stringify(await options())} ${mainSelected}`,
+    );
+    await waitUntil(async () => (await project_())?.info !== null, 10000);
+
+    // AGENTS.md: offered, drafted read-only, shown (and editable) before anything is written.
+    if (!SMOKE) {
+      await page.waitForSelector('.orch-pane:not([hidden]) [data-orch="agents-offer"]', { timeout: 5000 });
+      await page.click('[data-action="orch-draft-agents"]');
+      await page.waitForSelector('[data-orch="instructions-dialog"][data-file="agents"]', { timeout: 15000 });
+      const draft = await page.inputValue('[data-orch="instructions-text"]');
+      const analysis = workRuns().at(-1);
+      check(
+        'AGENTS.md: borrador de un análisis de solo lectura, mostrado antes de escribir nada',
+        draft.startsWith('# AGENTS.md') && analysis?.tools === 'Read,Glob,Grep' && !analysis.allowed.length && !fs.existsSync(path.join(project, 'AGENTS.md')),
+        `${draft.slice(0, 40)} ${analysis?.tools}`,
+      );
+      await page.fill('[data-orch="instructions-text"]', `${draft}\n## Nota\n- Agregada por el usuario.\n`);
+      await page.click('[data-action="orch-confirm-instructions"]');
+      // Then CLAUDE.md (missing): a minimal one that imports AGENTS.md, shown first.
+      await page.waitForSelector('[data-orch="instructions-dialog"][data-file="claude"]', { timeout: 5000 });
+      const minimal = await page.inputValue('[data-orch="instructions-text"]');
+      const agentsMd = fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf8');
+      check('... con lo que el usuario editó, y sin commit', agentsMd.includes('Agregada por el usuario') && git('log', '--oneline').trim().split('\n').length === 1, agentsMd.slice(-60));
+      await page.click('[data-orch="instructions-dialog"] [data-action="cancel"]');
+      await sleep(300);
+      check(
+        'CLAUDE.md: se ofrece uno mínimo que importa AGENTS.md; Cancelar no crea nada',
+        /^@AGENTS\.md$/m.test(minimal) && !fs.existsSync(path.join(project, 'CLAUDE.md')) && !!(await page.$('.orch-pane:not([hidden]) [data-orch="claude-offer"]')),
+        minimal,
+      );
+      // A CLAUDE.md of the client's: never overwritten, only the import offered (shown whole).
+      fs.writeFileSync(path.join(project, 'CLAUDE.md'), '# Cliente\nNo tocar la carpeta legacy.\n');
+      // "Actualizar" reads the project again (and the agents).
+      await page.click('[data-action="orch-refresh-agents"]');
+      await waitUntil(async () => (await page.textContent('.orch-pane:not([hidden]) [data-orch="claude-offer"]').catch(() => '')).includes('no importa'), 10000);
+      await page.click('[data-action="orch-offer-claude"]');
+      await page.waitForSelector('[data-orch="instructions-dialog"][data-file="claude"]', { timeout: 5000 });
+      const offered = await page.inputValue('[data-orch="instructions-text"]');
+      check(
+        'un CLAUDE.md existente no se pisa: se ofrece agregar la importación, con el contenido completo a la vista',
+        offered === '# Cliente\n\n@AGENTS.md\nNo tocar la carpeta legacy.\n' && fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf8') === '# Cliente\nNo tocar la carpeta legacy.\n',
+        JSON.stringify(offered),
+      );
+      await page.click('[data-action="orch-confirm-instructions"]');
+      await waitUntil(async () => !(await page.$('[data-orch="instructions-dialog"]')), 5000);
+      check('... y al confirmar se escribe exactamente eso', fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf8') === offered && !(await page.$('.orch-pane:not([hidden]) [data-orch="claude-offer"]')));
+    }
+
+    // A message: the main model proposes a plan (JSON, validated) before anything runs.
+    const ghToken = ['ghp_', 'Orq81Kd93LmXp02Qw7Er4Ty6Ui8Op1As3Df5'].join('');
+    await send(`renombrá la variable total en src/app.js (token ${ghToken})`);
+    const planned = await proposed();
+    const planText = planned ? await page.textContent(lastCard('plan')) : '';
+    check(
+      'cada mensaje da un plan: tarea, agente, modelo, esfuerzo y por qué (trivial → rápido con esfuerzo bajo)',
+      planned &&
+        (await page.textContent(`${lastCard('plan')} [data-orch="plan-model"]`)).includes('Haiku') &&
+        (await page.textContent(`${lastCard('plan')} [data-orch="plan-effort"]`)).includes('low') &&
+        (await page.textContent(`${lastCard('plan')} [data-orch="plan-why"]`)).includes('trivial') &&
+        workRuns().length === (SMOKE ? 0 : 1),
+      planText.slice(0, 160),
+    );
+    const planRun = planRuns().at(-1);
+    check(
+      'el plan lo arma el modelo principal, sin herramientas, y el mensaje sale redactado',
+      planRun?.args.includes('sonnet') && planRun.args.includes('--safe-mode') && !planRun.prompt.includes(ghToken) && planRun.prompt.includes('[REDACTED:github_token]'),
+      planRun?.prompt.slice(-200),
+    );
+    await page.click(`${lastCard('plan')} [data-action="orch-sent"]`);
+    await page.waitForSelector('[data-orch="sent-dialog"]', { timeout: 3000 });
+    const shownPrompt = await page.$eval('[data-orch="sent-dialog"] [data-part="message"]', (el) => el.textContent);
+    check('"Ver qué se envió" muestra exactamente lo que recibió el modelo', shownPrompt === planRun?.prompt);
+    await page.keyboard.press('Escape');
+    await waitUntil(async () => !(await page.$('[data-orch="sent-dialog"]')), 2000);
+
+    // Approve: a worker in the project folder, limited permissions, live activity, diff, cost.
+    await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
+    const done = await runEnded();
+    const activity = await page.$$eval(`${lastCard('run')} [data-orch="activity"] li`, (items) => items.map((li) => `${li.dataset.action}:${li.textContent}`));
+    const work = workRuns().at(-1);
+    check(
+      'aprobado: el trabajador corre en la carpeta del proyecto y se ve lo que lee, edita y ejecuta',
+      done && activity.some((a) => a.startsWith('read:') && a.includes('package.json')) && activity.some((a) => a.startsWith('edit:') && a.includes('src/app.js')) && activity.some((a) => a.startsWith('command:') && a.includes('npm run build')),
+      JSON.stringify(activity),
+    );
+    check(
+      '... con permisos acotados: editar y solo los comandos del proyecto (nada que los desactive), secretos denegados',
+      work?.cwd.toLowerCase() === project.toLowerCase() &&
+        work.args.includes('--restricted') &&
+        work.args.includes('dontAsk') &&
+        work.allowed.includes('Bash(npm run build *)') &&
+        !work.allowed.some((a) => a.includes('npm run dev')) &&
+        work.denied.includes('Read(.env)') &&
+        work.model === 'haiku' &&
+        work.effort === 'low',
+      JSON.stringify({ allowed: work?.allowed, model: work?.model }),
+    );
+    check('... recibe un brief (la tarea), redactado, no la conversación', work?.prompt.startsWith('## Tarea\n') && !work.prompt.includes(ghToken) && !work.prompt.includes('Conversación'), work?.prompt.slice(0, 160));
+    const diffFiles = await page.$$eval(`${lastCard('run')} .orch-diff-file`, (els) => els.map((e) => e.dataset.path));
+    const usage = await page.textContent(`${lastCard('run')} [data-orch="usage"]`).catch(() => '');
+    const result = await page.textContent(`${lastCard('run')} [data-orch="result"]`).catch(() => '');
+    check(
+      'al terminar: resumen, diff de lo que cambió, tokens y costo que informa el CLI',
+      result.includes('edité src/app.js') && JSON.stringify(diffFiles) === '["src/app.js"]' && usage.includes('US$0.0042') && usage.includes('tokens'),
+      `${result} | ${JSON.stringify(diffFiles)} | ${usage}`,
+    );
+    const store = path.join(CONFIG_DIR, 'orchestrator');
+    // Saved 300 ms after the last change: the folder may not exist yet.
+    const saved = await waitUntil(() => {
+      const folders = fs.existsSync(store) ? fs.readdirSync(store) : [];
+      const dir = folders.length ? path.join(store, folders[0]) : null;
+      return !!dir && fs.existsSync(path.join(dir, 'decisions.json')) && fs.readFileSync(path.join(dir, 'decisions.json'), 'utf8').includes('renombrá');
+    }, 5000);
+    const status = git('status', '--porcelain').trimEnd().split('\n').sort();
+    check(
+      'conversación y registro de decisiones en la carpeta de config de Brisa, nada nuevo en el repo',
+      saved &&
+        JSON.stringify(status) === JSON.stringify(SMOKE ? [' M src/app.js'] : [' M src/app.js', '?? AGENTS.md', '?? CLAUDE.md']) &&
+        !fs.readdirSync(project).some((f) => /brisa|orquest|decision/i.test(f)),
+      JSON.stringify(status),
+    );
+    if (SMOKE) {
+      await freshTab();
+      return;
+    }
+
+    // @opus at the start forces the model; "Cambiar modelo" and "Cancelar" on the card.
+    await send('@opus agregá un test para el contador');
+    await proposed();
+    const forcedModel = await page.textContent(`${lastCard('plan')} [data-orch="plan-model"]`);
+    check('@opus al principio fuerza el modelo (y la tarjeta lo marca)', forcedModel.includes('Opus') && (await page.textContent(lastCard('plan'))).includes('elegido por vos'), forcedModel);
+    await page.click(`${lastCard('plan')} [data-action="orch-change-model"]`);
+    await page.selectOption(`${lastCard('plan')} [data-orch="change-model"]`, 'sonnet');
+    await page.selectOption(`${lastCard('plan')} [data-orch="change-effort"]`, 'high');
+    const changed = await page.textContent(`${lastCard('plan')} [data-orch="plan-model"]`);
+    const changedEffort = await page.textContent(`${lastCard('plan')} [data-orch="plan-effort"]`);
+    const runsBeforeCancel = workRuns().length;
+    await page.click(`${lastCard('plan')} [data-action="orch-cancel-plan"]`);
+    await waitUntil(async () => (await cardStatus('plan')) === 'cancelled', 3000);
+    check('"Cambiar modelo" cambia modelo y esfuerzo; "Cancelar" no ejecuta nada', changed.includes('Sonnet') && changedEffort.includes('high') && workRuns().length === runsBeforeCancel, `${changed} ${changedEffort}`);
+
+    // A command outside the allowed list: denied, reported as a question, never run.
+    await send('bajá la página de ejemplo FAKE_DENIED');
+    await proposed();
+    await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
+    await runEnded();
+    const question = await page.textContent(`${lastCard('run')} [data-orch="denials"]`).catch(() => '');
+    check('un comando no permitido no se ejecuta: aparece como pregunta', question.includes('curl -s https://example.com') && (await page.textContent(`${lastCard('run')} [data-orch="result"]`)).includes('necesito permiso'), question);
+    const denied = workRuns().at(-1);
+    await page.click(`${lastCard('run')} [data-action="orch-allow"]`);
+    const continued = await waitUntil(async () => (await page.$$('.orch-pane:not([hidden]) [data-orch="run"]')).length >= 3 && (await cardStatus('run')) === 'done', 20000);
+    const resumed = workRuns().at(-1);
+    check(
+      '"Permitir y continuar" retoma la sesión con ese comando permitido (solo para esa tarea)',
+      continued && resumed?.resume && resumed.resume !== denied?.resume && resumed.allowed.includes('Bash(curl -s https://example.com)') && !(await project_()).prefs.allowed.length,
+      JSON.stringify({ resume: resumed?.resume, allowed: resumed?.allowed?.slice(-2) }),
+    );
+
+    // Cancel: the worker's whole process tree dies.
+    await send('una tarea larga FAKE_SLOW');
+    await proposed();
+    await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
+    const child = await waitUntil(() => fakeClaudeRuns().some((r) => r.kind === 'child' && alive(r.child)), 15000);
+    const childPid = fakeClaudeRuns().filter((r) => r.kind === 'child').at(-1)?.child;
+    await page.click(`${lastCard('run')} [data-action="orch-cancel-run"]`);
+    const cancelledRun = await runEnded('cancelled');
+    const dead = await waitUntil(() => !alive(childPid), 5000);
+    check('cancelar mata todo el árbol del trabajador (Job Object)', child && cancelledRun && dead, `child ${childPid}`);
+
+    // Auto-approve, from the settings screen: the plan is shown and runs without waiting.
+    await openSettings('agents');
+    const fields = await page.$$eval('.settings-field[data-setting^="orchestrator."]', (els) => els.map((e) => e.dataset.setting));
+    await fillSetting('orchestrator.autoApprove', true);
+    const applied = await waitUntil(async () => (await settingsState()).settings.orchestrator.autoApprove === true && settingsOnDisk().includes('"autoApprove": true'), 5000);
+    await closeSettings();
+    check(
+      'Configuración → Agentes y orquestador: los ajustes del orquestador (y se guardan en settings.json)',
+      applied && ['enabled', 'mainModel', 'autoApprove', 'allowedCommands', 'maxTurns'].every((k) => fields.includes(`orchestrator.${k}`)),
+      JSON.stringify(fields),
+    );
+    const before = workRuns().length;
+    await send('corregí una errata del README');
+    const auto = await waitUntil(async () => workRuns().length === before + 1 && (await cardStatus('run')) === 'done', 20000);
+    check('orchestrator.autoApprove: ejecuta el plan sin esperar "Aprobar"', auto && (await cardStatus('plan')) === 'approved', JSON.stringify({ auto, runs: workRuns().length - before, plan: await cardStatus('plan'), run: await cardStatus('run'), busy: (await project_())?.busy, last: (await project_())?.messages.slice(-3).map((m) => [m.kind, m.status, m.error?.message]) }));
+
+    // Off: nothing runs (the UI says so and the backend refuses on its own).
+    await writeSettings({ orchestrator: { enabled: false } });
+    const runsOff = fakeClaudeRuns().length;
+    const refused = await page.evaluate((dir) => window.__orchRun({ agent: 'claude', dir, prompt: 'x', model: 'haiku', effort: null, resume: null, mode: 'work', allowedCommands: [], maxTurns: null, agentPath: null }).then(() => 'ran', (e) => e.code), project);
+    await openPalette();
+    await page.fill('.palette-input', 'orquestador');
+    await sleep(300);
+    const listed = await page.$(`.palette-item[data-command="orchestrator.open"]`);
+    await page.keyboard.press('Escape');
+    check(
+      'orchestrator.enabled: false → aviso en la tab, sin la acción en la paleta y el backend no lanza nada',
+      !!(await page.$('.orch-pane:not([hidden]) [data-orch="disabled"]')) && !listed && refused === 'disabled' && fakeClaudeRuns().length === runsOff,
+      refused,
+    );
+    check('la sesión recuerda la tab del orquestador', JSON.stringify(sessionOnDisk() ?? {}).includes('"orchestrator":true'));
     await resetSettings();
     await freshTab();
   },

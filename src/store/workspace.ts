@@ -36,7 +36,7 @@ interface WorkspaceActions {
    * pane's folder (`cwd: null`: the home folder).
    */
   newTab: (
-    spec?: Partial<Pick<model.NewTab, 'after' | 'groupId' | 'customTitle' | 'color' | 'profile' | 'cwd'>>,
+    spec?: Partial<Pick<model.NewTab, 'after' | 'groupId' | 'customTitle' | 'color' | 'profile' | 'cwd' | 'kind'>>,
   ) => TabId;
   /** Removes tabs and their panes from the state (unmounting their terminals closes the sessions). */
   closeTabs: (ids: TabId[]) => void;

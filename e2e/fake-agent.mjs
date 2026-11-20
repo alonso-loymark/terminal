@@ -26,7 +26,25 @@
 //   FAKE_UNKNOWN_OPTION   an older CLI that does not know a flag
 //   FAKE_SLOW             streams for ~30 s (to test cancelling)
 //   FAKE_DESTRUCTIVE      proposes a recursive delete
+//
+// Orchestrator (Fase 8A), same print mode:
+// - `--input-format stream-json` + an `initialize` control request: answers with the models
+//   (the real list's shape: value, displayName, description with prices, effort levels).
+// - A system prompt of the orchestrator's planner ("Sos el orquestador de Brisa"): a JSON plan
+//   (haiku/low for trivial work, opus/high for architecture or hard bugs, sonnet/medium else;
+//   the model the user chose if the prompt says so). FAKE_BAD_PLAN: not JSON the first time.
+// - `--restricted` = a worker: checks the permission flags (dontAsk, the tool list, never
+//   anything that turns permissions off, secrets denied), streams tool calls and REALLY edits
+//   the project in its folder (src/app.js gets a line; without it, NOTAS.md is written),
+//   "runs" `npm run build` if allowed, and ends with usage and cost. Sessions are kept in
+//   `<FAKE_CLAUDE_STATE>.sessions.json` (`--resume` of an unknown one fails like the real CLI).
+//   Words in the brief: FAKE_DENIED (tries `curl -s https://example.com`: denied unless
+//   allowed), FAKE_SECRET (tries to read .env), FAKE_SLOW (~60 s, with a child process, to test
+//   that cancelling kills the tree), FAKE_WORK_ERROR (usage limit after spending a little).
+//   Analysis (`--tools Read,Glob,Grep`): reads and answers an AGENTS.md draft.
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const exeName = path.basename(process.execPath, path.extname(process.execPath)).toLowerCase();
@@ -184,7 +202,40 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+const FAKE_MODELS = [
+  ['default', 'claude-opus-5-5', 'Default (recommended)', 'Use the default model (currently Opus 5.5) · $4/$20 per Mtok'],
+  ['opus', 'claude-opus-5-5', 'Opus', 'Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok'],
+  ['fable', 'claude-fable-5-2', 'Fable', 'Fable 5.2 · Most capable for your hardest and longest-running tasks · $8/$40 per Mtok'],
+  ['sonnet', 'claude-sonnet-5-5', 'Sonnet', 'Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok'],
+  ['haiku', 'claude-haiku-5-5', 'Haiku', 'Haiku 5.5 · Fastest for quick answers · $1/$5 per Mtok'],
+].map(([value, resolvedModel, displayName, description]) => ({
+  value,
+  resolvedModel,
+  displayName,
+  description,
+  supportsEffort: true,
+  supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+  supportsAdaptiveThinking: true,
+}));
+const COST = { haiku: 0.0042, sonnet: 0.0123, opus: 0.0456, fable: 0.0912 };
+
+function fakePlan(prompt) {
+  const message = /## Mensaje del usuario\n([\s\S]*?)(?:\n## |$)/.exec(prompt)?.[1]?.trim() ?? prompt.trim();
+  if (message.includes('FAKE_BAD_PLAN') && !prompt.includes('## Corrección')) return 'Creo que habría que mirar el código primero.';
+  const forced = /Modelo elegido por el usuario: (\S+)/.exec(prompt)?.[1];
+  const lower = message.toLowerCase();
+  let model = 'sonnet';
+  let effort = 'medium';
+  let why = 'Cambio normal: modelo de costo medio.';
+  if (/trivial|renombr|typo|errata/.test(lower)) [model, effort, why] = ['haiku', 'low', 'Tarea trivial y mecánica: modelo rápido con esfuerzo bajo.'];
+  else if (/arquitectura|bug dif[ií]cil|muchos archivos/.test(lower)) [model, effort, why] = ['opus', 'high', 'Arquitectura o un bug difícil: el modelo más potente con esfuerzo alto.'];
+  if (forced) [model, why] = [forced, `El usuario eligió ${forced}.`];
+  const plan = { task: `Tarea: ${message}`, agent: 'claude', model, effort, why, files: ['src/app.js'] };
+  return `${FENCE}json\n${JSON.stringify(plan, null, 2)}\n${FENCE}`;
+}
+
 function fakeAnswer(system, prompt) {
+  if (system.includes('Sos el orquestador de Brisa')) return fakePlan(prompt);
   if (system.includes('Convertís un pedido')) {
     if (prompt.includes('FAKE_DESTRUCTIVE')) return `${FENCE}powershell\nRemove-Item -Recurse -Force .\\build\n${FENCE}\nBorra la carpeta build y todo su contenido.`;
     if (prompt.includes('puerto 3000')) {
@@ -258,7 +309,8 @@ async function printMode(args) {
   if (missing.length) return fail('invalid_request', `FAKE: faltan flags de aislamiento: ${missing.join(', ')}`);
   if (!state.loggedIn || prompt.includes('FAKE_AUTH_ERROR')) return fail('authentication_failed', 'Not logged in · Please run /login');
   if (prompt.includes('FAKE_LIMIT')) return fail('rate_limit', "You've hit your usage limit · resets 3pm");
-  const slow = prompt.includes('FAKE_SLOW');
+  // The orchestrator's plan of a FAKE_SLOW task is not itself slow (the worker is).
+  const slow = prompt.includes('FAKE_SLOW') && !system.includes('Sos el orquestador de Brisa');
   const text = slow ? 'Pensando despacio. '.repeat(100) : fakeAnswer(system, prompt);
   jsonLine({ type: 'stream_event', event: { type: 'message_start', message: { model } } });
   jsonLine({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
@@ -269,12 +321,204 @@ async function printMode(args) {
   jsonLine({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
   jsonLine({ type: 'stream_event', event: { type: 'message_stop' } });
   jsonLine({ type: 'assistant', message: { model, role: 'assistant', type: 'message', content: [{ type: 'text', text }] } });
-  jsonLine({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: text });
+  const cost = (COST[model] ?? 0.01) / 4;
+  jsonLine({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, result: text, session_id: newSessionId(), total_cost_usd: cost, duration_ms: 900, usage: { input_tokens: 800, output_tokens: 120, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, modelUsage: { [model]: { inputTokens: 800, outputTokens: 120, costUSD: cost } }, permission_denials: [] });
   return 0;
 }
 
+// ---------------------------------------------------------------- orchestrator modes
+
+const newSessionId = () => `${Math.random().toString(16).slice(2, 10)}-fake-${Date.now().toString(16)}`;
+const sessionsFile = () => `${process.env.FAKE_CLAUDE_STATE || path.join(os.tmpdir(), 'fake-claude')}.sessions.json`;
+function sessions() {
+  try {
+    return JSON.parse(fs.readFileSync(sessionsFile(), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+function saveSession(id, data) {
+  const all = sessions();
+  all[id] = { ...all[id], ...data };
+  fs.writeFileSync(sessionsFile(), JSON.stringify(all));
+}
+
+/** Values of a variadic flag (`--allowedTools a b c --next`). */
+function listAfter(args, flag) {
+  const i = args.indexOf(flag);
+  if (i < 0) return [];
+  const out = [];
+  for (let j = i + 1; j < args.length && !args[j].startsWith('--'); j++) out.push(args[j]);
+  return out;
+}
+
+function logRun(entry) {
+  if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ pid: process.pid, cwd: process.cwd(), at: Date.now(), ...entry })}\n`);
+}
+
+async function initMode(args) {
+  const input = await readStdin();
+  logRun({ kind: 'init', args, prompt: input });
+  const request = input
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .find((m) => m.type === 'control_request' && m.request?.subtype === 'initialize');
+  if (!request) return 1;
+  jsonLine({ type: 'control_response', response: { subtype: 'success', request_id: request.request_id, response: { models: FAKE_MODELS, claude_code_version: '2.1.329', commands: [], agents: [] } } });
+  return 0;
+}
+
+const WORK_TOOLS = 'Read,Edit,Write,Glob,Grep,Bash,PowerShell';
+const ANALYZE_TOOLS = 'Read,Glob,Grep';
+
+async function workMode(args, state) {
+  const value = (flag) => {
+    const i = args.indexOf(flag);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const prompt = await readStdin();
+  // Behaviors come from the task itself (a brief also summarizes past tasks, which may name them).
+  const asked = /## Tarea\n([\s\S]*?)(?:\n## |$)/.exec(prompt)?.[1] ?? prompt;
+  const allowed = listAfter(args, '--allowedTools');
+  const denied = listAfter(args, '--disallowedTools');
+  let rules = '';
+  try {
+    rules = fs.readFileSync(value('--append-system-prompt-file') ?? '', 'utf8');
+  } catch {
+    // reported below
+  }
+  const tools = value('--tools') ?? '';
+  const resume = value('--resume');
+  const model = value('--model') ?? 'default';
+  const env = Object.fromEntries(['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'].map((k) => [k, process.env[k] ?? null]));
+  logRun({ kind: 'work', args, allowed, denied, rules, prompt, model, effort: value('--effort') ?? null, resume: resume ?? null, tools, env });
+  const problems = [
+    ...['-p', '--verbose', '--restricted', '--strict-mcp-config', '--disable-slash-commands', '--include-partial-messages'].filter((f) => !args.includes(f)),
+    ...(value('--output-format') === 'stream-json' ? [] : ['--output-format stream-json']),
+    ...(value('--permission-mode') === 'dontAsk' ? [] : ['--permission-mode dontAsk']),
+    ...([WORK_TOOLS, ANALYZE_TOOLS].includes(tools) ? [] : [`--tools ${tools}`]),
+    ...(rules ? [] : ['--append-system-prompt-file']),
+    ...(denied.includes('Read(.env)') ? [] : ['Read(.env) denegado']),
+    ...args.filter((a) => /dangerously|bypassPermissions|acceptEdits|^--settings$|^--add-dir$/.test(a)).map((a) => `prohibido: ${a}`),
+    ...(tools === WORK_TOOLS && !allowed.includes('Edit') ? ['--allowedTools Edit'] : []),
+  ];
+  const sessionId = resume ?? newSessionId();
+  if (resume && !sessions()[resume]) {
+    jsonLine({ type: 'result', subtype: 'error_during_execution', is_error: true, num_turns: 0, session_id: resume, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 }, permission_denials: [] });
+    process.stderr.write(`No conversation found with session ID: ${resume}\n`);
+    return 1;
+  }
+  jsonLine({ type: 'system', subtype: 'init', cwd: process.cwd(), session_id: sessionId, tools: tools.split(',').filter((t) => t !== 'PowerShell').sort(), mcp_servers: [], model, permissionMode: value('--permission-mode'), claude_code_version: '2.1.329' });
+  const fail = (kind, text, usage = { input_tokens: 0, output_tokens: 0 }, cost = 0) => {
+    jsonLine({ type: 'assistant', message: { model: '<synthetic>', role: 'assistant', type: 'message', content: [{ type: 'text', text }] }, error: kind, session_id: sessionId });
+    jsonLine({ type: 'result', subtype: 'success', is_error: true, num_turns: 1, result: text, session_id: sessionId, total_cost_usd: cost, usage, permission_denials: [] });
+    return 1;
+  };
+  if (problems.length) return fail('invalid_request', `FAKE: flags de permisos incorrectos: ${problems.join(', ')}`);
+  if (!state.loggedIn || asked.includes('FAKE_AUTH_ERROR')) return fail('authentication_failed', 'Not logged in · Please run /login');
+  saveSession(sessionId, { cwd: process.cwd(), model });
+
+  let n = 0;
+  const say = async (text) => {
+    for (let i = 0; i < text.length; i += 8) {
+      jsonLine({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: text.slice(i, i + 8) } }, session_id: sessionId });
+      await wait(4);
+    }
+    jsonLine({ type: 'assistant', message: { model, content: [{ type: 'text', text }] }, session_id: sessionId });
+  };
+  const denials = [];
+  const ruleAllows = (tool, command) =>
+    allowed.some((rule) => {
+      const m = /^(\w+)\((.*)\)$/.exec(rule);
+      if (!m || m[1] !== tool) return false;
+      const pattern = m[2];
+      if (pattern.endsWith(' *')) return command === pattern.slice(0, -2) || command.startsWith(pattern.slice(0, -1));
+      return command === pattern;
+    });
+  const call = async (name, input, run) => {
+    const id = `toolu_fake_${++n}`;
+    jsonLine({ type: 'assistant', message: { model, content: [{ type: 'tool_use', id, name, input }] }, session_id: sessionId });
+    await wait(30);
+    const base = path.basename(input.file_path ?? '');
+    const isDenied =
+      (name === 'Bash' && !ruleAllows('Bash', input.command)) ||
+      (name === 'Read' && denied.includes(`Read(${base})`)) ||
+      ((name === 'Edit' || name === 'Write') && denied.includes(`Edit(${base})`));
+    if (isDenied) {
+      const denial = { tool_name: name, tool_use_id: id, tool_input: input };
+      denials.push(denial);
+      jsonLine({ type: 'system', subtype: 'permission_denied', ...denial, session_id: sessionId });
+      jsonLine({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: `Permission to use ${name} has been denied.`, is_error: true }] }, session_id: sessionId });
+      return false;
+    }
+    const content = run ? run() : 'ok';
+    jsonLine({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content }] }, session_id: sessionId });
+    return true;
+  };
+  const resolved = FAKE_MODELS.find((m) => m.value === model)?.resolvedModel ?? model;
+  const finish = async (text, turns = 3) => {
+    await say(text);
+    const cost = COST[model] ?? 0.01;
+    jsonLine({ type: 'result', subtype: 'success', is_error: false, num_turns: turns, duration_ms: 2100, result: text, session_id: sessionId, total_cost_usd: cost, usage: { input_tokens: 1200, output_tokens: 340, cache_read_input_tokens: 5000, cache_creation_input_tokens: 800 }, modelUsage: { [resolved]: { inputTokens: 1200, outputTokens: 340, costUSD: cost } }, permission_denials: denials });
+    return 0;
+  };
+
+  await say(resume ? 'Continúo la tarea anterior.' : 'Voy a revisar el proyecto.');
+  const firstFile = ['package.json', 'README.md', 'src/app.js'].find((f) => fs.existsSync(f));
+  if (firstFile) await call('Read', { file_path: path.join(process.cwd(), firstFile) }, () => fs.readFileSync(firstFile, 'utf8').slice(0, 200));
+  if (tools === ANALYZE_TOOLS) {
+    await call('Glob', { pattern: '**/*' });
+    return finish('# AGENTS.md\n\nInstrucciones para agentes de IA en este proyecto (borrador falso).\n\n## Stack\n- Node.js (package.json)\n\n## Comandos\n- Build: `npm run build`\n- Tests: `npm test`\n\n## Convenciones\n- Código en inglés, documentación en español.\n\n## Estructura\n- `src/`: código de la app.\n');
+  }
+  if (asked.includes('FAKE_SLOW')) {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    logRun({ kind: 'child', child: child.pid });
+    for (let i = 0; i < 200; i++) {
+      jsonLine({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '.' } }, session_id: sessionId });
+      await wait(300);
+    }
+    return finish('Terminé despacio.');
+  }
+  if (asked.includes('FAKE_WORK_ERROR')) return fail('rate_limit', "You've hit your usage limit · resets 3pm", { input_tokens: 300, output_tokens: 20 }, 0.002);
+  if (asked.includes('FAKE_SECRET')) await call('Read', { file_path: path.join(process.cwd(), '.env') }, () => fs.readFileSync('.env', 'utf8'));
+  const task = /## Tarea\n(.+)/.exec(prompt)?.[1]?.trim() ?? 'tarea';
+  let edited;
+  if (fs.existsSync('src/app.js')) {
+    edited = 'src/app.js';
+    await call('Edit', { file_path: path.join(process.cwd(), edited), old_string: '', new_string: `// ${task}` }, () => {
+      fs.appendFileSync(edited, `// ${task}\n`);
+      return 'The file has been updated.';
+    });
+  } else {
+    edited = 'NOTAS.md';
+    await call('Write', { file_path: path.join(process.cwd(), edited), content: `# ${task}\n` }, () => {
+      fs.writeFileSync(edited, `# ${task}\n`);
+      return 'File created.';
+    });
+  }
+  let curl = true;
+  if (asked.includes('FAKE_DENIED') || (resume && sessions()[resume]?.wantedCurl)) {
+    curl = await call('Bash', { command: 'curl -s https://example.com', description: 'Descargar' }, () => '<html>falso</html>');
+    saveSession(sessionId, { wantedCurl: !curl });
+  }
+  const built = await call('Bash', { command: 'npm run build', description: 'Build' }, () => 'build ok (falso)');
+  const notes = [`edité ${edited}`, built ? 'verifiqué con npm run build' : 'no pude correr el build', curl ? null : 'necesito permiso para ejecutar curl -s https://example.com'].filter(Boolean);
+  return finish(`Listo: ${notes.join('; ')}.`);
+}
+
 if (process.argv[2] === 'print') {
-  process.exitCode = await printMode(process.argv.slice(3));
+  const args = process.argv.slice(3);
+  const state = (() => {
+    try {
+      return JSON.parse(fs.readFileSync(process.env.FAKE_CLAUDE_STATE ?? '', 'utf8'));
+    } catch {
+      return { loggedIn: true };
+    }
+  })();
+  if (args.includes('--input-format')) process.exitCode = await initMode(args);
+  else if (args.includes('--restricted')) process.exitCode = await workMode(args, state);
+  else process.exitCode = await printMode(args);
 } else {
   interactive();
 }

@@ -37,6 +37,15 @@ TypeScript y xterm.js sobre ConPTY.
   de Windows). Antes de enviar nada oculta tokens, API keys, contraseñas, connection strings y
   archivos .env; "Ver qué se envía" muestra exactamente qué sale; ningún comando sugerido se
   ejecuta solo y los destructivos se marcan.
+- Modo orquestador (desactivable con `"orchestrator.enabled": false`): una tab "Orquestador" por
+  proyecto con un chat que, por cada mensaje, propone un plan (la tarea, qué agente, qué modelo y
+  qué esfuerzo, y por qué) y lo ejecuta con Claude Code (tu suscripción) cuando lo aprobás: ves en
+  vivo qué lee, edita y ejecuta, y al final el resumen, el diff, los tokens y el costo. Los
+  trabajadores editan archivos y solo ejecutan los comandos de build, tests y lint del proyecto;
+  cualquier otra cosa se te pregunta. Los modelos salen de tu Claude Code; `@haiku`, `@sonnet` u
+  `@opus` fuerza uno. Ofrece generar un `AGENTS.md` (y el `CLAUDE.md` que lo importa) mostrando
+  el contenido antes de crear nada, sin commits. La conversación y el registro de decisiones se
+  guardan en la configuración de Brisa, nunca en el repo.
 - Renderizado con WebGL (fallback DOM), búsqueda, links clickeables, copiar/pegar estilo Windows
   Terminal (o menú contextual) y zoom.
 - Barra de título propia con las tabs, como Windows Terminal: arrastrar la ventana desde el espacio

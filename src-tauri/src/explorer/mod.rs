@@ -1,7 +1,7 @@
 //! File explorer backend: directory listings (with .gitignore), watchers, git status and file
 //! operations. Like `pty`, it does not depend on Tauri, so it is tested headless.
 
-mod git;
+pub(crate) mod git;
 mod list;
 mod ops;
 mod watch;

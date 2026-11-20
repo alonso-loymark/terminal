@@ -18,6 +18,7 @@ pub mod credentials;
 #[cfg(windows)]
 mod http;
 mod manager;
+pub mod process;
 pub mod secrets;
 pub mod stream;
 

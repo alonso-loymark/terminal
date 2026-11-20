@@ -2655,3 +2655,459 @@ body,
   color: var(--success);
 }
 
+
+/* ------------------------------------------------------------------ orchestrator (Fase 8A) */
+
+/* An "Orquestador" tab: a chat in the pane's rectangle, painted like a sidebar card. */
+.orch-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--sidebar);
+  font: var(--ui-font);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.orch-pane[hidden] {
+  display: none;
+}
+
+.orch-header {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--line);
+}
+
+.orch-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-right: auto;
+}
+
+.orch-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orch-main-model {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--muted);
+}
+
+.orch-picker {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.orch-picker select,
+.orch-input textarea {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.orch-picker select {
+  padding: 2px 4px;
+}
+
+.orch-agent,
+.orch-muted {
+  color: var(--muted);
+}
+
+.orch-banner {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.orch-banner > span {
+  flex: 1 1 240px;
+}
+
+.orch-pane > .ai-error {
+  margin: var(--space-2) var(--space-3) 0;
+}
+
+.orch-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.orch-empty {
+  max-width: 620px;
+  line-height: 1.5;
+}
+
+.orch-user {
+  align-self: flex-end;
+  max-width: 80%;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.orch-user .orch-chip {
+  margin-right: 6px;
+}
+
+.orch-card {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  line-height: 1.45;
+}
+
+.orch-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 4px;
+}
+
+.orch-card-head .ai-link {
+  margin-left: auto;
+}
+
+.orch-text p,
+.orch-note-text p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.orch-text code,
+.orch-note code,
+.orch-banner code,
+.orch-question code,
+.orch-empty code {
+  padding: 0 3px;
+  border-radius: var(--radius-xs);
+  background: var(--panel);
+  font-family: 'Cascadia Mono', Consolas, monospace;
+}
+
+.orch-live {
+  color: var(--muted);
+}
+
+.orch-plan-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0 4px;
+}
+
+.orch-chip,
+.orch-badge {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.orch-chip[data-tone='accent'] {
+  border-color: var(--accent);
+}
+
+.orch-badge[data-tone='ok'] {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.orch-badge[data-tone='error'] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.orch-badge[data-tone='working'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  animation: ai-dot 1.4s infinite ease-in-out;
+}
+
+.orch-why {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.orch-files {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
+.orch-usage {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.orch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.orch-actions button,
+.orch-banner button,
+.orch-input-side button {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.orch-actions button.primary,
+.orch-banner button.primary,
+.orch-input-side button.primary {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 24%, var(--panel));
+}
+
+.orch-actions button:disabled,
+.orch-banner button:disabled,
+.orch-input-side button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.orch-actions button:focus-visible,
+.orch-banner button:focus-visible,
+.orch-input-side button:focus-visible,
+.orch-diff-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.orch-activity {
+  margin: 4px 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.orch-activity li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 0;
+}
+
+.orch-activity li[data-ok='running'] {
+  color: var(--accent);
+}
+
+.orch-activity li[data-ok='false'] {
+  color: var(--danger);
+}
+
+.orch-activity-icon {
+  flex: none;
+  width: 16px;
+  text-align: center;
+}
+
+.orch-activity-verb {
+  flex: none;
+  color: var(--muted);
+}
+
+.orch-activity-target {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+}
+
+.orch-question {
+  margin: var(--space-2) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
+.orch-question ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.orch-diff {
+  margin-top: var(--space-2);
+}
+
+.orch-diff-file {
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.orch-diff-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 3px 8px;
+  border: 0;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orch-diff-status {
+  flex: none;
+  width: 14px;
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.orch-diff-status[data-status='added'] {
+  color: var(--success);
+}
+
+.orch-diff-status[data-status='deleted'] {
+  color: var(--danger);
+}
+
+.orch-diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+}
+
+.orch-diff-counts [data-tone='add'] {
+  color: var(--success);
+}
+
+.orch-diff-counts [data-tone='del'] {
+  color: var(--danger);
+}
+
+.orch-diff-text {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 4px 0;
+  background: var(--bg);
+  font: 12px 'Cascadia Mono', Consolas, monospace;
+}
+
+.orch-diff-text > span {
+  display: block;
+  padding: 0 8px;
+  white-space: pre;
+}
+
+.orch-diff-text > [data-line='add'] {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+
+.orch-diff-text > [data-line='del'] {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.orch-diff-text > [data-line='hunk'] {
+  color: var(--muted);
+}
+
+.orch-note {
+  align-self: center;
+  max-width: 90%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.orch-input {
+  flex: none;
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: var(--line);
+}
+
+.orch-input textarea {
+  flex: 1;
+  min-height: 40px;
+  max-height: 160px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.orch-input textarea:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.orch-input-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.dialog.orch-instructions {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.orch-instructions-text {
+  flex: 1;
+  min-height: 260px;
+  margin: 8px 0 12px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: 12px 'Cascadia Mono', Consolas, monospace;
+  resize: vertical;
+}

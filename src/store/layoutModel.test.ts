@@ -209,3 +209,23 @@ test('the session keeps which panes own a Brisa worktree; a layout never does', 
   const layout = snapshotWindow(ws);
   assert.equal(JSON.stringify(windowToJson(layout)).includes('"worktree":'), false);
 });
+
+test('an orchestrator tab comes back as the chat of its project folder, not as a terminal', () => {
+  const dir = 'C:\\Repos\\Cliente App';
+  let ws = addTab(emptyWorkspace(), { tabId: 't1', paneId: 'p1', kind: 'orchestrator', cwd: dir });
+  ws = splitPane(ws, 'p1', 'horizontal', { paneId: 'p2', splitId: 's1' }, { profile: null, cwd: dir });
+  assert.equal(ws.panes.p1?.kind, 'orchestrator');
+  assert.equal(ws.panes.p1?.title, 'Orquestador · Cliente App');
+  assert.equal(ws.panes.p2?.kind, 'terminal', 'splitting it opens a terminal in the project');
+  const restored = parseSession(JSON.parse(sessionToText({ version: 1, window: snapshotWindow(ws), recent: [] })));
+  const built = instantiate(emptyWorkspace(), restored.window!, { id: ids() });
+  const panes = Object.values(built.ws.panes);
+  assert.deepEqual(
+    panes.map((p) => [p.kind, p.cwd ?? p.startCwd]),
+    [
+      ['orchestrator', dir],
+      ['terminal', dir],
+    ],
+  );
+  assert.deepEqual(built.commands, []);
+});

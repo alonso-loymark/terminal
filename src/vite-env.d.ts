@@ -39,5 +39,7 @@ declare global {
     __ai?: typeof import('./store/ai').useAi;
     /** ai_query without the UI (the backend's own ai.enabled gate). */
     __aiQuery?: (payload: import('./lib/aiApi').AiPayload) => Promise<number>;
+    __orch?: typeof import('./store/orchestrator').useOrchestrator;
+    __orchRun?: (spec: import('./lib/agentsApi').TaskSpec) => Promise<number>;
   }
 }

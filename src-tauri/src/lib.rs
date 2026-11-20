@@ -1,9 +1,12 @@
+pub mod agents;
 pub mod ai;
 mod ai_commands;
 mod commands;
 pub mod explorer;
 mod explorer_commands;
 mod notifications;
+pub mod orchestrator;
+mod orchestrator_commands;
 pub mod pty;
 pub mod settings;
 mod settings_commands;
@@ -14,9 +17,11 @@ use tauri::webview::PageLoadEvent;
 use tauri::window::{Color, Effect, EffectsBuilder};
 use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+use crate::agents::{AgentsConfig, AgentsManager};
 use crate::ai::{AiConfig, AiManager, Endpoint};
 use crate::explorer::WatchManager;
 use crate::notifications::NotificationState;
+use crate::orchestrator_commands::OrchestratorState;
 use crate::pty::PtyManager;
 use crate::settings::Backdrop;
 use crate::settings_commands::SettingsState;
@@ -86,11 +91,24 @@ fn ai_config() -> AiConfig {
     }
 }
 
+/// The orchestrator's fixed settings: the same `claude` the AI layer uses (and the same dev
+/// override for the e2e's fake).
+fn agents_config(ai: &AiConfig) -> AgentsConfig {
+    AgentsConfig {
+        work_dir: std::env::temp_dir().join("brisa-agents"),
+        claude_override: ai.claude_override.clone(),
+    }
+}
+
 pub fn run() -> tauri::Result<()> {
+    let ai = ai_config();
+    let agents = agents_config(&ai);
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PtyManager::new())
-        .manage(AiManager::new(ai_config()))
+        .manage(AiManager::new(ai))
+        .manage(AgentsManager::new(agents))
+        .manage(OrchestratorState::default())
         .manage(WatchManager::new())
         .manage(NotificationState::default())
         .setup(|app| create_main_window(app))
@@ -135,6 +153,18 @@ pub fn run() -> tauri::Result<()> {
             ai_commands::ai_set_api_key,
             ai_commands::ai_delete_api_key,
             ai_commands::ai_scrub_env,
+            orchestrator_commands::orch_configure,
+            orchestrator_commands::agents_detect,
+            orchestrator_commands::orch_project,
+            orchestrator_commands::orch_check_pattern,
+            orchestrator_commands::orch_ask,
+            orchestrator_commands::orch_run,
+            orchestrator_commands::orch_cancel,
+            orchestrator_commands::orch_load,
+            orchestrator_commands::orch_save,
+            orchestrator_commands::orch_snapshot,
+            orchestrator_commands::orch_diff,
+            orchestrator_commands::orch_write_instructions,
             titlebar::titlebar_listen,
             titlebar::titlebar_buttons,
             titlebar::set_title_bar,
@@ -159,6 +189,12 @@ pub fn run() -> tauri::Result<()> {
                 webview
                     .state::<AiManager>()
                     .cancel_owned_by(webview.label());
+                webview
+                    .state::<AgentsManager>()
+                    .cancel_owned_by(webview.label());
+                webview
+                    .state::<OrchestratorState>()
+                    .forget_owned_by(webview.label());
             }
         })
         .on_window_event(|window, event| {
@@ -174,6 +210,12 @@ pub fn run() -> tauri::Result<()> {
                 window.state::<PtyManager>().close_owned_by(window.label());
                 window.state::<WatchManager>().stop_owned_by(window.label());
                 window.state::<AiManager>().cancel_owned_by(window.label());
+                window
+                    .state::<AgentsManager>()
+                    .cancel_owned_by(window.label());
+                window
+                    .state::<OrchestratorState>()
+                    .forget_owned_by(window.label());
                 titlebar::forget();
             }
         })
@@ -188,6 +230,7 @@ pub fn run() -> tauri::Result<()> {
             app.state::<PtyManager>().shutdown();
             app.state::<WatchManager>().shutdown();
             app.state::<AiManager>().shutdown();
+            app.state::<AgentsManager>().shutdown();
         }
     });
     Ok(())

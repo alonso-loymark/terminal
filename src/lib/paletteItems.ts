@@ -40,6 +40,7 @@ const KEEPS_FOCUS = new Set([
   'layout.saveTab',
   'layout.saveWindow',
   'agents.multiAgent',
+  'orchestrator.open',
 ]);
 
 export function paletteItems(): PaletteItem[] {
@@ -51,6 +52,7 @@ export function paletteItems(): PaletteItem[] {
   for (const action of ACTIONS) {
     if (action.paletteHidden) continue;
     if (action.category === 'agents' && !useSettings.getState().settings.agents.enabled) continue;
+    if (action.category === 'orchestrator' && !useSettings.getState().settings.orchestrator.enabled) continue;
     items.push({
       id: action.id,
       label: action.label,

@@ -17,25 +17,22 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::thread;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use super::process::{TempFile, Tree, capture, command, feed, read_lines, read_tail};
 use super::stream::{ClaudeStream, Item, classify_cli_exit};
 use super::{AiConfig, AiEvent, AiRequest, CancelToken, Effort, ErrorCode, Failure, Role};
-use crate::pty::{NESTED_SESSION_VARS, expand_env, find_on_path};
+use crate::pty::{expand_env, find_on_path};
 
 /// A request that runs longer than this is abandoned (the user can cancel before).
 const TIMEOUT: Duration = Duration::from_secs(180);
 const POLL: Duration = Duration::from_millis(100);
-/// Kept from stderr, for the error message.
-const STDERR_TAIL: usize = 8 * 1024;
 
 /// Where `claude` is: `ai.claudePath` if set (never anything else then: a wrong path is an
 /// error, not a reason to run another `claude`), the dev override, or this machine's install.
@@ -87,7 +84,7 @@ pub fn find_claude(custom: Option<&str>, dev_override: Option<&Path>) -> Result<
 }
 
 /// The command line after `claude`.
-pub fn args(model: &str, effort: Option<Effort>, system_file: &Path) -> Vec<OsString> {
+pub fn args(model: &str, effort: Option<&str>, system_file: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-p",
         "--output-format",
@@ -116,120 +113,9 @@ pub fn args(model: &str, effort: Option<Effort>, system_file: &Path) -> Vec<OsSt
     args.push(system_file.as_os_str().to_owned());
     if let Some(effort) = effort {
         args.push("--effort".into());
-        args.push(effort.as_str().into());
+        args.push(effort.into());
     }
     args
-}
-
-/// `claude` with a clean environment, no window, in Brisa's empty folder.
-fn command(exe: &Path, args: &[OsString], work_dir: &Path) -> Command {
-    let mut command = Command::new(exe);
-    command.args(args).current_dir(work_dir);
-    for var in NESTED_SESSION_VARS {
-        command.env_remove(var);
-    }
-    // Nothing to remember from these one-off questions.
-    command.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
-
-/// The running process tree: killed whole on cancel, timeout or drop.
-struct Tree {
-    child: Mutex<Child>,
-    #[cfg(windows)]
-    job: Option<crate::pty::job::Job>,
-}
-
-impl Tree {
-    fn spawn(mut command: Command) -> std::io::Result<Arc<Self>> {
-        let child = command.spawn()?;
-        #[cfg(windows)]
-        let job = {
-            use std::os::windows::io::AsRawHandle;
-            crate::pty::job::Job::kill_on_close()
-                .and_then(|job| job.assign(child.as_raw_handle()).map(|()| job))
-                .ok()
-        };
-        Ok(Arc::new(Self {
-            child: Mutex::new(child),
-            #[cfg(windows)]
-            job,
-        }))
-    }
-
-    fn kill(&self) {
-        #[cfg(windows)]
-        if let Some(job) = &self.job {
-            job.terminate();
-            return;
-        }
-        let _ = self
-            .child
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .kill();
-    }
-
-    fn try_wait(&self) -> Option<Option<i32>> {
-        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
-        match child.try_wait() {
-            Ok(Some(status)) => Some(status.code()),
-            Ok(None) => None,
-            Err(_) => Some(None),
-        }
-    }
-
-    fn take_pipes(
-        &self,
-    ) -> (
-        Option<std::process::ChildStdin>,
-        Option<std::process::ChildStdout>,
-        Option<std::process::ChildStderr>,
-    ) {
-        let mut child = self.child.lock().unwrap_or_else(PoisonError::into_inner);
-        (child.stdin.take(), child.stdout.take(), child.stderr.take())
-    }
-}
-
-impl Drop for Tree {
-    fn drop(&mut self) {
-        // Nothing of a request outlives it (the job's KILL_ON_JOB_CLOSE does the same).
-        if self.try_wait().is_none() {
-            self.kill();
-        }
-    }
-}
-
-/// Removes the system prompt file however the request ends.
-struct TempFile(PathBuf);
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-fn read_tail(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<String> {
-    thread::spawn(move || {
-        let mut tail: Vec<u8> = Vec::new();
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = pipe.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            tail.extend_from_slice(&buf[..n]);
-            if tail.len() > STDERR_TAIL {
-                tail.drain(..tail.len() - STDERR_TAIL);
-            }
-        }
-        String::from_utf8_lossy(&tail).into_owned()
-    })
 }
 
 /// The user's text for stdin: the frontend sends one message for the CLI; a longer history
@@ -276,12 +162,13 @@ pub fn run(
             format!("no se pudo crear {}: {e}", config.work_dir.display()),
         )
     })?;
-    let system_file = TempFile(
+    let system_file = TempFile::write(
         config
             .work_dir
             .join(format!("system-{}-{id}.txt", std::process::id())),
-    );
-    fs::write(&system_file.0, &request.system).map_err(|e| {
+        &request.system,
+    )
+    .map_err(|e| {
         Failure::new(
             ErrorCode::Failed,
             format!("no se pudo preparar la consulta: {e}"),
@@ -290,7 +177,11 @@ pub fn run(
 
     let mut command = command(
         &exe,
-        &args(&request.model, request.effort, &system_file.0),
+        &args(
+            &request.model,
+            request.effort.map(Effort::as_str),
+            &system_file.0,
+        ),
         &config.work_dir,
     );
     command
@@ -314,25 +205,11 @@ pub fn run(
     });
 
     let (stdin, stdout, stderr) = tree.take_pipes();
-    let prompt = prompt_of(request);
-    if let Some(mut stdin) = stdin {
-        // A large prompt fills the pipe before claude reads it: write from another thread.
-        thread::spawn(move || {
-            let _ = stdin.write_all(prompt.as_bytes());
-        });
-    }
+    feed(stdin, prompt_of(request));
     let stderr = stderr.map(read_tail);
-    let (tx, rx) = mpsc::channel::<String>();
-    if let Some(stdout) = stdout {
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-    }
+    let Some(rx) = stdout.map(read_lines) else {
+        return Err(Failure::new(ErrorCode::Failed, "claude no tiene salida."));
+    };
 
     let deadline = Instant::now() + TIMEOUT;
     let mut parser = ClaudeStream::default();
@@ -359,17 +236,7 @@ pub fn run(
         }
     }
     // stdout closed: the process is exiting (or a grandchild kept the pipe; the job ends it).
-    let exit_deadline = Instant::now() + Duration::from_secs(5);
-    let exit_code = loop {
-        if let Some(code) = tree.try_wait() {
-            break code;
-        }
-        if Instant::now() > exit_deadline {
-            tree.kill();
-            break None;
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
+    let exit_code = tree.wait_exit(Duration::from_secs(5));
     let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
     if cancel.is_cancelled() {
         return Ok(());
@@ -392,36 +259,6 @@ pub struct ClaudeStatus {
     /// `claude auth status --json` (local: no request to any model).
     pub logged_in: Option<bool>,
     pub auth_method: Option<String>,
-}
-
-/// Runs `claude <args>` to completion (or kills it after `timeout`): (exit code, stdout).
-fn capture(
-    exe: &Path,
-    args: &[&str],
-    work_dir: &Path,
-    timeout: Duration,
-) -> Option<(Option<i32>, String)> {
-    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-    let mut command = command(exe, &args, work_dir);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let tree = Tree::spawn(command).ok()?;
-    let (_, stdout, _) = tree.take_pipes();
-    let out = read_tail(stdout?);
-    let deadline = Instant::now() + timeout;
-    let code = loop {
-        if let Some(code) = tree.try_wait() {
-            break code;
-        }
-        if Instant::now() > deadline {
-            tree.kill();
-            return None;
-        }
-        thread::sleep(Duration::from_millis(30));
-    };
-    Some((code, out.join().unwrap_or_default()))
 }
 
 pub fn status(config: &AiConfig, custom: Option<&str>) -> Result<ClaudeStatus, Failure> {
@@ -458,7 +295,7 @@ mod tests {
 
     #[test]
     fn every_isolation_flag_is_on_the_command_line() {
-        let args: Vec<String> = args("opus", Some(Effort::Low), Path::new(r"C:\t\system.txt"))
+        let args: Vec<String> = args("opus", Some("low"), Path::new(r"C:\t\system.txt"))
             .into_iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();

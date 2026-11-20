@@ -8,6 +8,7 @@ import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { Layout, PaneId, SplitId } from '../store/workspaceModel';
 import { aiEnabled, cancelPaneQuery, explainLastFailed, toggleCommandBar, togglePanel } from './aiActions';
 import { navigateBlocks } from './blockActions';
+import { openOrchestrator } from './orchestratorActions';
 import { readText } from './clipboard';
 import { copySelection } from './keybindings';
 import { openLayoutsJson } from './layoutsSync';
@@ -143,9 +144,12 @@ const RUNNERS: Record<ActionId, Runner> = {
     const pane = ws().panes[selectActivePaneId(ws()) ?? ''];
     useUi.getState().openMultiAgent(pane?.cwd ?? pane?.startCwd ?? null);
   },
+  'orchestrator.open': () => openOrchestrator(),
   // With AI off the keys go on to the program (Ctrl+I is Tab there).
   'ai.command': (ctx) => {
     if (!aiEnabled()) return 'pass';
+    // The orchestrator's chat has no terminal to insert into.
+    if (ws().panes[ctx.paneId ?? selectActivePaneId(ws()) ?? '']?.kind === 'orchestrator') return 'pass';
     toggleCommandBar(ctx.paneId);
   },
   'ai.panel': () => {

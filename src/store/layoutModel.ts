@@ -8,6 +8,7 @@ import {
   activateTab,
   COLORS,
   newPane,
+  orchestratorPane,
   normalize,
   normalizeLayout,
   normalizeSizes,
@@ -34,6 +35,8 @@ export interface PaneSpec {
   focus?: boolean;
   /** Maximized inside its tab. */
   zoom?: boolean;
+  /** The orchestrator's chat for `cwd` instead of a terminal. */
+  orchestrator?: boolean;
   /** Session only: the worktree Brisa created for the pane (removed when it closes). */
   worktree?: PaneWorktree;
 }
@@ -95,6 +98,7 @@ function snapshotNode(ws: Workspace, tab: Tab, node: Layout, options: SnapshotOp
   }
   const pane = ws.panes[node.paneId];
   const spec: PaneSpec = {};
+  if (pane?.kind === 'orchestrator') spec.orchestrator = true;
   if (pane?.profile) spec.profile = pane.profile;
   const cwd = pane?.cwd ?? pane?.startCwd;
   if (cwd) spec.cwd = cwd;
@@ -177,8 +181,12 @@ export function instantiate(ws: Workspace, spec: WindowSpec, options: Instantiat
       return { type: 'split', id: id('split'), direction: node.split, children, sizes: normalizeSizes(sizes) };
     }
     const paneId = id('pane');
-    panes[paneId] = { ...newPane(paneId, { profile: node.profile ?? null, cwd: node.cwd ?? null }), worktree: node.worktree ?? null };
-    if (node.command?.trim()) commands.push({ paneId, command: node.command.trim() });
+    if (node.orchestrator && node.cwd) {
+      panes[paneId] = orchestratorPane(paneId, node.cwd);
+    } else {
+      panes[paneId] = { ...newPane(paneId, { profile: node.profile ?? null, cwd: node.cwd ?? null }), worktree: node.worktree ?? null };
+      if (node.command?.trim()) commands.push({ paneId, command: node.command.trim() });
+    }
     if (node.focus && !tab.focus) tab.focus = paneId;
     if (node.zoom && !tab.zoom) tab.zoom = paneId;
     return { type: 'pane', paneId };
@@ -234,7 +242,7 @@ const err = (issues: Issue[], path: string, message: string) => issues.push({ pa
 const warn = (issues: Issue[], path: string, message: string) => issues.push({ path, message, severity: 'warning' });
 const join = (path: string, key: string | number) => (typeof key === 'number' ? `${path}[${key}]` : path ? `${path}.${key}` : key);
 
-const PANE_KEYS = ['profile', 'cwd', 'command', 'focus', 'zoom'] as const;
+const PANE_KEYS = ['profile', 'cwd', 'command', 'focus', 'zoom', 'orchestrator'] as const;
 /** Accepted when reading (the session writes it); never written to layouts. */
 const READ_ONLY_PANE_KEYS = ['worktree'] as const;
 const TAB_KEYS = ['title', 'color', 'group', 'active', 'layout'] as const;
@@ -251,7 +259,7 @@ function parsePane(value: Record<string, unknown>, path: string, issues: Issue[]
     if (typeof v !== 'string') return err(issues, join(path, key), 'tiene que ser texto'), null;
     if (v.trim()) spec[key] = v;
   }
-  for (const key of ['focus', 'zoom'] as const) {
+  for (const key of ['focus', 'zoom', 'orchestrator'] as const) {
     const v = value[key];
     if (v === undefined) continue;
     if (typeof v !== 'boolean') return err(issues, join(path, key), 'tiene que ser true o false'), null;
@@ -457,6 +465,7 @@ export function layoutsJsonSchema(profiles: readonly string[] = []): JsonSchema 
     command: { type: 'string', description: 'Comando a escribir cuando la shell está lista (según la integración de shell). Sin integración no se escribe.' },
     focus: { type: 'boolean', description: 'El panel activo de la tab.' },
     zoom: { type: 'boolean', description: 'Maximizado dentro de la tab.' },
+    orchestrator: { type: 'boolean', description: 'El chat del orquestador de la carpeta "cwd" en vez de una terminal.' },
   };
   return {
     $schema: 'http://json-schema.org/draft-07/schema#',

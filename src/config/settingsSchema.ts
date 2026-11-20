@@ -61,6 +61,38 @@ const redactPattern: Schema<string> = custom({
   json: () => ({ type: 'string', description: 'Expresión regular (sin distinguir mayúsculas). Ejemplos: "ACME", "\\bcliente-[a-z]+\\.local\\b".' }),
 });
 
+const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'node', 'python', 'python3', 'py', 'npx', 'bunx', 'pnpx', 'deno', 'ruby', 'perl', 'env', 'sudo', 'xargs', 'eval', 'exec']);
+
+/**
+ * Why a command pattern cannot be an allowed command of the orchestrator's workers (null: it
+ * can). Mirrors `validate_pattern` in src-tauri/src/agents/permissions.rs, which has the last
+ * word: one line, no rule syntax, a plain program name first, never `<interpreter> *`.
+ */
+export function commandPatternIssue(pattern: string): string | null {
+  const p = pattern.trim();
+  if (!p || p.length > 300) return 'vacío o demasiado largo';
+  if ([...p].some((c) => c.charCodeAt(0) < 32)) return 'tiene saltos de línea o caracteres de control';
+  if (/[()]/.test(p)) return 'no puede tener paréntesis';
+  if (p.includes('%')) return 'no puede tener %';
+  const [program = '', ...rest] = p.split(/\s+/);
+  if (!/^[A-Za-z0-9._\-/\\:@]+$/.test(program)) return `«${program}» no es un nombre de programa`;
+  if (rest.length > 0 && rest.every((w) => /^\*+$/.test(w)) && INTERPRETERS.has(program.toLowerCase())) return `«${p}» permitiría ejecutar cualquier cosa`;
+  return null;
+}
+
+const commandPattern: Schema<string> = custom({
+  default: '',
+  parse(value, path, issues) {
+    const issue = typeof value === 'string' ? commandPatternIssue(value) : 'tiene que ser texto';
+    if (issue) {
+      issues.push({ path, message: issue, severity: 'error' });
+      return '';
+    }
+    return (value as string).trim();
+  },
+  json: () => ({ type: 'string', description: 'Un comando (con * = cualquier texto). Ejemplos: "npm run e2e *", "docker compose build *".' }),
+});
+
 /** Model aliases offered in VS Code and in the settings screen (any full model id works too). */
 export const AI_MODELS = ['opus', 'sonnet', 'haiku', 'fable'] as const;
 
@@ -218,6 +250,35 @@ export const settingsSchema = object(
         }),
       },
       { description: 'IA: proveedor, modelo y qué se oculta antes de enviar.' },
+    ),
+    orchestrator: object(
+      {
+        enabled: boolean({
+          default: true,
+          description: 'El modo orquestador: tabs "Orquestador" con un chat por proyecto que decide qué agente, modelo y esfuerzo usar y ejecuta cada tarea con Claude Code (claude -p, tu suscripción) en la carpeta del proyecto. Con false no se lanza nada.',
+        }),
+        mainModel: string({
+          default: 'sonnet',
+          nonEmpty: true,
+          description: 'Modelo principal (el que arma el plan de cada mensaje): un alias de los que ofrece Claude Code (sonnet = costo medio). Cada proyecto puede elegir otro en su selector.',
+          examples: () => [...AI_MODELS],
+        }),
+        autoApprove: boolean({
+          default: false,
+          description: 'Ejecutar el plan sin pedir aprobación (el plan se muestra igual). Con false, cada plan espera "Aprobar".',
+        }),
+        allowedCommands: array(commandPattern, {
+          description: 'Comandos que los trabajadores pueden ejecutar además de los que Brisa detecta en el proyecto (build, tests y lint de package.json, Cargo.toml, go.mod, .NET, pytest, Makefile…) y de git en solo lectura. Todo lo demás se deniega y se te pregunta.',
+        }),
+        maxTurns: number({
+          default: 80,
+          min: 5,
+          max: 400,
+          integer: true,
+          description: 'Máximo de turnos de un trabajador por tarea (un tope para que una tarea no siga indefinidamente).',
+        }),
+      },
+      { description: 'Modo orquestador: un chat por proyecto que delega cada tarea en un agente (Claude Code) con el modelo adecuado.' },
     ),
     keybindings: keybindingsSchema(),
   },

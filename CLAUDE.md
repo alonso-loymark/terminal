@@ -105,6 +105,12 @@ Reglas de la arquitectura:
   IA (`ai_commands.rs` → `ai/`): `ai_configure` (el frontend avisa `ai.enabled`; apagada, el
   resto se niega a lanzar nada), `ai_query` (canal por consulta: deltas, después `done` o
   `error`), `ai_cancel`, `ai_status`, `ai_set_api_key` / `ai_delete_api_key` y `ai_scrub_env`.
+  Orquestador (`orchestrator_commands.rs` → `agents/` y `orchestrator/`): `orch_configure`
+  (`orchestrator.enabled`; apagado, el resto se niega), `agents_detect` (CLIs instalados, sesión
+  y modelos), `orch_project` (comandos detectados, AGENTS.md / CLAUDE.md), `orch_check_pattern`,
+  `orch_ask` (el plan, canal por consulta), `orch_run` (un trabajador, canal), `orch_cancel`,
+  `orch_load` / `orch_save` (conversación, decisiones y preferencias del proyecto en la carpeta
+  de config), `orch_snapshot` / `orch_diff` y `orch_write_instructions`.
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -429,7 +435,9 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   `explorer` (arranque, ancho, ocultos, clic en carpeta), `profiles` (`default`, `list`),
   `session` (`restore`), `blocks` (`enabled`), `agents` (`enabled`, `idleSeconds`, `commands`),
   `notifications` (`enabled`, `bell`, `agents`), `ai` (`enabled`, `provider`, `model`,
-  `claudePath`, `redact`; ver "IA") y `keybindings` (ver "Atajos configurables").
+  `claudePath`, `redact`; ver "IA"), `orchestrator` (`enabled`, `mainModel`, `autoApprove`,
+  `allowedCommands`, `maxTurns`; ver "Modo orquestador") y `keybindings` (ver "Atajos
+  configurables").
 - **Errores**: JSON roto o un valor inválido (tipo, rango, opción) → el archivo entero se
   rechaza y **sigue la última configuración válida**; la barra de estado muestra
   "⚠ settings.json" (tooltip con línea/ruta y motivo; clic → la configuración, que lista los
@@ -823,6 +831,142 @@ acceso a archivos, solo el contexto que Brisa arma (y muestra).
   descartable (`BRISA_CREDENTIAL_TARGET`, borrada al final; verificada con `cmdkey`). Las tres
   variables solo se leen en builds de desarrollo.
 
+## Modo orquestador
+
+Fase 8A. Una tab "Orquestador" por carpeta de proyecto (paleta o "▾" → "Abrir orquestador
+aquí", en la carpeta del panel activo): un chat que por cada mensaje decide **una tarea**, con
+qué agente, modelo y esfuerzo, y la ejecuta con un agente de IA que programa (un *trabajador*) en
+la carpeta del proyecto. Todo con `orchestrator.enabled` (apagado no se lanza nada; el backend se
+niega por su cuenta). Independiente de `ai.enabled` (que cubre "Explicar / arreglar", Ctrl+I y
+el panel de IA).
+
+- **Adaptadores** (`src-tauri/src/agents/`, sin Tauri, tests en `tests/agents.rs`): el trait
+  `AgentAdapter` es la interfaz común de un CLI de agente:
+  - `detect`: instalado, versión, sesión (`auth status`) y **modelos con sus niveles de
+    esfuerzo, detectados del CLI** (nada hardcodeado);
+  - `ask`: una respuesta de solo texto (el plan), aislada como la capa de IA;
+  - `run`: una tarea no interactiva en la carpeta del proyecto con eventos en streaming
+    (`TaskEvent`: `started` con la sesión, `text`, `tool` —leyó / editó / creó / ejecutó /
+    buscó—, `toolDone`, `denied`, `status`, y exactamente un `done` —resumen, sesión, tokens,
+    costo, denegaciones— o `error` con lo gastado hasta ahí);
+  - retomar una sesión: `TaskSpec.resume` (continuar después de un permiso).
+  `AgentsManager` corre cada pedido en su hilo (`agent-<id>`), con cancelación y dueño (la
+  página, como las sesiones); cachea la detección por CLI y ruta.
+- **Claude Code** (`agents/claude_code.rs`, el único en esta fase; mismo `claude` que la capa
+  de IA: `ai.claudePath`, el PATH… y `BRISA_CLAUDE_PATH` en dev). Verificado contra la
+  documentación (code.claude.com/docs/en/permissions, /cli-reference, /headless) y contra
+  `claude` 2.1.329 con un `CLAUDE_CONFIG_DIR` vacío (sin sesión no hay llamada a ningún modelo):
+  - **Modelos**: el control request `initialize` del modo `--input-format stream-json` devuelve
+    la misma lista que `/model` (`value`, `displayName`, descripción con el precio por Mtok,
+    `supportedEffortLevels`); solo se manda ese mensaje (ningún turno) y se mata el proceso.
+  - **Plan**: `ai::claude_cli::args` (sin herramientas, `--safe-mode`, carpeta vacía).
+  - **Trabajador**: `claude -p --output-format stream-json --verbose --include-partial-messages
+    --restricted --tools Read,Edit,Write,Glob,Grep,Bash,PowerShell --permission-mode dontAsk
+    --allowedTools Edit Write Bash(<patrón>)… --disallowedTools <secretos>… --strict-mcp-config
+    --disable-slash-commands --model --effort --max-turns [--resume <sesión>]
+    --append-system-prompt-file <reglas>`, en la carpeta del proyecto, prompt (el brief) por stdin,
+    dentro de un Job Object. `--restricted`: sin herramientas que ejecutan código salvo las que
+    nombra `--tools`, sin settings de usuario/proyecto/local (ni hooks ni reglas del repo), las
+    herramientas de archivos confinadas al proyecto, escribir en `.git` o en settings necesita una
+    persona, y rechaza `bypassPermissions`. `dontAsk`: lo que no está preaprobado se **deniega**
+    (nunca se pregunta ni se ejecuta). Nunca `--dangerously-skip-permissions`,
+    `--allow-dangerously-skip-permissions` ni `bypassPermissions` (un test lo verifica; el agente
+    falso los rechaza). `PowerShell` en `--tools` se ignora donde Claude Code usa Bash.
+  - El análisis para AGENTS.md: `--tools Read,Glob,Grep`, sin `--allowedTools`.
+  - Un `--resume` de una sesión que no existe: `result` con `error_during_execution` y el
+    motivo en stderr ("No conversation found…"), que es lo que se muestra.
+- **Permisos** (`agents/permissions.rs`): permitido editar archivos del proyecto (`Edit`,
+  `Write`) y solo estos comandos: los de build, tests y lint que Brisa detecta en sus archivos
+  (scripts `build`/`test`/`lint`/`typecheck`/`check` y sus `:variantes` de package.json con
+  npm/pnpm/yarn/bun según el lockfile; Cargo; go; .NET; pytest/ruff; Maven; Gradle; targets de
+  Makefile), git en solo lectura (`git status|diff|log *`), `orchestrator.allowedCommands` y lo
+  que el usuario permitió para ese proyecto. Cada patrón se valida (Rust tiene la última palabra;
+  `commandPatternIssue` en el esquema de settings hace lo mismo): una línea, sin paréntesis ni `%`
+  (`claude.cmd` pasa por cmd.exe), un nombre de programa primero y nunca `<intérprete> *`
+  (`bash *`, `node *`…). Las reglas se aplican a cada parte de un comando compuesto (`&&`, `|`…).
+  Denegado siempre (deny gana): leer o editar `.env`, `.env.*`, claves (`*.pem`, `*.key`,
+  `id_rsa*`…), `.npmrc`/`.pypirc`/`.netrc`, `credentials.json`/`secrets.json`; editar
+  `AGENTS.md`/`CLAUDE.md` (solo Brisa los escribe, con confirmación); `git * --output*`.
+- **Lo que no está permitido es una pregunta**: cada denegación (`system`/`permission_denied` y
+  `permission_denials` del `result`) se muestra en la tarea con "Permitir y continuar" (retoma
+  la sesión con `--resume` y ese comando exacto permitido, solo para esa continuación),
+  "Permitir siempre en este proyecto" (`project.json` en la carpeta de config) o "No permitir".
+  Un comando compuesto propone cada parte; con sustitución (`$(…)`, backticks) o una
+  herramienta que el trabajador no tiene (WebFetch), no se puede permitir desde Brisa.
+- **AGENTS.md** (`orchestrator/instructions.rs` + `InstructionsBanner`): la fuente única de
+  instrucciones para cualquier agente. Si falta, se ofrece "Generar AGENTS.md…": un trabajador de
+  solo lectura analiza stack, comandos, convenciones y estructura y devuelve el borrador, que se
+  muestra **editable** antes de escribir nada. Después, CLAUDE.md: si falta, uno mínimo que lo
+  importa (`@AGENTS.md`); si existe sin la importación (`CLAUDE.md` o `.claude/CLAUDE.md`), se
+  ofrece agregarla mostrando el archivo completo resultante (el resto queda igual). **Nunca se
+  crea, modifica ni commitea ninguno sin mostrar el contenido y confirmar**; la escritura dice qué
+  espera encontrar (nada, o exactamente lo que el usuario vio) y se niega si cambió. Los
+  trabajadores tienen `Edit(AGENTS.md)` / `Edit(CLAUDE.md)` denegados.
+- **Plan** (`lib/orchestratorModel.ts`, puro, con tests): el modelo principal (selector de la
+  tab; por defecto `orchestrator.mainModel` = `sonnet`, costo medio; cada proyecto recuerda el
+  suyo) recibe `PLANNER_SYSTEM` (criterios: trivial o mecánico → el modelo rápido con esfuerzo
+  bajo; normal → el medio; arquitectura, bugs difíciles o muchos archivos → el más potente con
+  esfuerzo alto) y `plannerPrompt` (proyecto, modelos detectados con su nivel —`rankModels`:
+  por precio, rápido / medio / potente / máximo—, comandos permitidos, decisiones anteriores,
+  conversación reciente resumida y el mensaje). Responde un JSON (`task`, `agent`, `model`,
+  `effort`, `why`, `files`) que se valida contra lo detectado (`validatePlan`; un esfuerzo que
+  el modelo no tiene pasa al más cercano); si no es válido, un reintento diciendo por qué. La
+  tarjeta muestra tarea, agente, modelo, esfuerzo y el porqué con **Aprobar / Cambiar modelo /
+  Cancelar** (`orchestrator.autoApprove`: se ejecuta sin esperar). `@haiku`, `@sonnet`,
+  `@opus` (cualquier modelo que ofrezca el CLI) al principio del mensaje fuerza el modelo.
+- **Historial**: el orquestador es dueño de la conversación. Por proyecto, en
+  `<config>\orchestrator\<carpeta>-<hash FNV de la ruta>\` (`orchestrator/store.rs`; se niega si
+  quedara dentro del proyecto): `conversation.json` (200 mensajes), `decisions.json` (el
+  registro de decisiones: tarea, modelo, esfuerzo, porqué, resultado, archivos y costo, uno por
+  tarea al terminar) y `project.json` (modelo principal y comandos permitidos). **Nunca dentro del
+  repo.** El trabajador recibe un brief (`buildBrief`): la tarea, el resumen de las últimas
+  decisiones, los archivos relevantes y los comandos permitidos; no la conversación.
+- **Redacción**: todo lo que sale (mensaje, decisiones, conversación resumida, tarea, archivos)
+  pasa por `redact.ts` pieza por pieza (más `ai.redact`) y después por `ai_scrub_env`; "Ver
+  qué se envió" en cada plan y tarea muestra exactamente eso. Lo que el trabajador lee del disco
+  no se puede redactar (lo manda Claude Code): por eso los archivos de secretos están denegados.
+- **Ejecución**: una tarea por mensaje (una cosa a la vez por proyecto). Antes, `orch_snapshot`
+  anota el estado del repo sin tocarlo (`orchestrator/snapshot.rs`: copia a %TEMP% los archivos
+  que ya tenían cambios; sin `git stash`, sin índice, sin objetos); en vivo se ven los archivos
+  leídos / editados / creados y los comandos; al terminar, el resumen del trabajador, el diff
+  (`git diff --no-index` de cada archivo contra su estado antes —la copia, HEAD o nada—: los
+  cambios previos a la tarea no se le atribuyen; sin git, la lista de archivos editados) y tokens
+  y costo según el `result` del CLI (`total_cost_usd`: con suscripción, lo que costaría a precio
+  de API). Esc o "Cancelar" mata el árbol del trabajador (Job Object). Cerrar la tab cancela lo
+  que corre (la confirmación de cierre lo menciona).
+- **Tab**: un panel de tipo `orchestrator` (`Pane.kind`; `orchestratorPane` en
+  `workspaceModel.ts`): sin sesión PTY, su `cwd` es el proyecto (el explorador y la barra de
+  estado lo siguen; dividirlo abre una terminal ahí), título "Orquestador · <carpeta>". La sesión
+  y los layouts lo guardan (`PaneSpec.orchestrator`).
+- **Cómo agregar otro adaptador** (Codex, agy, Gemini CLI): un módulo en `agents/` que implementa
+  `AgentAdapter`, agregado a `adapters()`; el frontend ya lista lo que devuelva `agents_detect` y
+  el plan valida `agent` contra lo instalado. Para cada CLI: (1) cómo saber si está y con sesión
+  sin llamar a un modelo; (2) de dónde salen sus modelos y esfuerzos (nunca una lista fija); (3)
+  su modo no interactivo con eventos en streaming → `TaskEvent` (un parser puro con líneas
+  reales, como `agents/stream.rs`); (4) **su modelo de permisos**: editar archivos y una lista de
+  comandos, negar el resto **sin preguntar y sin ejecutar**, y cómo reporta lo denegado (si no lo
+  puede garantizar, no se agrega); (5) retomar una sesión; (6) tokens y costo. Y el modo del
+  agente falso que lo imite (con los flags exigidos), antes de cualquier prueba. Lo que ofrecen
+  según su `--help` local (gemini 0.65.0 y agy 1.5.13 instalados acá; **nada probado** con ellos):
+  - **Gemini CLI**: `-p` (headless) con `-o stream-json`, `-m`, `--approval-mode`
+    (`default` | `auto_edit` | `yolo` | `plan`) y `--policy` (Policy Engine: las reglas de
+    herramientas; `--allowed-tools` está deprecado), `-r` / `--session-id` para retomar. Nunca
+    `-y` / `--approval-mode yolo`.
+  - **agy**: `--print` con `--output-format stream-json` (y `--input-format stream-json`),
+    `--model`, `--effort` (low…max), `--mode` (`accept-edits` | `auto` | `plan`),
+    `--settings` (JSON de settings solo para esa sesión: ahí irían las reglas), `--conversation
+    <id>` / `--continue` para retomar, `--json-schema`, y el subcomando `agy models` para la
+    lista. Nunca `--dangerously-skip-permissions`.
+  - **Codex** (no instalado acá; según su documentación, a verificar): `codex exec --json`,
+    `--model`, el esfuerzo con `-c model_reasoning_effort=…`, `--sandbox workspace-write` con
+    aprobaciones que nunca preguntan, `codex exec resume <id>`.
+- **e2e y tests**: el agente falso imita `initialize` (modelos), el plan (JSON según palabras
+  del mensaje: trivial → haiku/low, arquitectura → opus/high, `FAKE_BAD_PLAN`) y el trabajador
+  (`--restricted`: exige los flags de permisos, emite herramientas y **edita de verdad** el
+  proyecto temporal, sesiones para `--resume`, `FAKE_DENIED`, `FAKE_SECRET`, `FAKE_SLOW` con
+  un proceso hijo, `FAKE_WORK_ERROR`, uso y costo). Solo mira la sección `## Tarea` del brief
+  (el resumen de decisiones puede nombrar tareas anteriores).
+
 ## Estructura
 
 ```
@@ -854,6 +998,9 @@ src/                        Frontend (solo render + input)
   components/AiAnswer.tsx   Respuesta de la IA: párrafos y tarjetas de comando (Insertar sin ejecutar, aviso destructivo)
   components/AiErrorBox.tsx Error de una consulta con cómo resolverlo
   components/AiContextDialog.tsx  "Ver qué se envía": el payload exacto, ya redactado
+  components/OrchestratorPane.tsx  Tab Orquestador: modelo principal, AGENTS.md, chat, plan (Aprobar / Cambiar
+                            modelo / Cancelar), actividad en vivo, permisos denegados, diff, tokens y costo
+  components/OrchestratorDialog.tsx  AGENTS.md / CLAUDE.md antes de escribirlos; "Ver qué se envió"
   config/schema.ts          Mini librería de esquema: valida, defaults, tipos inferidos, JSON Schema
   config/settingsSchema.ts  El esquema de settings.json (+ settingsSchema.test.ts)
   config/keybindings.ts     Acciones, teclas por defecto, parseo, eventos → teclas, conflictos, keybindings (+ test)
@@ -883,6 +1030,11 @@ src/                        Frontend (solo render + input)
   lib/aiSafety.ts           Comandos destructivos e inserción sin ejecutar (puro, + test)
   lib/redact.ts             Redacción de secretos antes de enviar nada (puro, + test con formatos reales)
   lib/aiErrors.ts           Qué decir ante cada error de la IA y cómo resolverlo
+  lib/agentsApi.ts          Punto de IPC del orquestador (agentes, plan, trabajadores, archivos del proyecto, diff)
+  lib/orchestratorModel.ts  Plan (prompt, JSON validado, @modelo, modelos por precio), brief, decisiones,
+                            CLAUDE.md con la importación, formatos de los archivos (puro, + test)
+  lib/orchestratorActions.ts  Abrir la tab, plan → aprobar → trabajador → diff → decisión, permisos,
+                            AGENTS.md / CLAUDE.md con confirmación, guardado por proyecto
   lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
   lib/ligatures.ts          Ligaduras con un character joiner (+ test)
   lib/explorerModel.ts      Lógica pura del explorador, breadcrumbs que entran (+ explorerModel.test.ts)
@@ -917,6 +1069,7 @@ src/                        Frontend (solo render + input)
   store/settings.ts         zustand: settings en uso, estado del archivo, avisos, zoom de la sesión
   store/profiles.ts         Perfiles en uso (detectados + settings), memoizados
   store/ai.ts               zustand: panel de IA, conversaciones por panel, barra Ctrl+I, diálogo "qué se envía"
+  store/orchestrator.ts     zustand: agentes detectados, proyectos (conversación, decisiones, en curso), diálogos
 src-tauri/
   src/lib.rs                Builder de Tauri, ventana principal (transparente solo si se pide; sin barra de
                             Windows salvo appearance.titleBar: native), ciclo de vida
@@ -930,10 +1083,17 @@ src-tauri/
   src/notifications.rs      Toasts de WinRT (AUMID registrado, clic → ventana al frente + panel), log de e2e
   src/worktree.rs           Worktrees del preset multi-agente: crear, estado, borrar (solo los de Brisa)
   src/ai_commands.rs        Comandos de la IA (configurar, consultar con canal, cancelar, estado, API key)
+  src/orchestrator_commands.rs  Comandos del orquestador (agentes, plan y trabajadores con canal, archivos, diff)
+  src/agents/               Adaptadores de agentes sin Tauri: mod.rs (AgentAdapter, TaskEvent), claude_code.rs
+                            (detección por initialize, plan, trabajador con permisos), permissions.rs (comandos
+                            del proyecto, reglas), stream.rs (eventos de un trabajador), manager.rs (hilos)
+  src/orchestrator/         store.rs (archivos por proyecto en la config), snapshot.rs (diff de una tarea sin
+                            tocar el repo), instructions.rs (AGENTS.md / CLAUDE.md con confirmación)
   src/ai/                   Capa de IA sin Tauri: manager.rs (hilos, cancelación, dueños), claude_cli.rs
                             (claude -p aislado en un Job Object), anthropic.rs + http.rs (API por WinHTTP),
                             credentials.rs (Administrador de credenciales), stream.rs (stream-json y SSE),
-                            secrets.rs (valores de variables de entorno sensibles)
+                            secrets.rs (valores de variables de entorno sensibles), process.rs (un CLI en un Job
+                            Object, entorno limpio, sin ventana: lo comparten la IA y los adaptadores)
   src/explorer/             list.rs, watch.rs, git.rs, ops.rs (sin Tauri; tests unitarios)
   src/pty/manager.rs        Registro de sesiones (create/write/resize/close/close_owned_by/shutdown)
   src/pty/session.rs        ConPTY + hilos reader/flusher/writer/waiter + batching
@@ -952,10 +1112,13 @@ src-tauri/
   tests/worktree.rs         Worktrees con git real (crear, cambios, ramas, solo los de Brisa)
   tests/ai.rs               IA con el claude falso (.cmd) y una API falsa local: streaming, aislamiento,
                             errores, cancelación del árbol, credenciales, IA apagada
+  tests/agents.rs           Orquestador con el claude falso: modelos detectados, trabajador que edita y
+                            reporta costo, denegación → retomar, cancelar el árbol, plan, análisis, diff
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
   fake-agent.mjs            Agente de IA falso (claude/codex/gemini según el exe; /work, /bell, /osc9,
-                            /osc777, /after N; modo print = claude -p: ver "Pruebas con agentes")
+                            /osc777, /after N; modo print = claude -p: texto, initialize, plan y trabajador;
+                            ver "Pruebas con agentes")
   sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
   caption.ps1               Botones de la barra propia por mensajes Win32: hit-test (Snap Layouts),
@@ -991,7 +1154,11 @@ usuario (y sin la carpeta del usuario tampoco corre la migración del nombre vie
 `E2E_ATTACH=1` las etapas de configuración se saltean si la app no usa esa carpeta. La etapa
 `reopen` cierra la ventana con la X y relanza `tauri dev` (log en `tauri-dev-2.log`) para ver
 qué vuelve. Las notificaciones nativas de la suite van a un archivo (`BRISA_NOTIFY_LOG`), nunca
-a la pantalla del usuario; la etapa `multiagent` crea un repo de git descartable.
+a la pantalla del usuario; las etapas `multiagent` y `orchestrator` crean repos de git
+descartables. WebView2 usa su propia carpeta de datos, fija (`%TEMP%\brisa-e2e-webview2`, por
+`WEBVIEW2_USER_DATA_FOLDER`): un Brisa abierto por el usuario (mismo id de app) bloquea la carpeta
+por defecto con otros argumentos del navegador y la app de la e2e no arrancaba; una carpeta nueva
+por corrida (y borrarla) costaba ~1 min.
 
 `npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
 app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa el portapapeles
@@ -1033,6 +1200,12 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
   un servidor local (`BRISA_ANTHROPIC_BASE_URL`) y la key va a una credencial descartable
   (`BRISA_CREDENTIAL_TARGET`). `tests/ai.rs` hace lo mismo sin la app. Probar con Claude Code
   real queda a criterio del usuario, a mano.
+- **Orquestador** (Fase 8A): ningún plan, análisis ni trabajador corre con `claude` real. El
+  agente falso responde `initialize` (modelos), arma planes y hace de trabajador (ver "Modo
+  orquestador": exige los flags de permisos y edita solo el proyecto temporal de la prueba).
+  Lo único que se corrió contra el `claude` real fue con un `CLAUDE_CONFIG_DIR` vacío (sin sesión:
+  ninguna llamada a un modelo) para verificar que acepta los flags; de gemini y agy solo se leyó
+  `--help`.
 - `run()` en `e2e/run.mjs` se niega a tipear si el cursor no está en un prompt de PowerShell
   libre o si la terminal activa no tiene el foco; `runIdle()`, si la integración no dice que la
   shell está libre (ningún comando corriendo): un fallo nunca debe terminar mandando texto a un
@@ -1146,6 +1319,13 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   `appearance.titleBar: "native"` vuelve la barra de Windows sin reiniciar.
 - [ ] Diseño: `appearance.cornerRadius` 0 y 8 con tres temas (tabs, paneles divididos, explorador,
   panel de IA, menús, paleta, configuración); el explorador con una ruta larga colapsa en "…".
+- [ ] Orquestador (automatizado con el claude falso; **a mano y a criterio del usuario** con
+  Claude Code real, en un repo de prueba): "Abrir orquestador aquí" en un repo; el selector lista
+  los modelos de tu Claude Code; "Generar AGENTS.md…" muestra el borrador antes de crear nada y
+  CLAUDE.md se ofrece después; un mensaje trivial propone un modelo rápido con esfuerzo bajo,
+  "Aprobar" lo ejecuta con actividad en vivo, diff y costo; `@opus …` fuerza el modelo; un
+  comando fuera de la lista aparece como pregunta; "Cancelar" corta la tarea;
+  `orchestrator.enabled: false` → nada.
 - [ ] Primer arranque tras el renombre: la configuración de `%APPDATA%\dev.terminal.desktop`
   aparece en `%APPDATA%\dev.brisa.desktop` (temas importados incluidos).
 
@@ -1155,8 +1335,8 @@ Todos los atajos de la tabla (salvo los del mouse y los internos de un widget) s
 **valores por defecto** y se cambian en Configuración → Atajos o en `keybindings` de
 settings.json (ver "Atajos configurables"). Sin atajo por defecto, solo desde la paleta: cerrar
 tab, cerrar las demás, duplicar, quitar del grupo, igualar paneles, seleccionar todo, limpiar,
-ver ocultos, guardar layouts, abrir settings.json / layouts.json, abrir multi-agente aquí, explicar el
-último comando que falló (IA).
+ver ocultos, guardar layouts, abrir settings.json / layouts.json, abrir multi-agente aquí, abrir
+orquestador aquí, explicar el último comando que falló (IA).
 
 | Atajo | Acción |
 |---|---|
@@ -1336,6 +1516,16 @@ entre tabs y paneles), y la tecla igual no llega al programa.
 - **Escribir un `serde_json::Value` directo a un archivo** (`writeln!(file, "{value}")`) lo
   escribe token por token (cada `write_str` es una escritura sin buffer): el log de
   notificaciones de la e2e podía leerse a medias. Se serializa a un `String` y se escribe de una.
+- **Un Brisa abierto bloquea la e2e** (WebView2 `0x8007139F`, "The group or resource is not in
+  the correct state"): dev y release comparten `%LOCALAPPDATA%\dev.brisa.desktop\EBWebView`, y
+  WebView2 no deja abrir la misma carpeta con otros argumentos (`--remote-debugging-port`). La e2e
+  usa su propia carpeta (`WEBVIEW2_USER_DATA_FOLDER`). Para `npm run tauri dev` a mano con Brisa
+  abierto, lo mismo.
+- **El agente falso y los briefs**: un brief incluye el resumen de las decisiones anteriores, que
+  puede nombrar una tarea vieja con `FAKE_SLOW`; el falso solo mira la sección `## Tarea` (si no,
+  la tarea siguiente también era lenta).
+- **`:last-of-type` es por etiqueta**, no por atributo: "la última tarjeta de plan" en la e2e es
+  `[data-orch="plan"]:not(:has(~ [data-orch="plan"]))`.
 - **Líneas largas en la e2e**: `textPosition` busca el texto en una fila; un comando largo puede
   partirse en el medio de una palabra según el ancho (`exit` en una fila, `4` en la siguiente).
   Anclar en una línea corta de la salida.
@@ -1673,6 +1863,59 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   - **No verificado**: el flyout de Snap Layouts a la vista, el arrastre y el doble clic con el
     mouse real (los dibuja / maneja Windows; queda en el smoke manual); Windows 10 (sin esquinas
     redondeadas del sistema; el borde de 1 px de la sombra sin decoraciones).
+- **Fase 8A — modo orquestador, cimientos: completa y verificada (2026-11-20).** Tabs
+  "Orquestador" (una por proyecto, paleta o "▾") con un chat que por cada mensaje pide al modelo
+  principal un plan en JSON validado (tarea, agente, modelo, esfuerzo, por qué; trivial → rápido
+  con esfuerzo bajo, normal → medio, arquitectura / bugs difíciles / muchos archivos → el más
+  potente con esfuerzo alto; `@haiku` / `@sonnet` / `@opus` lo fuerzan), lo muestra con
+  Aprobar / Cambiar modelo / Cancelar (o lo ejecuta solo con `orchestrator.autoApprove`) y lo
+  corre con un trabajador de Claude Code en la carpeta del proyecto: actividad en vivo, resumen,
+  diff, tokens y costo. Adaptadores con una interfaz común (`agents/`: detectar, modelos y
+  esfuerzos detectados del CLI, plan, tarea con streaming, retomar sesión, uso), solo Claude Code
+  implementado; cómo agregar Gemini, agy y Codex documentado. Permisos: `--restricted` +
+  `dontAsk` + reglas (editar y los comandos de build/tests/lint detectados, git de lectura,
+  secretos denegados); lo que no está permitido es una pregunta ("Permitir y continuar" retoma la
+  sesión). AGENTS.md: borrador de un análisis de solo lectura y CLAUDE.md mínimo o con la
+  importación, siempre mostrados y confirmados, nunca commiteados. Conversación, decisiones y
+  preferencias por proyecto en la carpeta de config; el trabajador recibe un brief redactado.
+  Cancelar mata el árbol; `orchestrator.enabled` apaga todo. Sin dependencias nuevas.
+  - De paso: las piezas de procesos de `ai/claude_cli.rs` (Job Object, entorno limpio, lectura
+    de stderr) pasaron a `ai/process.rs`, compartidas con los adaptadores; la e2e usa su propia
+    carpeta de datos de WebView2 (un Brisa release abierto por el usuario la bloqueaba).
+  - Flags verificados contra `claude` 2.1.329 con un `CLAUDE_CONFIG_DIR` vacío (sin sesión,
+    ninguna llamada a un modelo): la línea del trabajador, `--resume` y `initialize` (5 modelos
+    con sus esfuerzos). De gemini 0.65.0 y agy 1.5.13 solo se leyó `--help`.
+  - `npm test`: 128 (10 nuevos: modelos por precio y nivel, `@modelo`, plan desde un bloque json
+    y su validación, prompt del plan redactado, brief, decisión, formato de la conversación,
+    CLAUDE.md con la importación, tab del orquestador en la sesión).
+  - `cargo test`: 91 unitarios (22 nuevos: eventos de un trabajador con líneas reales, denegaciones
+    y lo que las permitiría, errores con lo gastado, argumentos del trabajador y del análisis, nada
+    que desactive permisos, modelos de `initialize`, patrones de comandos, comandos del proyecto,
+    carpeta por proyecto fuera del repo, escritura de AGENTS.md / CLAUDE.md que nunca pisa) + 9 de
+    `tests/agents.rs` (claude falso por `.cmd`: modelos detectados, trabajador que edita y reporta
+    costo con el diff exacto, denegación → retomar con el comando permitido, sesión inexistente,
+    cancelar mata al hijo del trabajador, plan sin herramientas, análisis de solo lectura,
+    apagado, diff que no atribuye los cambios previos) + 6 IA + 3 explorador + 21 PTY + 2
+    worktrees.
+  - `npm run e2e`: 421/421 en 317 s. Etapa nueva `orchestrator` (24 checks); `npm run e2e:smoke`
+    suma su parte esencial: 164/164 en 104 s. Corridas anteriores del día: 411/419 con la sesión
+    de Windows bloqueada (las 8 fallas, del portapapeles: ningún proceso podía abrirlo,
+    `OpenClipboard` → error 5) y, una vez, el borde del panel de IA medido mientras el layout
+    todavía se movía tras cambiar el radio (ahora espera a que se estabilice).
+  - Encontrado por la e2e y corregido: un selector de zustand con `?? []` en Configuración →
+    Agentes (un arreglo nuevo en cada render) entraba en un bucle infinito ("Maximum update
+    depth exceeded").
+  - **Release** (`--no-bundle`, CSP de producción, carpeta de config descartable con
+    `ai.claudePath` apuntando al claude falso): la tab abre y detecta los modelos, el plan llega
+    validado, el trabajador edita el proyecto con permisos acotados, diff y costo a la vista, la
+    conversación queda en la config y no en el repo, sin errores de consola (6/6, script por CDP).
+    `brisa.exe` 9,43 → 9,89 MB; JS 1037 → 1085 KB; CSS 39,6 → 46,4 KB.
+  - **No verificado**: `claude -p` real como trabajador o planificador (regla de pruebas: las
+    formas de `tool_use`, `permission_denied` y `permission_denials` salen de la documentación;
+    `init`, `result` con `usage` / `total_cost_usd` y el error sin sesión sí son reales), si
+    `--restricted` carga el CLAUDE.md del proyecto (el brief y las reglas igual le dicen que lea
+    AGENTS.md), la forma exacta del evento `permission_denied` (se aceptan las variantes de
+    nombres), Codex, Gemini y agy. Queda en el smoke manual, a criterio del usuario.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".

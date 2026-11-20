@@ -7,6 +7,7 @@ import { useUi, type CloseTarget } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { panesOf, tabOfPane, tabTitle, type PaneId, type TabId } from '../store/workspaceModel';
 import { sessionBusy } from './pty';
+import { projectKey, useOrchestrator } from '../store/orchestrator';
 import { releaseWorktrees, worktreesOf } from './multiAgent';
 import { flushSession } from './sessionSync';
 import { getPane } from './terminalRegistry';
@@ -41,11 +42,20 @@ function focusNow(): boolean {
     ui.multiAgent ||
     useExplorer.getState().editing ||
     useAi.getState().bar ||
-    useAi.getState().preview
+    useAi.getState().preview ||
+    useOrchestrator.getState().dialog
   ) {
     return true;
   }
-  const pane = getPane(selectActivePaneId(useWorkspace.getState()));
+  const activeId = selectActivePaneId(useWorkspace.getState());
+  if (activeId && useWorkspace.getState().panes[activeId]?.kind === 'orchestrator') {
+    // The orchestrator's chat: its input takes the keyboard.
+    const input = document.querySelector<HTMLTextAreaElement>(`textarea[data-orch-input="${CSS.escape(activeId)}"]`);
+    if (!input || input.offsetParent === null) return false;
+    input.focus();
+    return true;
+  }
+  const pane = getPane(activeId);
   if (!pane || pane.host.hidden || !pane.host.isConnected) return false;
   pane.term.focus();
   return document.activeElement === pane.term.textarea;
@@ -64,6 +74,10 @@ async function busyDetails(paneIds: PaneId[]): Promise<string[]> {
       const pane = useWorkspace.getState().panes[paneId];
       const sessionId = getPane(paneId)?.session.sessionId;
       const processes = sessionId == null ? [] : await sessionBusy(sessionId).catch(() => []);
+      if (pane?.kind === 'orchestrator') {
+        const project = pane.cwd ? useOrchestrator.getState().projects[projectKey(pane.cwd)] : undefined;
+        return project?.busy ? ['una tarea del orquestador'] : [];
+      }
       const command = pane?.commandRunning ? pane.lastCommand?.trim() || 'un comando' : null;
       const shown = command && command.length > MAX_COMMAND ? `${command.slice(0, MAX_COMMAND - 1)}…` : command;
       return [...(shown ? [`«${shown}»`] : []), ...processes.map((p) => p.name)];

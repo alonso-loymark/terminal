@@ -12,7 +12,7 @@ import type { Issue, JsonSchema, Schema } from './schema.ts';
  * terminal: only with the keyboard in a terminal; explorer: only in the file tree.
  */
 export type ActionScope = 'global' | 'terminal' | 'explorer';
-export type ActionCategory = 'app' | 'tabs' | 'panes' | 'terminal' | 'blocks' | 'agents' | 'ai' | 'explorer' | 'layouts';
+export type ActionCategory = 'app' | 'tabs' | 'panes' | 'terminal' | 'blocks' | 'agents' | 'orchestrator' | 'ai' | 'explorer' | 'layouts';
 
 export const CATEGORY_LABELS: Record<ActionCategory, string> = {
   app: 'Aplicación',
@@ -21,6 +21,7 @@ export const CATEGORY_LABELS: Record<ActionCategory, string> = {
   terminal: 'Terminal',
   blocks: 'Bloques',
   agents: 'Agentes',
+  orchestrator: 'Orquestador',
   ai: 'IA',
   explorer: 'Explorador',
   layouts: 'Layouts',
@@ -97,6 +98,7 @@ export const ACTIONS: readonly ActionDef[] = [
   def('blocks.previous', 'Bloque anterior (comando y su salida)', 'blocks', 'terminal', ['ctrl+up'], { repeat: true, passthrough: true, paletteHidden: true }),
   def('blocks.next', 'Bloque siguiente', 'blocks', 'terminal', ['ctrl+down'], { repeat: true, passthrough: true, paletteHidden: true }),
   def('agents.multiAgent', 'Abrir multi-agente aquí…', 'agents', 'global', []),
+  def('orchestrator.open', 'Abrir orquestador aquí', 'orchestrator', 'global', []),
   def('ai.command', 'IA: lenguaje natural a comando', 'ai', 'global', ['ctrl+i']),
   def('ai.panel', 'IA: panel de chat', 'ai', 'global', ['ctrl+shift+i']),
   def('ai.explainLast', 'IA: explicar el último comando que falló', 'ai', 'global', []),

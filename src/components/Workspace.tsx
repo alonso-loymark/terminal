@@ -6,6 +6,7 @@ import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { layoutDividers, layoutRects, panesOf, type PaneId, type Rect, type Tab, type TabId } from '../store/workspaceModel';
 import { AiCommandBar } from './AiCommandBar';
+import { OrchestratorPane } from './OrchestratorPane';
 import { PaneDivider } from './PaneDivider';
 import { SearchBar } from './SearchBar';
 import { TerminalPane } from './TerminalPane';
@@ -48,6 +49,7 @@ export function Workspace() {
   const tabs = useWorkspace((s) => s.tabs);
   const activeTabId = useWorkspace((s) => s.activeTabId);
   const paneIds = useWorkspace(useShallow((s) => Object.keys(s.panes)));
+  const orchestratorIds = useWorkspace(useShallow((s) => Object.values(s.panes).filter((p) => p.kind === 'orchestrator').map((p) => p.id)));
   const activePaneId = useWorkspace(selectActivePaneId);
   const searchOpen = useUi((s) => s.searchOpen);
   const barPane = useAi((s) => s.bar?.paneId ?? null);
@@ -69,7 +71,11 @@ export function Workspace() {
       <div ref={areaRef} className="pane-area">
         {paneIds.map((id) => {
           const place = placement[id] ?? HIDDEN;
-          return <TerminalPane key={id} paneId={id} visible={place.visible} focused={place.focused} rect={place.rect} />;
+          return orchestratorIds.includes(id) ? (
+            <OrchestratorPane key={id} paneId={id} visible={place.visible} focused={place.focused} rect={place.rect} />
+          ) : (
+            <TerminalPane key={id} paneId={id} visible={place.visible} focused={place.focused} rect={place.rect} />
+          );
         })}
         {dividers.map((divider) => (
           <PaneDivider key={`${divider.splitId}:${divider.index}`} divider={divider} area={areaRef} />

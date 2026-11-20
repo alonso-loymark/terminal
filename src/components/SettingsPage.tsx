@@ -18,7 +18,7 @@ const SECTIONS: readonly (readonly [SettingsSection, string])[] = [
   ['profiles', 'Perfiles'],
   ['terminal', 'Terminal'],
   ['explorer', 'Explorador'],
-  ['agents', 'Bloques y agentes'],
+  ['agents', 'Agentes y orquestador'],
   ['ai', 'IA'],
   ['keybindings', 'Atajos'],
   ['session', 'Sesión y layouts'],

@@ -76,6 +76,16 @@ pub fn git_status(git: &Path, dir: &Path) -> Result<Option<GitStatus>, ExplorerE
 
 /// Runs git; `Ok(None)` when it exits with an error (not a repository, dubious ownership...).
 fn run(git: &Path, dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, ExplorerError> {
+    let (code, out) = run_code(git, dir, args)?;
+    Ok((code == Some(0)).then_some(out))
+}
+
+/// Runs git without a window or prompts, read-only locks; (exit code, stdout).
+pub(crate) fn run_code(
+    git: &Path,
+    dir: &Path,
+    args: &[&str],
+) -> Result<(Option<i32>, Vec<u8>), ExplorerError> {
     let mut command = Command::new(git);
     command
         .arg("-C")
@@ -119,7 +129,7 @@ fn run(git: &Path, dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, Explore
         }
     };
     let out = reader.join().unwrap_or_default();
-    Ok(exit.success().then_some(out))
+    Ok((exit.code(), out))
 }
 
 /// `git status --porcelain=v2 --branch -z`.

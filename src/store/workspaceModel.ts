@@ -25,6 +25,8 @@ export type ProfileId = string;
  * execution policy); cwd: the shell only reports its folder (cmd); none: nothing to report (a
  * custom program, or arguments that rule the injection out).
  */
+/** What a pane shows: a terminal, or the orchestrator's chat for its folder (Fase 8A). */
+export type PaneKind = 'terminal' | 'orchestrator';
 export type IntegrationState = 'pending' | 'ok' | 'unavailable' | 'error' | 'cwd' | 'none';
 /** What the backend says the started shell will report. */
 export type IntegrationLevel = 'full' | 'cwd' | 'none' | 'missing';
@@ -120,6 +122,7 @@ export type FocusDirection = 'left' | 'right' | 'up' | 'down';
 
 export interface Pane {
   id: PaneId;
+  kind: PaneKind;
   /** Backend PTY session while the shell runs. */
   sessionId: number | null;
   /** Last title set by the process (OSC 0/2). */
@@ -256,6 +259,8 @@ export interface NewTab {
   activate?: boolean;
   profile?: ProfileId | null;
   cwd?: string | null;
+  /** An orchestrator tab: its pane is the chat of `cwd` (the project folder). */
+  kind?: PaneKind;
 }
 
 export function addTab(ws: Workspace, spec: NewTab): Workspace {
@@ -269,7 +274,10 @@ export function addTab(ws: Workspace, spec: NewTab): Workspace {
     activePaneId: spec.paneId,
     zoomedPaneId: null,
   };
-  const pane = newPane(spec.paneId, { profile: spec.profile ?? null, cwd: spec.cwd ?? null });
+  const pane =
+    spec.kind === 'orchestrator' && spec.cwd
+      ? orchestratorPane(spec.paneId, spec.cwd)
+      : newPane(spec.paneId, { profile: spec.profile ?? null, cwd: spec.cwd ?? null });
   const at = spec.after ? ws.tabOrder.indexOf(spec.after) : -1;
   const tabOrder = [...ws.tabOrder];
   tabOrder.splice(at >= 0 ? at + 1 : tabOrder.length, 0, tab.id);
@@ -332,6 +340,7 @@ function clearActivity(panes: Record<PaneId, Pane>, ids: PaneId[]): Record<PaneI
 
 export const newPane = (id: PaneId, spawn: PaneSpawn = { profile: null, cwd: null }): Pane => ({
   id,
+  kind: 'terminal',
   sessionId: null,
   title: '',
   status: 'starting',
@@ -348,6 +357,19 @@ export const newPane = (id: PaneId, spawn: PaneSpawn = { profile: null, cwd: nul
   integrationError: null,
   agent: null,
   worktree: null,
+});
+
+/**
+ * The orchestrator's chat for `dir`: no session of its own; its folder is the project (the
+ * explorer and the status bar follow it, and splitting it opens a terminal there).
+ */
+export const orchestratorPane = (id: PaneId, dir: string): Pane => ({
+  ...newPane(id, { profile: null, cwd: dir }),
+  kind: 'orchestrator',
+  status: 'running',
+  cwd: dir,
+  integration: 'none',
+  title: `Orquestador · ${dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || dir}`,
 });
 
 /**

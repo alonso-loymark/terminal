@@ -18,6 +18,7 @@ import { copySelection } from '../lib/keybindings';
 import { closeOtherTabs, focusActiveTerminal, groupTab, requestClosePane, requestCloseTabs } from '../lib/tabActions';
 import { getPane } from '../lib/terminalRegistry';
 import { openLayout } from '../lib/layoutActions';
+import { openOrchestrator } from '../lib/orchestratorActions';
 import { openLayoutsJson } from '../lib/layoutsSync';
 import { useExplorer } from '../store/explorer';
 import { shortcutLabel } from '../store/keymap';
@@ -160,6 +161,7 @@ function ExplorerMenu({ path, isDir, isRoot, x, y }: { path: string; isDir: bool
 function ShellMenu({ x, y }: { x: number; y: number }) {
   const { profiles, defaultId } = useProfiles();
   const layouts = useLayouts((s) => s.layouts);
+  const orchestratorOn = useSettings((s) => s.settings.orchestrator.enabled);
   return (
     <Menu x={x} y={y} label="Nueva tab con" onClose={dismiss}>
       <MenuLabel>Nueva tab con</MenuLabel>
@@ -204,6 +206,14 @@ function ShellMenu({ x, y }: { x: number; y: number }) {
       <MenuItem action="open-layouts-json" onSelect={run(() => void openLayoutsJson().catch((e: unknown) => console.warn('[brisa] layouts.json', e)))}>
         Abrir layouts.json
       </MenuItem>
+      {orchestratorOn && (
+        <>
+          <MenuSeparator />
+          <MenuItem action="open-orchestrator" onSelect={run(() => openOrchestrator())}>
+            Abrir orquestador aquí
+          </MenuItem>
+        </>
+      )}
       <MenuSeparator />
       <MenuItem action="open-palette" shortcut={shortcutLabel('app.commandPalette')} onSelect={run(() => useUi.getState().openPalette())}>
         Paleta de comandos
