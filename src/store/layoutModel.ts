@@ -17,6 +17,7 @@ import {
   type Layout,
   type Pane,
   type PaneId,
+  type PaneWorktree,
   type SplitDirection,
   type Tab,
   type TabColor,
@@ -33,6 +34,8 @@ export interface PaneSpec {
   focus?: boolean;
   /** Maximized inside its tab. */
   zoom?: boolean;
+  /** Session only: the worktree Brisa created for the pane (removed when it closes). */
+  worktree?: PaneWorktree;
 }
 
 export interface SplitSpec {
@@ -80,6 +83,8 @@ export const specPanes = (node: NodeSpec): PaneSpec[] => (isSplit(node) ? node.p
 export interface SnapshotOptions {
   /** Commands to type in each pane when the layout opens (layouts only; never in the session). */
   commands?: Record<PaneId, string>;
+  /** Keep which panes own a worktree (the session; a layout never does). */
+  worktrees?: boolean;
 }
 
 const round = (n: number) => Math.round(n * 10) / 10;
@@ -95,6 +100,7 @@ function snapshotNode(ws: Workspace, tab: Tab, node: Layout, options: SnapshotOp
   if (cwd) spec.cwd = cwd;
   const command = options.commands?.[node.paneId]?.trim();
   if (command) spec.command = command;
+  if (options.worktrees && pane?.worktree) spec.worktree = { ...pane.worktree };
   if (tab.layout.type === 'split') {
     if (tab.activePaneId === node.paneId) spec.focus = true;
     if (tab.zoomedPaneId === node.paneId) spec.zoom = true;
@@ -171,7 +177,7 @@ export function instantiate(ws: Workspace, spec: WindowSpec, options: Instantiat
       return { type: 'split', id: id('split'), direction: node.split, children, sizes: normalizeSizes(sizes) };
     }
     const paneId = id('pane');
-    panes[paneId] = newPane(paneId, { profile: node.profile ?? null, cwd: node.cwd ?? null });
+    panes[paneId] = { ...newPane(paneId, { profile: node.profile ?? null, cwd: node.cwd ?? null }), worktree: node.worktree ?? null };
     if (node.command?.trim()) commands.push({ paneId, command: node.command.trim() });
     if (node.focus && !tab.focus) tab.focus = paneId;
     if (node.zoom && !tab.zoom) tab.zoom = paneId;
@@ -229,6 +235,8 @@ const warn = (issues: Issue[], path: string, message: string) => issues.push({ p
 const join = (path: string, key: string | number) => (typeof key === 'number' ? `${path}[${key}]` : path ? `${path}.${key}` : key);
 
 const PANE_KEYS = ['profile', 'cwd', 'command', 'focus', 'zoom'] as const;
+/** Accepted when reading (the session writes it); never written to layouts. */
+const READ_ONLY_PANE_KEYS = ['worktree'] as const;
 const TAB_KEYS = ['title', 'color', 'group', 'active', 'layout'] as const;
 
 function unknownKeys(value: Record<string, unknown>, known: readonly string[], path: string, issues: Issue[]): void {
@@ -249,6 +257,10 @@ function parsePane(value: Record<string, unknown>, path: string, issues: Issue[]
     if (typeof v !== 'boolean') return err(issues, join(path, key), 'tiene que ser true o false'), null;
     if (v) spec[key] = true;
   }
+  const w = value.worktree;
+  if (isObject(w) && typeof w.path === 'string' && typeof w.repo === 'string' && typeof w.branch === 'string') {
+    spec.worktree = { path: w.path, repo: w.repo, branch: w.branch };
+  }
   return spec;
 }
 
@@ -256,7 +268,7 @@ function parseNode(value: unknown, path: string, issues: Issue[], depth = 0): No
   if (!isObject(value)) return err(issues, path, 'tiene que ser un objeto (un panel o una división)'), null;
   if (depth > 32) return err(issues, path, 'demasiados niveles de divisiones'), null;
   if (value.split === undefined) {
-    unknownKeys(value, PANE_KEYS, path, issues);
+    unknownKeys(value, [...PANE_KEYS, ...READ_ONLY_PANE_KEYS], path, issues);
     return parsePane(value, path, issues);
   }
   unknownKeys(value, ['split', 'sizes', 'panes'], path, issues);
@@ -291,7 +303,7 @@ function parseTab(value: unknown, path: string, issues: Issue[]): TabSpec | null
   if (!isObject(value)) return err(issues, path, 'tiene que ser un objeto'), null;
   // A tab with one pane can carry the pane's fields itself: { "title": "dev", "command": "npm run dev" }.
   const shorthand = value.layout === undefined;
-  unknownKeys(value, shorthand ? [...TAB_KEYS, ...PANE_KEYS] : TAB_KEYS, path, issues);
+  unknownKeys(value, shorthand ? [...TAB_KEYS, ...PANE_KEYS, ...READ_ONLY_PANE_KEYS] : TAB_KEYS, path, issues);
   let layout: NodeSpec | null;
   if (shorthand) layout = parsePane(value, path, issues);
   else layout = parseNode(value.layout, join(path, 'layout'), issues);
@@ -400,6 +412,7 @@ function nodeToJson(node: NodeSpec): Record<string, unknown> {
   }
   const out: Record<string, unknown> = {};
   for (const key of PANE_KEYS) if (node[key] !== undefined && node[key] !== false) out[key] = node[key];
+  if (node.worktree) out.worktree = { ...node.worktree };
   return out;
 }
 

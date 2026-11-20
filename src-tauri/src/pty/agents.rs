@@ -1,5 +1,6 @@
-//! Shift+Enter: an AI agent in front of the user gets its own "insert newline" sequence (the
-//! one its /terminal-setup installs in VS Code); anything else gets a real Shift+Enter.
+//! AI agents in a session: which one runs (for the agent indicators), and Shift+Enter: an
+//! agent in front of the user gets its own "insert newline" sequence (the one its
+//! /terminal-setup installs in VS Code); anything else gets a real Shift+Enter.
 //!
 //! No single sequence works everywhere: ESC CR makes Claude Code insert a newline but is a
 //! no-op in PSReadLine, while a real Shift+Enter key event gives PowerShell its native AddLine
@@ -23,26 +24,37 @@ pub(crate) struct AgentSpec {
     pub(crate) name: &'static str,
     /// Native executables (lowercase image names).
     executables: &'static [&'static str],
+    /// Native executables whose name starts like this (`codex-x86_64-pc-windows-msvc.exe`).
+    executable_prefixes: &'static [&'static str],
     /// npm package paths that identify the agent when it runs under node/bun.
     packages: &'static [&'static str],
-    /// Verified from each agent's own /terminal-setup for VS Code.
-    pub(crate) newline: &'static [u8],
+    /// Its own newline sequence, verified from its /terminal-setup for VS Code. None: it reads
+    /// native console key events (Codex uses crossterm), so it gets a real Shift+Enter, as in
+    /// Windows Terminal.
+    pub(crate) newline: Option<&'static [u8]>,
 }
 
-/// Codex is not listed: it reads native console key events (crossterm), so it gets the same
-/// real Shift+Enter that Windows Terminal would send.
 pub(crate) const AGENTS: &[AgentSpec] = &[
     AgentSpec {
         name: "claude",
         executables: &["claude.exe"],
+        executable_prefixes: &[],
         packages: &["@anthropic-ai/claude-code"],
-        newline: b"\x1b\r",
+        newline: Some(b"\x1b\r"),
     },
     AgentSpec {
         name: "gemini",
         executables: &["gemini.exe"],
+        executable_prefixes: &[],
         packages: &["@google/gemini-cli"],
-        newline: b"\\\r\n",
+        newline: Some(b"\\\r\n"),
+    },
+    AgentSpec {
+        name: "codex",
+        executables: &["codex.exe"],
+        executable_prefixes: &["codex-"],
+        packages: &["@openai/codex"],
+        newline: None,
     },
 ];
 
@@ -62,10 +74,10 @@ fn match_agent(
     command_line: impl FnOnce() -> Option<String>,
 ) -> Option<&'static AgentSpec> {
     let exe = exe.to_ascii_lowercase();
-    if let Some(agent) = AGENTS
-        .iter()
-        .find(|a| a.executables.contains(&exe.as_str()))
-    {
+    if let Some(agent) = AGENTS.iter().find(|a| {
+        a.executables.contains(&exe.as_str())
+            || (exe.ends_with(".exe") && a.executable_prefixes.iter().any(|p| exe.starts_with(p)))
+    }) {
         return Some(agent);
     }
     if !SCRIPT_HOSTS.contains(&exe.as_str()) {
@@ -107,23 +119,31 @@ pub(crate) fn find_agent(
 
 /// Decides what Shift+Enter means right now for the session whose shell is `shell`.
 pub(crate) fn shift_enter_for(shell: Option<u32>) -> (ShiftEnterTarget, &'static [u8]) {
-    #[cfg(windows)]
-    if let Some(agent) = shell.and_then(detect) {
-        return (ShiftEnterTarget::Agent { agent: agent.name }, agent.newline);
+    if let Some(agent) = shell.and_then(|pid| detect(&[pid]).pop().flatten())
+        && let Some(newline) = agent.newline
+    {
+        return (ShiftEnterTarget::Agent { agent: agent.name }, newline);
     }
-    #[cfg(not(windows))]
-    let _ = shell;
     (ShiftEnterTarget::Native, NATIVE_SHIFT_ENTER)
 }
 
+/// The agent running under each shell, with one look at the process table for all of them.
 #[cfg(windows)]
-fn detect(shell: u32) -> Option<&'static AgentSpec> {
+pub(crate) fn detect(shells: &[u32]) -> Vec<Option<&'static AgentSpec>> {
     let snapshot = super::procs::snapshot();
     let processes: Vec<(u32, u32, &str)> = snapshot
         .iter()
         .map(|p| (p.pid, p.parent, p.exe.as_str()))
         .collect();
-    find_agent(shell, &processes, super::procs::command_line)
+    shells
+        .iter()
+        .map(|&shell| find_agent(shell, &processes, super::procs::command_line))
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn detect(shells: &[u32]) -> Vec<Option<&'static AgentSpec>> {
+    shells.iter().map(|_| None).collect()
 }
 
 #[cfg(test)]
@@ -164,11 +184,32 @@ mod tests {
     }
 
     #[test]
+    fn codex_is_detected_natively_and_through_npm() {
+        let procs = [(2, SHELL, "codex.exe")];
+        assert_eq!(
+            find_agent(SHELL, &procs, no_command_line).unwrap().name,
+            "codex"
+        );
+        // npm's codex.cmd → node codex.js → the platform binary.
+        let procs = [
+            (2, SHELL, "node.exe"),
+            (3, 2, "codex-x86_64-pc-windows-msvc.exe"),
+        ];
+        assert_eq!(
+            find_agent(SHELL, &procs, no_command_line).unwrap().name,
+            "codex"
+        );
+        let procs = [(2, SHELL, "node.exe")];
+        let cmd = |_| Some(r"node C:\npm\node_modules\@openai\codex\bin\codex.js".to_owned());
+        assert_eq!(find_agent(SHELL, &procs, cmd).unwrap().name, "codex");
+    }
+
+    #[test]
     fn other_programs_and_unknown_node_scripts_are_not_agents() {
         let procs = [
             (2, SHELL, "vim.exe"),
             (3, SHELL, "node.exe"),
-            (4, SHELL, "codex.exe"),
+            (4, SHELL, "codexx"),
         ];
         let cmd = |_| Some("node C:/work/server.js".to_owned());
         assert!(find_agent(SHELL, &procs, cmd).is_none());
@@ -192,7 +233,9 @@ mod tests {
 
     #[test]
     fn each_agent_gets_its_own_newline() {
-        assert_eq!(AGENTS[0].newline, b"\x1b\r");
-        assert_eq!(AGENTS[1].newline, b"\\\r\n");
+        assert_eq!(AGENTS[0].newline, Some(&b"\x1b\r"[..]));
+        assert_eq!(AGENTS[1].newline, Some(&b"\\\r\n"[..]));
+        // Codex reads native key events: a real Shift+Enter.
+        assert_eq!(AGENTS[2].newline, None);
     }
 }

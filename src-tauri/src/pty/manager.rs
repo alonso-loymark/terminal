@@ -90,6 +90,27 @@ impl PtyManager {
         self.with_session(id, |session| Ok(session.busy_processes()))
     }
 
+    /// The AI agent (`claude`, `codex`, `gemini`) running in each session, if any. One look at
+    /// the process table for all of them; unknown sessions report none.
+    pub fn agents(&self, ids: &[SessionId]) -> Vec<(SessionId, Option<&'static str>)> {
+        let shells: Vec<(SessionId, u32)> = ids
+            .iter()
+            .filter_map(|&id| self.pid(id).map(|pid| (id, pid)))
+            .collect();
+        // The process table is inspected without holding the sessions lock.
+        let found = agents::detect(&shells.iter().map(|&(_, pid)| pid).collect::<Vec<_>>());
+        ids.iter()
+            .map(|&id| {
+                let agent = shells
+                    .iter()
+                    .position(|&(sid, _)| sid == id)
+                    .and_then(|at| found.get(at).copied().flatten())
+                    .map(|spec| spec.name);
+                (id, agent)
+            })
+            .collect()
+    }
+
     /// Process id of the session's shell.
     pub fn pid(&self, id: SessionId) -> Option<u32> {
         self.registry

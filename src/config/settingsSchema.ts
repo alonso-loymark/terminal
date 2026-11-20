@@ -113,6 +113,50 @@ export const settingsSchema = object(
       },
       { description: 'Sesión: lo que se restaura al abrir la app.' },
     ),
+    blocks: object(
+      {
+        enabled: boolean({
+          default: true,
+          description: 'Bloques de comandos (con la integración de shell): una marca al costado de cada comando con su salida, roja si falló, un menú para copiar o volver a ejecutar, y Ctrl+↑ / Ctrl+↓ para saltar entre ellos.',
+        }),
+      },
+      { description: 'Bloques de comandos.' },
+    ),
+    agents: object(
+      {
+        enabled: boolean({
+          default: true,
+          description: 'Detectar claude, codex y gemini en los paneles: indicador en la tab y en el panel (trabajando, esperando tu respuesta, terminado) y el preset multi-agente.',
+        }),
+        idleSeconds: number({
+          default: 6,
+          min: 2,
+          max: 600,
+          integer: true,
+          description: 'Segundos sin salida de un agente para considerar que espera tu respuesta (si no lo avisó antes con una campana o una notificación).',
+        }),
+        commands: object(
+          {
+            claude: string({ default: 'claude', nonEmpty: true, description: 'Comando de Claude Code (con sus argumentos).' }),
+            codex: string({ default: 'codex', nonEmpty: true, description: 'Comando de Codex (con sus argumentos).' }),
+            gemini: string({ default: 'gemini', nonEmpty: true, description: 'Comando de Gemini CLI (con sus argumentos).' }),
+          },
+          { description: 'Lo que el preset multi-agente escribe en cada panel.' },
+        ),
+      },
+      { description: 'Agentes de IA en la terminal.' },
+    ),
+    notifications: object(
+      {
+        enabled: boolean({
+          default: true,
+          description: 'Notificaciones de Windows cuando un panel que no está a la vista (otra tab, otro panel maximizado, la ventana minimizada o sin foco) pide atención. Clic: Brisa al frente con ese panel.',
+        }),
+        bell: boolean({ default: true, description: 'Una campana (BEL) cuenta como pedido de atención.' }),
+        agents: boolean({ default: true, description: 'Avisar cuando un agente espera tu respuesta o termina.' }),
+      },
+      { description: 'Notificaciones nativas (OSC 9, OSC 777, BEL y agentes).' },
+    ),
     keybindings: keybindingsSchema(),
   },
   { description: 'Configuración de Brisa. Ctrl+, abre la pantalla de configuración.' },

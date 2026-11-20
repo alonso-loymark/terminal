@@ -2,7 +2,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { folderName, shortenPath } from './paths.ts';
-import { cwdFromFileUri, cwdFromOsc9, parseOsc133, parseOsc633, unescapeOsc633 } from './shellIntegration.ts';
+import {
+  cwdFromFileUri,
+  cwdFromOsc9,
+  notificationFromOsc777,
+  notificationFromOsc9,
+  parseOsc133,
+  parseOsc633,
+  unescapeOsc633,
+} from './shellIntegration.ts';
 
 test('OSC 7: percent-encoded UTF-8 with spaces, accents and ñ', () => {
   assert.equal(
@@ -69,4 +77,15 @@ test('OSC 9;9 (cmd): the raw Windows path; other OSC 9 payloads are not a folder
   assert.equal(cwdFromOsc9('4;1;50'), null, 'progress');
   assert.equal(cwdFromOsc9('Build finished'), null, 'notification');
   assert.equal(cwdFromOsc9('9;relative'), null);
+});
+
+test('notifications: OSC 9 messages and OSC 777 notify; ConEmu commands are not', () => {
+  assert.deepEqual(notificationFromOsc9('Claude necesita tu respuesta'), { source: 'osc9', title: null, body: 'Claude necesita tu respuesta' });
+  assert.equal(notificationFromOsc9('9;C:\Users'), null);
+  assert.equal(notificationFromOsc9('4;1;50'), null);
+  assert.equal(notificationFromOsc9('  '), null);
+  assert.deepEqual(notificationFromOsc777('notify;Claude Code;Listo; sin errores'), { source: 'osc777', title: 'Claude Code', body: 'Listo; sin errores' });
+  assert.deepEqual(notificationFromOsc777('notify;;Solo cuerpo'), { source: 'osc777', title: null, body: 'Solo cuerpo' });
+  assert.equal(notificationFromOsc777('preexec'), null);
+  assert.equal(notificationFromOsc777('notify;;'), null);
 });

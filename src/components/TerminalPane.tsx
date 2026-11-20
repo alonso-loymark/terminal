@@ -14,6 +14,8 @@ import { getPtyBackend, type PtyBackend } from '../lib/pty';
 import { GpuRenderer } from '../lib/renderer';
 import { initSettings } from '../lib/settingsSync';
 import { registerShellIntegration } from '../lib/shellIntegration';
+import { noteAttention, noteInput, noteOutput } from '../lib/agentMonitor';
+import { BlockTracker } from '../lib/blocks';
 import { promptReady } from '../lib/initialCommands';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { getPane, registerPane, unregisterPane, type PaneHandle } from '../lib/terminalRegistry';
@@ -24,6 +26,7 @@ import { loadSystemInfo } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { spawnOf, type PaneId, type Rect } from '../store/workspaceModel';
+import { AgentBadge } from './AgentBadge';
 
 /**
  * The integration script reports itself as soon as the user's profile finished loading. A
@@ -99,11 +102,21 @@ export const TerminalPane = memo(
 
       // Shell integration marks (cwd, command start/end, exit code) go to the pane's state.
       // Registered before the session starts, so the first prompt is not missed.
-      const integration = registerShellIntegration(
-        term,
-        (event) => workspace().applyShellEvent(paneId, event),
-        () => promptReady(paneId),
-      );
+      const integration = registerShellIntegration(term, (event) => workspace().applyShellEvent(paneId, event), {
+        onInputStart: () => promptReady(paneId),
+        onNotify: (notification) => noteAttention(paneId, notification),
+      });
+      // Command blocks: after the integration, so its handlers see the marks first.
+      const blocks = new BlockTracker(term, {
+        host,
+        getCwd: () => workspace().panes[paneId]?.cwd ?? null,
+        enabled: () => useSettings.getState().settings.blocks.enabled,
+        onMenu: (blockId, x, y) => useUi.getState().openMenu({ kind: 'block', paneId, blockId, x, y }),
+      });
+      const attention = [
+        term.onBell(() => noteAttention(paneId, { source: 'bell' })),
+        term.onData(() => noteInput(paneId)),
+      ];
       let integrationTimer = 0;
       // The profile actually started (the pane may ask for the default one, or for one that
       // no longer exists).
@@ -127,9 +140,12 @@ export const TerminalPane = memo(
             workspace().applyShellEvent(paneId, { type: 'integration', ok: false, error: 'el script no respondió' });
           }, INTEGRATION_TIMEOUT_MS);
         },
-        onOutput: () => workspace().markActivity(paneId),
+        onOutput: () => {
+          workspace().markActivity(paneId);
+          noteOutput(paneId);
+        },
       });
-      const handle: PaneHandle = { term, fit, search, session, host, inner, gpu, integration };
+      const handle: PaneHandle = { term, fit, search, session, host, inner, gpu, integration, blocks };
       registerPane(paneId, handle);
 
       // Right click: copy the selection if there is one, otherwise paste (Windows Terminal
@@ -219,9 +235,15 @@ export const TerminalPane = memo(
         }
         fitToHost(fit, inner);
       };
-      const unsubscribeSettings = useSettings.subscribe(restyle);
+      const unsubscribeSettings = useSettings.subscribe((s, prev) => {
+        restyle();
+        if (s.settings.blocks !== prev.settings.blocks) blocks.render();
+      });
       const unsubscribeProfile = useWorkspace.subscribe((s, prev) => {
-        if (s.panes[paneId]?.profile !== prev.panes[paneId]?.profile) restyle();
+        const pane = s.panes[paneId];
+        if (pane?.profile !== prev.panes[paneId]?.profile) restyle();
+        // While an agent runs, its TUI shares the normal buffer: no blocks, no marks.
+        if (pane?.agent !== prev.panes[paneId]?.agent) blocks.setAgent(!!pane?.agent && pane.agent.state !== 'finished');
       });
 
       return () => {
@@ -229,6 +251,8 @@ export const TerminalPane = memo(
         cancelAnimationFrame(frame);
         unsubscribeSettings();
         unsubscribeProfile();
+        blocks.dispose();
+        attention.forEach((d) => d.dispose());
         host.removeEventListener('contextmenu', onContextMenu);
         host.removeEventListener('mouseup', onMouseUp);
         term.textarea?.removeEventListener('focus', onFocus);
@@ -272,6 +296,7 @@ export const TerminalPane = memo(
         style={paneStyle(rect)}
       >
         <div ref={innerRef} className="terminal-host" />
+        <AgentBadge paneId={paneId} />
       </div>
     );
   },

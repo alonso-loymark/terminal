@@ -10,6 +10,8 @@ use tauri::{State, Webview};
 use crate::explorer::{
     self, DirEntry, ExplorerError, GitStatus, NewEntryKind, WatchEvents, WatchId, WatchManager,
 };
+use crate::settings_commands::SettingsState;
+use crate::worktree::{self, Removed, Worktree, WorktreeError, WorktreeStatus};
 
 /// Runs blocking file-system work off the main thread.
 async fn blocking<T: Send + 'static>(
@@ -108,4 +110,61 @@ pub async fn open_in_vscode(path: String) -> Result<(), ExplorerError> {
 #[tauri::command]
 pub async fn open_in_file_manager(path: String) -> Result<(), ExplorerError> {
     blocking(move || explorer::open_in_file_manager(&PathBuf::from(path))).await
+}
+
+// ---------------------------------------------------------------- worktrees (multi-agent preset)
+
+fn git_exe() -> Result<PathBuf, WorktreeError> {
+    crate::pty::find_on_path("git.exe")
+        .or_else(|| crate::pty::find_on_path("git"))
+        .ok_or_else(|| WorktreeError::Git("git no está instalado".to_owned()))
+}
+
+async fn worktree_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, WorktreeError> + Send + 'static,
+) -> Result<T, WorktreeError> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| WorktreeError::Git(format!("tarea interrumpida: {e}")))?
+}
+
+fn registry(settings: &SettingsState) -> PathBuf {
+    settings.dir.join(worktree::REGISTRY_FILE)
+}
+
+/// A git worktree (new branch from HEAD) for one pane of the multi-agent preset.
+#[tauri::command]
+pub async fn worktree_create(
+    settings: State<'_, SettingsState>,
+    dir: String,
+    label: String,
+) -> Result<Worktree, WorktreeError> {
+    let registry = registry(&settings);
+    worktree_blocking(move || worktree::create(&git_exe()?, &registry, &PathBuf::from(dir), &label))
+        .await
+}
+
+#[tauri::command]
+pub async fn worktree_status(path: String) -> Result<WorktreeStatus, WorktreeError> {
+    worktree_blocking(move || Ok(worktree::status(&git_exe()?, &PathBuf::from(path)))).await
+}
+
+/// Removes a worktree Brisa created (refused for any other path).
+#[tauri::command]
+pub async fn worktree_remove(
+    settings: State<'_, SettingsState>,
+    path: String,
+    force: bool,
+) -> Result<Removed, WorktreeError> {
+    let registry = registry(&settings);
+    worktree_blocking(move || worktree::remove(&git_exe()?, &registry, &path, force)).await
+}
+
+/// The worktrees Brisa created and has not removed.
+#[tauri::command]
+pub async fn worktree_list(
+    settings: State<'_, SettingsState>,
+) -> Result<Vec<Worktree>, WorktreeError> {
+    let registry = registry(&settings);
+    worktree_blocking(move || Ok(worktree::list(&registry))).await
 }

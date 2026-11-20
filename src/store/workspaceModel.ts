@@ -45,6 +45,26 @@ export type ShellEvent =
   | { type: 'integration'; ok: true }
   | { type: 'integration'; ok: false; error: string };
 
+/** AI agents the backend recognizes in a session's process tree. */
+export type AgentName = 'claude' | 'codex' | 'gemini';
+/**
+ * working: producing output; waiting: asked for the user (BEL / OSC 9 / OSC 777) or went quiet
+ * for a while; finished: the agent exited (until the pane is used again).
+ */
+export type AgentState = 'working' | 'waiting' | 'finished';
+
+export interface PaneAgent {
+  name: AgentName;
+  state: AgentState;
+}
+
+/** A git worktree Brisa created for the pane (multi-agent preset): removed when the pane closes. */
+export interface PaneWorktree {
+  path: string;
+  repo: string;
+  branch: string;
+}
+
 /** Where and with what a pane's session starts. */
 export interface PaneSpawn {
   /** null: the default profile. */
@@ -124,6 +144,10 @@ export interface Pane {
   commandRunning: boolean;
   integration: IntegrationState;
   integrationError: string | null;
+  /** The AI agent running in the pane (or that just finished), and what it is doing. */
+  agent: PaneAgent | null;
+  /** The worktree the pane works in, if Brisa created it for this pane. */
+  worktree: PaneWorktree | null;
 }
 
 export interface Tab {
@@ -153,7 +177,7 @@ export interface Workspace {
   activeTabId: TabId | null;
 }
 
-export type TabIndicator = 'activity' | 'exited' | 'exited-error' | null;
+export type TabIndicator = 'agent-waiting' | 'agent-working' | 'agent-finished' | 'activity' | 'exited' | 'exited-error' | null;
 
 export const emptyWorkspace = (): Workspace => ({ tabs: {}, tabOrder: [], groups: {}, panes: {}, activeTabId: null });
 
@@ -208,10 +232,14 @@ export function tabIndicator(ws: Workspace, tabId: TabId): TabIndicator {
   const tab = ws.tabs[tabId];
   if (!tab) return null;
   const panes = panesOf(tab.layout).map((id) => ws.panes[id]).filter((p): p is Pane => !!p);
+  // An agent waiting for the user matters most; then a process that failed.
+  if (panes.some((p) => p.agent?.state === 'waiting')) return 'agent-waiting';
   if (panes.some((p) => p.status === 'failed' || (p.status === 'exited' && p.exitCode !== 0 && p.exitCode !== null))) {
     return 'exited-error';
   }
+  if (panes.some((p) => p.agent?.state === 'working')) return 'agent-working';
   if (panes.some((p) => p.status === 'exited')) return 'exited';
+  if (panes.some((p) => p.agent?.state === 'finished')) return 'agent-finished';
   return panes.some((p) => p.activity) ? 'activity' : null;
 }
 
@@ -318,6 +346,8 @@ export const newPane = (id: PaneId, spawn: PaneSpawn = { profile: null, cwd: nul
   commandRunning: false,
   integration: 'pending',
   integrationError: null,
+  agent: null,
+  worktree: null,
 });
 
 /**
@@ -504,6 +534,7 @@ export function setPaneStatus(
       commandRunning: false,
       integration: 'pending',
       integrationError: null,
+      agent: null,
     };
   } else if (status === 'exited' || status === 'failed') {
     next = { ...next, commandRunning: false };
@@ -562,6 +593,19 @@ export function applyShellEvent(ws: Workspace, paneId: PaneId, event: ShellEvent
       break;
   }
   return patch ? { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, ...patch } } } : ws;
+}
+
+/** What the agent monitor found (lib/agentMonitor.ts). Same object back if nothing changed. */
+export function setPaneAgent(ws: Workspace, paneId: PaneId, agent: PaneAgent | null): Workspace {
+  const pane = ws.panes[paneId];
+  if (!pane || (pane.agent?.name === agent?.name && pane.agent?.state === agent?.state)) return ws;
+  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, agent } } };
+}
+
+export function setPaneWorktree(ws: Workspace, paneId: PaneId, worktree: PaneWorktree | null): Workspace {
+  const pane = ws.panes[paneId];
+  if (!pane || pane.worktree === worktree) return ws;
+  return { ...ws, panes: { ...ws.panes, [paneId]: { ...pane, worktree } } };
 }
 
 /** Output arrived: marks the pane unless it is on screen. Cheap no-op otherwise. */

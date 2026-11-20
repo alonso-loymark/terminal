@@ -18,6 +18,7 @@ ejecutable `brisa.exe`, identificador `dev.brisa.desktop`.)
 | Drag & drop de tabs | **@dnd-kit** (`core` 6, `sortable` 10, `utilities` 3; la API estable, no `@dnd-kit/react` 0.x) |
 | Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
 | Configuración | `settings.json` y `layouts.json` (JSONC) leídos con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`); `session.json` (JSON que escribe la app) |
+| Notificaciones | **windows** 0.62 (WinRT `ToastNotification`), solo con las features de toasts; ya estaba en el árbol por WebView2 (`webview2-com`), misma versión. Win32 sigue con `windows-sys` |
 
 ## Arquitectura
 
@@ -93,6 +94,11 @@ Reglas de la arquitectura:
   `config_write` (atómica; `onlyIfChanged` para los schemas) y `config_open` (VS Code), que
   reciben `file: 'settings' | 'settingsSchema' | 'session' | 'layouts' | 'layoutsSchema'`
   (`settings::ConfigFile`: el frontend nunca pasa rutas), `read_theme_file` y `set_window_look`.
+  Agentes y notificaciones: `session_agents` (qué agente corre en cada sesión, una sola foto de
+  la tabla de procesos), `notifications_listen` (canal por el que llegan los clics),
+  `notify` y, solo en desarrollo, `debug_notification_click` / `debug_notification_history`.
+  Worktrees (`explorer_commands.rs` → `worktree.rs`): `worktree_create`, `worktree_status`,
+  `worktree_remove` (solo los que Brisa registró) y `worktree_list`.
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -105,10 +111,12 @@ Reglas de la arquitectura:
   | PowerShell y el resto | — | Shift+Enter nativo | PSReadLine: AddLine (`>>`); vim/nano: como en Windows Terminal |
 
   `ESC CR` en PSReadLine no hace nada y el Shift+Enter nativo le llega a un TUI de Node como CR
-  (enviaría el prompt): por eso la decisión es por contexto. Codex no está en la tabla: usa
-  crossterm, que lee eventos de teclado nativos, así que recibe el Shift+Enter nativo como en
-  Windows Terminal (no verificado: no hay codex instalado y no se prueban agentes reales). El
-  pedido viaja por la misma cola que las teclas (`InputQueue`), así no se reordena con ellas.
+  (enviaría el prompt): por eso la decisión es por contexto. Codex se detecta (`codex.exe`,
+  `codex-<plataforma>.exe` o node con `@openai/codex`, para los indicadores) pero no tiene
+  secuencia propia: usa crossterm, que lee eventos de teclado nativos, así que recibe el
+  Shift+Enter nativo como en Windows Terminal (no verificado: no hay codex instalado y no se
+  prueban agentes reales). El pedido viaja por la misma cola que las teclas (`InputQueue`), así
+  no se reordena con ellas.
 - Antes de lanzar cada shell se limpia el flag heredable "ignorar Ctrl+C" del proceso
   (`SetConsoleCtrlHandler(NULL, FALSE)`, ver Gotchas).
 - `session_busy` devuelve lo que cerrar una sesión **mataría** además de la shell (misma lógica que
@@ -195,6 +203,9 @@ que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
 | `OSC 633 ; P ; Shell=<shell>` | al cargar | la integración funciona |
 | `OSC 633 ; P ; IntegrationError=<msg>` | si no carga | aviso en la status bar |
 | `OSC 9 ; 9 ; C:\ruta` | en cada prompt de **cmd** | cwd del panel (ruta Windows cruda, como Windows Terminal) |
+| `OSC 9 ; <mensaje>` | cuando un programa quiere avisar | notificación (estilo iTerm2 / Windows Terminal; `9;<número>` es de ConEmu y no cuenta) |
+| `OSC 777 ; notify ; <título> ; <texto>` | ídem | notificación (estilo Ghostty / urxvt) |
+| `BEL` | ídem | pedido de atención (campana) |
 
 - **Scripts** en `src-tauri/resources/shell-integration/` (recursos de Tauri: en dev se copian a
   `target/debug/shell-integration`, en el bundle van junto al exe). `commands.rs` los resuelve con
@@ -354,7 +365,8 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   Secciones: `appearance` (fuente, tamaño, line-height, ligaduras, cursor, padding, opacidad,
   efecto), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
   `explorer` (arranque, ancho, ocultos, clic en carpeta), `profiles` (`default`, `list`),
-  `session` (`restore`) y `keybindings` (ver "Atajos configurables").
+  `session` (`restore`), `blocks` (`enabled`), `agents` (`enabled`, `idleSeconds`, `commands`),
+  `notifications` (`enabled`, `bell`, `agents`) y `keybindings` (ver "Atajos configurables").
 - **Errores**: JSON roto o un valor inválido (tipo, rango, opción) → el archivo entero se
   rechaza y **sigue la última configuración válida**; la barra de estado muestra
   "⚠ settings.json" (tooltip con línea/ruta y motivo; clic → la configuración, que lista los
@@ -369,7 +381,7 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 - **Migración**: `localStorage['terminal.explorer']` (Fase 5) pasa a `explorer.*` la primera vez
   (solo lo que el archivo no define) y se borra; si el archivo tiene errores, se conserva.
 - **Pantalla** (`Ctrl+,`, `SettingsPage.tsx` + `components/settings/`): Apariencia, Temas,
-  Perfiles, Terminal, Explorador, Atajos y Sesión y layouts; números y textos se guardan con
+  Perfiles, Terminal, Explorador, Bloques y agentes, Atajos y Sesión y layouts; números y textos se guardan con
   Enter o al salir del campo; "Abrir settings.json en VS Code" (si no está, la app asociada a
   .json). Mientras está abierta, los atajos de la app no corren (salvo el de la configuración) y
   nadie le roba el foco; Esc la cierra.
@@ -527,6 +539,110 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   escrito, si la shell termina o si no hay prompt en 30 s, no se escribe y un aviso (toast) dice
   por qué.
 
+## Bloques de comandos
+
+- **Qué es un bloque** (`lib/blocks.ts`, `BlockTracker` por terminal): un comando y su salida,
+  según las marcas de la integración: `133;A` (empieza el prompt), `B` (empieza lo tipeado),
+  `633;E` (el comando exacto), `C` (empieza la salida) y `D;<código>` (termina). Cada posición es
+  un *marker* de xterm, que sigue a su línea cuando el scrollback se mueve; un bloque cuyo
+  prompt salió del scrollback se descarta (máximo 1000 por terminal). El tracker registra sus
+  handlers OSC **después** de la integración y devuelve `false`: ve las marcas primero y no las
+  consume. Un prompt sin comando (Enter vacío, Ctrl+C) no es bloque; un comando cuyo `D` nunca
+  llegó termina en el próximo `A`.
+- **Pantalla completa y agentes**: si el comando usa el buffer alternativo (vim, htop) o el
+  monitor de agentes detecta un agente en el panel (su TUI dibuja en el buffer normal), el
+  bloque se descarta y, mientras corre, no se muestra ninguna marca.
+- **Margen**: un `div.block-gutter` sobre el panel (en el padding, a la izquierda del texto);
+  posiciones calculadas desde `.xterm-screen` y redibujado en un `requestAnimationFrame` ante
+  render, scroll, cambio de buffer, hover o selección. Los que fallaron (código ≠ 0) tienen
+  siempre una marca roja; al pasar el mouse sobre cualquiera aparece su marca, y un clic abre el
+  menú (`MenuState` `block`): copiar comando, salida o ambos (el portapapeles de Windows guarda
+  CRLF) y volver a ejecutar (con la shell libre y el prompt vacío se ejecuta; si hay algo
+  escrito, se inserta sin ejecutar; con un comando corriendo, no se escribe nada).
+- **Ctrl+↑ / Ctrl+↓** (`blocks.previous` / `blocks.next`, alcance terminal, `passthrough`):
+  seleccionan el bloque anterior / siguiente (banda resaltada) y lo traen a la vista; pasado el
+  último, vuelve al prompt. Sin bloques, con un programa de pantalla completa o un agente, la
+  tecla sigue al programa. Tipear quita la selección.
+- **Fase 7B**: `BLOCK_AI_ACTIONS = false` en `lib/blocks.ts`. Con `true` aparecen el botón
+  "Explicar / arreglar" sobre la marca roja (hoy existe con `hidden`) y el ítem del menú.
+  **API para la 7B** (`lib/blockActions.ts`): `paneBlocks(paneId)` → `BlockInfo[]` (id,
+  comando, código, cwd, inicio y fin) y `blockText(paneId, blockId)` → lo mismo más `output`
+  (filas envueltas unidas, sin la línea del comando); `selectedBlock(paneId)` da el seleccionado.
+- `blocks.enabled: false` apaga marcas, menú y navegación.
+
+## Agentes de IA y notificaciones
+
+- **Detección** (`lib/agentMonitor.ts` + `session_agents`): cada 2 s, y 0,7 s después de que
+  empieza un comando, se pregunta al backend qué agente corre en los paneles que ejecutan algo
+  (o que no pueden decirlo: cmd, perfiles sin integración) o que ya tenían uno. El backend usa
+  la misma detección que Shift+Enter (`pty/agents.rs`, una foto de la tabla de procesos para
+  todas las sesiones). Con todos los paneles en un prompt libre no se consulta nada.
+- **Estados** (`Pane.agent`: `{ name, state }`): *trabajando* (produce salida), *esperando tu
+  respuesta* (sonó la campana, mandó OSC 9 / OSC 777, o lleva `agents.idleSeconds` sin salida,
+  6 s por defecto) y *terminado* (el proceso salió; se va al volver a tipear en el panel). La
+  salida hasta 300 ms después de una tecla es eco, no trabajo; y durante 1,5 s después de un
+  aviso explícito, un redibujo no lo devuelve a *trabajando*.
+- **Indicadores**: en la tab (`tabIndicator`: esperando > proceso con error > trabajando >
+  terminado > actividad; punto animado / ámbar / anillo verde, con el agente en el tooltip) y
+  en el panel (`AgentBadge`, arriba a la derecha: "Claude Code · espera tu respuesta").
+- **Notificaciones nativas** (`notifications.rs`): BEL (`term.onBell`), OSC 9 y OSC 777 de
+  cualquier programa, y los cambios de un agente a *esperando* o *terminado*, se vuelven una
+  notificación de Windows **solo si el panel no está a la vista** (otra tab, otro panel
+  maximizado, la ventana minimizada o sin foco). Las campanas de un panel, como mucho una cada
+  5 s (una ráfaga es una). Toast de WinRT con el AppUserModelID de la app registrado en
+  `HKCU\Software\Classes\AppUserModelId\dev.brisa.desktop` (nombre e ícono, el PNG se copia a
+  `%LOCALAPPDATA%\dev.brisa.desktop`), como hace el Windows App SDK con las apps sin paquete.
+  Un toast por panel a la vez (`Tag`). El clic llega en el proceso (`Activated`, los toasts se
+  guardan vivos): Rust trae la ventana al frente y manda el panel por el canal de
+  `notifications_listen`; el frontend lo enfoca. Verificado una vez con un toast real (quedó
+  en el historial del Centro de actividades y se borró); el clic real queda en el smoke manual.
+- **e2e**: con `BRISA_NOTIFY_LOG=<archivo>` las notificaciones se escriben ahí (una línea JSON:
+  título, texto, tag) en vez de mostrarse; `debug_notification_click` hace lo mismo que el clic.
+- **Settings**: `agents.enabled` (detección, indicadores y preset), `agents.idleSeconds`,
+  `notifications.enabled`, `notifications.bell`, `notifications.agents`.
+
+### Configurar Claude Code para que avise a Brisa
+
+- Lo recomendado (y documentado por Anthropic): en `~/.claude/settings.json`
+  `"preferredNotifChannel": "terminal_bell"`. Según la documentación, con ese valor Claude Code
+  manda la campana (BEL) "whatever the terminal or profile". En Brisa, la campana de un panel
+  con un agente lo pone en *espera tu respuesta* y, si no está a la vista, avisa con una
+  notificación de Windows.
+- Valores documentados: `auto` (por defecto: notificación de escritorio solo en Ghostty, Kitty
+  e iTerm2; en el resto, nada), `terminal_bell`, `iterm2`, `kitty`, `ghostty`. Por convención
+  `iterm2` usa OSC 9 y `ghostty` OSC 777, que Brisa también entiende, pero la documentación no
+  dice qué secuencia manda cada uno: **no verificado**.
+- Claude Code avisa cuando termina una tarea o se detiene en un permiso "y parece que no estás
+  mirando". No está verificado cómo lo decide en Windows (ConPTY consume los reportes de foco,
+  ver Gotchas); por eso Brisa también infiere *espera tu respuesta* por silencio.
+- El hook `Notification` (matchers `permission_prompt`, `idle_prompt`, …) corre un comando cuando
+  Claude Code avisa; sirve para un sonido propio y no hace falta para Brisa.
+- Codex: según su configuración de ejemplo, `[tui] notifications = true` y
+  `notification_method = "osc9"` en `~/.codex/config.toml` (no verificado).
+- Nada de esto se probó con Claude Code real (regla: las pruebas usan el agente falso). Fuentes:
+  https://code.claude.com/docs/en/terminal-config, https://code.claude.com/docs/en/settings,
+  https://code.claude.com/docs/en/hooks y https://developers.openai.com/codex/config-sample.
+
+## Preset multi-agente y worktrees
+
+- Paleta → "Abrir multi-agente aquí…" (`agents.multiAgent`, `MultiAgentDialog.tsx`): 2, 3 o 4
+  paneles en la carpeta del panel activo, cada uno con Claude Code, Codex, Gemini o solo la
+  shell. Una tab nueva ("Agentes: …"): 2 lado a lado, 3 = uno a la izquierda y dos apilados, 4 =
+  grilla 2×2. Cada agente se escribe con `agents.commands.<agente>` como comando inicial: igual
+  que en los layouts, recién cuando la shell está lista según OSC 133.
+- **Worktrees** (opcional, solo dentro de un repositorio con commits): uno por panel, junto al
+  repo en `<padre>\<repo>.worktrees\<agente>-<n>-<id>`, en una rama nueva `brisa/<agente>-<n>-<id>`
+  desde HEAD. Brisa anota los que crea en `worktrees.json` (carpeta de config; lo escribe solo
+  el backend) y **solo borra esos** (`WorktreeError::NotOurs` para cualquier otro).
+- **Limpieza al cerrar** (`lib/multiAgent.ts`, desde `closePaneNow` / `closeTabsNow`): un
+  worktree sin cambios se borra con `git worktree remove` (reintentos: los procesos del panel
+  pueden tardar en soltar la carpeta) y su rama con `git branch -d`, que la conserva si el agente
+  hizo commits. Uno con cambios sin commitear pregunta ("Conservar", con el foco, o "Borrar
+  igual"). Si otro panel sigue trabajando en esa carpeta, se le pasa. Cerrar la app con la X no
+  borra nada: la sesión recuerda qué paneles tienen worktree (`PaneSpec.worktree`, solo en
+  session.json, nunca en layouts). Los conservados se listan (y se borran) en Configuración →
+  Bloques y agentes.
+
 ## Estructura
 
 ```
@@ -545,11 +661,13 @@ src/                        Frontend (solo render + input)
   components/FileTree.tsx   Árbol virtualizado: clic (cd / navegar / insertar), arrastrar a un panel, renombrar
   components/ProfileIcon.tsx   Ícono de un perfil (monogramas incluidos o emoji del usuario)
   components/SettingsPage.tsx  Ctrl+,: navegación, avisos del archivo, abrir settings.json
-  components/settings/      Secciones (GeneralSections, ThemesSection, ProfilesSection, KeybindingsSection,
-                            SessionSection) y Controls
+  components/settings/      Secciones (GeneralSections, ThemesSection, ProfilesSection, AgentsSection,
+                            KeybindingsSection, SessionSection) y Controls
   components/CommandPalette.tsx  Ctrl+Shift+P: búsqueda difusa, recientes primero, atajos a la derecha
   components/SaveLayoutDialog.tsx  Guardar la tab o la ventana como layout (nombre + comando por panel)
   components/Toast.tsx      Aviso breve abajo (layout guardado, comando inicial que no se escribió)
+  components/AgentBadge.tsx Agente del panel y su estado (arriba a la derecha)
+  components/MultiAgentDialog.tsx  Preset multi-agente: paneles, agente de cada uno, worktrees
   config/schema.ts          Mini librería de esquema: valida, defaults, tipos inferidos, JSON Schema
   config/settingsSchema.ts  El esquema de settings.json (+ settingsSchema.test.ts)
   config/keybindings.ts     Acciones, teclas por defecto, parseo, eventos → teclas, conflictos, keybindings (+ test)
@@ -569,6 +687,10 @@ src/                        Frontend (solo render + input)
   lib/fuzzy.ts              Búsqueda difusa de la paleta (+ fuzzy.test.ts)
   lib/paletteItems.ts       Lo que ofrece la paleta: acciones, tabs, paneles, perfiles, temas, layouts
   lib/appActions.ts         Qué hace cada acción (desde su atajo o la paleta)
+  lib/blocks.ts             BlockTracker: bloques de comandos (OSC 133), margen, navegación, texto
+  lib/blockActions.ts       Menú de un bloque (copiar, volver a ejecutar) y la API de bloques para la 7B
+  lib/agentMonitor.ts       Agentes por panel (trabajando/esperando/terminado) y notificaciones nativas
+  lib/multiAgent.ts         Preset multi-agente, worktrees por panel y su limpieza al cerrar
   lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
   lib/ligatures.ts          Ligaduras con un character joiner (+ test)
   lib/explorerModel.ts      Lógica pura del explorador (+ explorerModel.test.ts)
@@ -607,6 +729,8 @@ src-tauri/
   src/settings.rs           Archivos de config: carpeta (+ migración de dev.terminal.desktop), lectura,
                             escritura atómica, JSONC mínimo (sin Tauri)
   src/settings_commands.rs  Comandos de los archivos de config y del aspecto de la ventana (Mica/Acrylic)
+  src/notifications.rs      Toasts de WinRT (AUMID registrado, clic → ventana al frente + panel), log de e2e
+  src/worktree.rs           Worktrees del preset multi-agente: crear, estado, borrar (solo los de Brisa)
   src/explorer/             list.rs, watch.rs, git.rs, ops.rs (sin Tauri; tests unitarios)
   src/pty/manager.rs        Registro de sesiones (create/write/resize/close/close_owned_by/shutdown)
   src/pty/session.rs        ConPTY + hilos reader/flusher/writer/waiter + batching
@@ -621,9 +745,11 @@ src-tauri/
   resources/shell-integration/  powershell.ps1 y bash.sh (recursos del bundle)
   tests/pty.rs              Tests de integración con procesos reales (PowerShell/Git Bash/ConPTY)
   tests/explorer.rs         Listado (.gitignore, ocultos, 5000 archivos) y git real
+  tests/worktree.rs         Worktrees con git real (crear, cambios, ramas, solo los de Brisa)
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
-  fake-agent.mjs            Agente de IA falso para pruebas (ver "Pruebas con agentes")
+  fake-agent.mjs            Agente de IA falso (claude/codex/gemini según el exe; /work, /bell, /osc9,
+                            /osc777, /after N: ver "Pruebas con agentes")
   sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
   recycle.ps1               Verifica que lo borrado por la e2e está en la papelera y lo saca de ahí
@@ -639,8 +765,8 @@ npm run build                           # typecheck (tsc) + build del frontend
 npm test                                # tests unitarios del frontend (node --test, sin dependencias)
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
-npm run e2e:smoke                       # lo esencial (~90 s): en cada cambio
-npm run e2e                             # todas las etapas (~4 min): para cerrar una fase
+npm run e2e:smoke                       # lo esencial (~105 s): en cada cambio
+npm run e2e                             # todas las etapas (~5 min): para cerrar una fase
 npm run e2e -- tabs,groups              # solo algunas etapas
 E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en el puerto 9223
 ```
@@ -656,7 +782,8 @@ carpeta temporal de la corrida): nunca toca el `settings.json`, los layouts ni l
 usuario (y sin la carpeta del usuario tampoco corre la migración del nombre viejo). Con
 `E2E_ATTACH=1` las etapas de configuración se saltean si la app no usa esa carpeta. La etapa
 `reopen` cierra la ventana con la X y relanza `tauri dev` (log en `tauri-dev-2.log`) para ver
-qué vuelve.
+qué vuelve. Las notificaciones nativas de la suite van a un archivo (`BRISA_NOTIFY_LOG`), nunca
+a la pantalla del usuario; la etapa `multiagent` crea un repo de git descartable.
 
 `npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
 app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa el portapapeles
@@ -681,8 +808,12 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
   uso de la cuenta del usuario (y un agente en *auto mode* puede ejecutar cosas).
 - Para probar comportamiento con agentes se usa `e2e/fake-agent.mjs`: editor de línea en raw
   mode, bracketed paste, la secuencia de salto de línea de cada agente y "Ctrl+C dos veces para
-  salir". Se ejecuta con un `node.exe` enlazado como `claude.exe` / `gemini.exe`, así la
-  detección de agentes de la terminal se prueba con el mismo nombre de imagen que el real.
+  salir". Se ejecuta con un `node.exe` enlazado como `claude.exe` / `codex.exe` / `gemini.exe`,
+  así la detección de agentes se prueba con el mismo nombre de imagen que el real. Para los
+  indicadores y notificaciones entiende `/work N` (spinner = trabajando), `/bell`,
+  `/osc9 texto`, `/osc777 título|texto` y `/after N <línea>` (lo mismo, N segundos después:
+  la prueba mientras tanto oculta el panel). El preset multi-agente de la e2e corre el agente
+  falso poniendo `agents.commands` en su settings.json descartable.
 - `run()` en `e2e/run.mjs` se niega a tipear si el cursor no está en un prompt de PowerShell
   libre o si la terminal activa no tiene el foco; `runIdle()`, si la integración no dice que la
   shell está libre (ningún comando corriendo): un fallo nunca debe terminar mandando texto a un
@@ -730,8 +861,8 @@ terminada solo si:
 
 Durante el trabajo, después de **cada cambio**: `npm run e2e:smoke` (arranque, Ctrl+C,
 Shift+Enter con agentes falsos, tabs, paneles, shell integration, estrés de entrada, explorador,
-settings.json en vivo, atajos configurables, sesión y cierre; ~90 s, tiene que quedar por debajo
-de 2 min). La suite completa (`npm run e2e`, ~4 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
+settings.json en vivo, atajos configurables, sesión, bloques y cierre; ~105 s, tiene que quedar
+por debajo de 2 min). La suite completa (`npm run e2e`, ~5 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
 ni `src-tauri/`: el HMR de Vite o el rebuild de `tauri dev` reinician la app a mitad de camino.
 Cada etapa imprime su duración (`== etapa: N s`).
 
@@ -778,6 +909,12 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
 - [ ] Layouts: "▾" → "Guardar la tab como layout…" con un comando (`npm run dev`); abrirlo desde
   la paleta → el comando se escribe recién cuando aparece el prompt. **A mano**: "Abrir
   layouts.json" lo abre en VS Code.
+- [ ] Bloques: varios comandos, uno con `cmd /c exit 3` (marca roja); pasar el mouse, copiar la
+  salida, volver a ejecutar; `Ctrl+↑` / `Ctrl+↓`. En vim, sin marcas.
+- [ ] Agentes (el falso de `e2e/`, o uno real **a mano**, a criterio del usuario): la tab y el
+  panel muestran trabajando / esperando / terminado. **A mano**: con el panel en otra tab, una
+  notificación de Windows real; el clic trae Brisa al frente con ese panel. "Abrir multi-agente
+  aquí" en un repo con worktrees; al cerrar la tab, los limpios se borran y uno con cambios pregunta.
 - [ ] Primer arranque tras el renombre: la configuración de `%APPDATA%\dev.terminal.desktop`
   aparece en `%APPDATA%\dev.brisa.desktop` (temas importados incluidos).
 
@@ -787,7 +924,7 @@ Todos los atajos de la tabla (salvo los del mouse y los internos de un widget) s
 **valores por defecto** y se cambian en Configuración → Atajos o en `keybindings` de
 settings.json (ver "Atajos configurables"). Sin atajo por defecto, solo desde la paleta: cerrar
 tab, cerrar las demás, duplicar, quitar del grupo, igualar paneles, seleccionar todo, limpiar,
-ver ocultos, guardar layouts, abrir settings.json / layouts.json.
+ver ocultos, guardar layouts, abrir settings.json / layouts.json, abrir multi-agente aquí.
 
 | Atajo | Acción |
 |---|---|
@@ -818,6 +955,8 @@ ver ocultos, guardar layouts, abrir settings.json / layouts.json.
 | `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` | Pegar |
 | Clic derecho | Copia si hay selección; si no, pega (o un menú contextual, según la configuración) |
 | `Ctrl+Shift+F` | Buscar (`Enter` siguiente, `Shift+Enter` anterior, `Esc` cerrar) |
+| `Ctrl+↑` / `Ctrl+↓` | Bloque de comando anterior / siguiente (sin bloques, llega al programa) |
+| Clic en la marca de un bloque | Copiar comando / salida / ambos, volver a ejecutar |
 | `Shift+Enter` | Salto de línea en agentes de IA; Shift+Enter nativo en el resto (PowerShell: AddLine) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom de fuente |
 | `Ctrl+clic` en un link | Abrir en el navegador |
@@ -930,6 +1069,10 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   restaurada en la carpeta larga de la prueba, `run()` una vez no vio el prompt de PowerShell a
   tiempo tras cambiar fuente y padding (ConPTY redibuja al cambiar el tamaño). Sola no se
   reprodujo; `run()` ahora muestra la línea del cursor si falla.
+- **Portapapeles y saltos de línea**: `navigator.clipboard.writeText` en Windows guarda `\n`
+  como CRLF; leído de vuelta trae `\r\n` (la e2e lo normaliza).
+- **El margen de bloques se dibuja en el siguiente frame**: una prueba que mira `.block-gutter`
+  justo después de un cambio (agente detectado, setting) tiene que esperar un frame.
 
 ## Estado
 
@@ -1151,6 +1294,35 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   - **No verificado**: la migración con la carpeta real del usuario (la e2e nunca la toca; está
     cubierta por los tests de Rust con carpetas temporales). Queda en el smoke manual. Los datos
     de WebView2 de `dev.terminal.desktop` (caché) no se migran ni se borran.
+- **Fase 7A — bloques de comandos y soporte para agentes: completa y verificada (2026-11-19).**
+  Todo local, sin red. Bloques sobre OSC 133 (marca roja si falló, menú al pasar el mouse:
+  copiar comando / salida / ambos, volver a ejecutar; `Ctrl+↑` / `Ctrl+↓`; nada con vim/htop ni
+  con agentes; API `paneBlocks` / `blockText` para la 7B y "Explicar / arreglar" preparado y
+  oculto). Agentes (claude, codex, gemini): detección por procesos, estados trabajando /
+  esperando / terminado (BEL, OSC 9, OSC 777 o silencio), indicador en la tab y el panel.
+  Notificaciones nativas de Windows (toasts de WinRT) para paneles que no están a la vista, con
+  clic que trae ese panel al frente. Preset multi-agente (2–4 paneles) con un git worktree por
+  panel y limpieza al cerrar (solo los de Brisa; pregunta si hay cambios sin commitear). Todo
+  desactivable (`blocks`, `agents`, `notifications`). Configuración de Claude Code documentada.
+  - `npm test`: 95 (3 nuevos: OSC 9 / OSC 777 vs. comandos de ConEmu; prioridad de los
+    indicadores de agente; la sesión recuerda los worktrees y los layouts nunca).
+  - `cargo test`: 50 unitarios (codex nativo y por npm, escape del XML del toast, nombres de
+    worktree) + 3 de explorador + 21 de PTY + 2 de worktrees con git real (crear junto al repo,
+    cambios, rama que se conserva si tiene commits, uno ajeno nunca se toca, repo sin commits).
+  - `npm run e2e`: 343/343 en 312 s. Etapas nuevas `blocks` (13 checks), `agents` (16) y
+    `multiagent` (7), con el agente falso (claude/codex/gemini) y las notificaciones a un archivo.
+    `npm run e2e:smoke` suma `blocks`: 131/131 en 105 s.
+  - **Toast real**: verificado una vez desde la app de dev (Windows lo aceptó con el AUMID
+    registrado: quedó en el historial del Centro de actividades) y borrado. **No verificado**:
+    el clic real sobre el toast (la prueba no hace clic en la pantalla del usuario; el mismo
+    camino se prueba con `debug_notification_click`): queda en el smoke manual.
+  - **Release** (CSP de producción): paleta, sesión, marca roja de un bloque fallido, sin
+    errores de consola, reabrir (9/9). `brisa.exe` 8,9 → 9,15 MB (WinRT de `windows`); JS
+    956 → 981 KB.
+  - Visto una vez (smoke, no repetido en 3 corridas siguientes): en `blocks`, la marca del bloque
+    fallido no apareció bajo el mouse; la prueba ahora imprime las marcas y el buffer si vuelve.
+  - **No verificado**: Claude Code, Codex y Gemini reales (regla de pruebas), ni qué secuencia
+    manda cada canal de notificación de Claude Code; nombres reales del binario de Codex.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".

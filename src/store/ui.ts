@@ -6,6 +6,8 @@ export type MenuState =
   | { kind: 'group'; groupId: GroupId; x: number; y: number }
   /** clipboard: also copy / paste / select all (right click set to "menu"). */
   | { kind: 'pane'; paneId: PaneId; x: number; y: number; clipboard?: boolean }
+  /** The mark of a command block (lib/blocks.ts). */
+  | { kind: 'block'; paneId: PaneId; blockId: number; x: number; y: number }
   /** "▾" next to "+": a new tab with any profile. */
   | { kind: 'shells'; x: number; y: number }
   /** Right click in the explorer: on an entry, or on the empty area (the root folder). */
@@ -15,17 +17,21 @@ export type MenuState =
 export type CloseTarget =
   | { kind: 'tabs'; tabIds: TabId[] }
   | { kind: 'pane'; paneId: PaneId }
-  | { kind: 'trash'; paths: string[] };
+  | { kind: 'trash'; paths: string[] }
+  /** Worktrees of closed panes that have uncommitted changes. */
+  | { kind: 'worktrees'; paths: string[] };
 
 export interface ConfirmState {
   title: string;
   message: string;
   details: string[];
   confirmLabel: string;
+  /** Default: "Cancelar". */
+  cancelLabel?: string;
   target: CloseTarget;
 }
 
-export type SettingsSection = 'appearance' | 'themes' | 'profiles' | 'terminal' | 'explorer' | 'keybindings' | 'session';
+export type SettingsSection = 'appearance' | 'themes' | 'profiles' | 'terminal' | 'explorer' | 'agents' | 'keybindings' | 'session';
 
 /** Saving the active tab, or the whole window, as a named layout. */
 export interface LayoutDialogState {
@@ -56,6 +62,8 @@ interface UiState {
   /** The command palette (Ctrl+Shift+P). */
   palette: boolean;
   layoutDialog: LayoutDialogState | null;
+  /** The multi-agent preset's dialog, for a folder. */
+  multiAgent: { cwd: string | null } | null;
   toast: Toast | null;
   /** The settings screen is recording a shortcut: no shortcut runs meanwhile. */
   capturingKeys: boolean;
@@ -74,6 +82,8 @@ interface UiState {
   closePalette: () => void;
   openLayoutDialog: (dialog: LayoutDialogState) => void;
   closeLayoutDialog: () => void;
+  openMultiAgent: (cwd: string | null) => void;
+  closeMultiAgent: () => void;
   showToast: (message: string, kind?: Toast['kind']) => void;
   dismissToast: () => void;
   setCapturingKeys: (capturing: boolean) => void;
@@ -91,6 +101,7 @@ export const useUi = create<UiState>()((set) => ({
   settings: null,
   palette: false,
   layoutDialog: null,
+  multiAgent: null,
   toast: null,
   capturingKeys: false,
   startRenameTab: (id) => set({ renamingTabId: id, renamingGroupId: null, menu: null }),
@@ -108,6 +119,8 @@ export const useUi = create<UiState>()((set) => ({
   closePalette: () => set({ palette: false }),
   openLayoutDialog: (layoutDialog) => set({ layoutDialog, palette: false, menu: null }),
   closeLayoutDialog: () => set({ layoutDialog: null }),
+  openMultiAgent: (cwd) => set({ multiAgent: { cwd }, palette: false, menu: null }),
+  closeMultiAgent: () => set({ multiAgent: null }),
   showToast: (message, kind = 'info') => set({ toast: { id: ++toasts, message, kind } }),
   dismissToast: () => set({ toast: null }),
   setCapturingKeys: (capturingKeys) => set({ capturingKeys }),

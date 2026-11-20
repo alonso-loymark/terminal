@@ -101,3 +101,28 @@ export function closeSession(sessionId: SessionId): Promise<void> {
 export function getPtyBackend(): Promise<PtyBackend | null> {
   return invoke('pty_backend');
 }
+
+// ---------------------------------------------------------------- agents and notifications
+
+export type AgentName = 'claude' | 'codex' | 'gemini';
+
+/** The AI agent running in each session, with one look at the process table. */
+export function sessionAgents(sessionIds: SessionId[]): Promise<{ sessionId: SessionId; agent: AgentName | null }[]> {
+  return invoke('session_agents', { sessionIds });
+}
+
+/** A native Windows notification; `tag` comes back when it is clicked (the pane to focus). */
+export function notify(title: string, body: string, tag: string): Promise<void> {
+  return invoke('notify', { title, body, tag });
+}
+
+/** Where clicks on notifications go (the backend has already brought the window forward). */
+export function listenNotifications(onActivate: (tag: string) => void): Promise<void> {
+  const channel = new Channel<{ tag: string }>((activation) => onActivate(activation.tag));
+  return invoke('notifications_listen', { onActivate: channel });
+}
+
+/** Development only: what clicking a notification does (end-to-end tests). */
+export function debugNotificationClick(tag: string): Promise<void> {
+  return invoke('debug_notification_click', { tag });
+}

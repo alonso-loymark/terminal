@@ -6,6 +6,7 @@ import { useSettings } from '../store/settings';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { Layout, PaneId, SplitId } from '../store/workspaceModel';
+import { navigateBlocks } from './blockActions';
 import { readText } from './clipboard';
 import { copySelection } from './keybindings';
 import { openLayoutsJson } from './layoutsSync';
@@ -135,6 +136,12 @@ const RUNNERS: Record<ActionId, Runner> = {
   'terminal.zoomOut': () => useSettings.getState().zoomOut(),
   'terminal.zoomReset': () => useSettings.getState().resetZoom(),
   'terminal.newline': (ctx) => terminal(ctx)?.session.shiftEnter(),
+  'blocks.previous': (ctx) => (navigateBlocks(ctx.paneId ?? selectActivePaneId(ws()) ?? '', -1) ? 'handled' : 'pass'),
+  'blocks.next': (ctx) => (navigateBlocks(ctx.paneId ?? selectActivePaneId(ws()) ?? '', 1) ? 'handled' : 'pass'),
+  'agents.multiAgent': () => {
+    const pane = ws().panes[selectActivePaneId(ws()) ?? ''];
+    useUi.getState().openMultiAgent(pane?.cwd ?? pane?.startCwd ?? null);
+  },
   'explorer.toggle': () => useExplorer.getState().toggleVisible(),
   'explorer.toggleHidden': () => useExplorer.getState().toggleHidden(),
   // The file tree runs these itself: it knows the selected entry.

@@ -63,6 +63,8 @@ interface WorkspaceActions {
   /** A shell integration mark (OSC 7 / 133 / 633) from the pane's terminal. */
   applyShellEvent: (paneId: PaneId, event: ShellEvent) => void;
   markActivity: (paneId: PaneId) => void;
+  setPaneAgent: (paneId: PaneId, agent: model.PaneAgent | null) => void;
+  setPaneWorktree: (paneId: PaneId, worktree: model.PaneWorktree | null) => void;
   /**
    * Splits the pane (default: the active one); the new pane gets the focus and, unless `spawn`
    * says otherwise, the same profile and folder. Returns its id.
@@ -141,6 +143,8 @@ export const useWorkspace = create<WorkspaceStore>()((set, get) => {
     setPaneSession: (paneId, info) => update((ws) => model.setPaneSession(ws, paneId, info)),
     applyShellEvent: (paneId, event) => update((ws) => model.applyShellEvent(ws, paneId, event)),
     markActivity: (paneId) => update((ws) => model.markActivity(ws, paneId)),
+    setPaneAgent: (paneId, agent) => update((ws) => model.setPaneAgent(ws, paneId, agent)),
+    setPaneWorktree: (paneId, worktree) => update((ws) => model.setPaneWorktree(ws, paneId, worktree)),
     splitPane: (direction, paneId, spawn) => {
       const target = paneId ?? selectActivePaneId(get());
       if (!target) return null;

@@ -30,6 +30,8 @@ import {
   spawnOf,
   setSplitSizes,
   splitPane,
+  setPaneAgent,
+  setPaneWorktree,
   tabIndicator,
   tabsInGroup,
   tabTitle,
@@ -456,4 +458,30 @@ test('split and new tabs inherit profile and folder; without a reported folder, 
   ws = addTab(ws, { tabId: 't2', paneId: 'q1', profile: null, cwd: 'D:\\x' });
   assert.deepEqual(spawnOf(ws, 'q1'), { profile: null, cwd: 'D:\\x' });
   assert.deepEqual(spawnOf(ws, 'nope'), { profile: null, cwd: null });
+});
+
+test('agents: the tab shows the most urgent state of its panes; a restart forgets the agent', () => {
+  let ws = addTab(emptyWorkspace(), { tabId: 't1', paneId: 'p1' });
+  ws = splitPane(ws, 'p1', 'horizontal', { paneId: 'p2', splitId: 's1' });
+  assert.equal(tabIndicator(ws, 't1'), null);
+  ws = setPaneAgent(ws, 'p1', { name: 'claude', state: 'working' });
+  assert.equal(tabIndicator(ws, 't1'), 'agent-working');
+  // Waiting for the user beats everything; then a failed process; then working; then finished.
+  ws = setPaneAgent(ws, 'p2', { name: 'codex', state: 'waiting' });
+  assert.equal(tabIndicator(ws, 't1'), 'agent-waiting');
+  ws = setPaneAgent(ws, 'p2', null);
+  ws = setPaneStatus(ws, 'p2', 'exited', 1);
+  assert.equal(tabIndicator(ws, 't1'), 'exited-error');
+  ws = setPaneStatus(ws, 'p2', 'running', null, 3);
+  ws = setPaneAgent(ws, 'p1', { name: 'claude', state: 'finished' });
+  assert.equal(tabIndicator(ws, 't1'), 'agent-finished');
+  // Same state: same object (no re-render).
+  assert.equal(setPaneAgent(ws, 'p1', { name: 'claude', state: 'finished' }), ws);
+  // A new session (restart after exit) starts without an agent.
+  ws = setPaneStatus(ws, 'p1', 'exited', 0);
+  ws = setPaneStatus(ws, 'p1', 'starting', null);
+  assert.equal(ws.panes.p1?.agent, null);
+  const worktree = { path: 'C:\r.worktrees\claude-1', repo: 'C:\r', branch: 'brisa/claude-1' };
+  ws = setPaneWorktree(ws, 'p2', worktree);
+  assert.equal(ws.panes.p2?.worktree, worktree);
 });

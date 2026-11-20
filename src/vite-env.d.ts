@@ -27,6 +27,12 @@ declare global {
     __session?: typeof useSession;
     /** Panes whose layout command still waits for the shell to be ready. */
     __pendingCommands?: () => string[];
+    /** Command blocks of a pane, with their text (lib/blocks.ts). */
+    __blocks?: (paneId: string) => (import('./lib/blocks').BlockText | null)[];
+    __selectedBlock?: (paneId: string) => number | null;
+    /** What clicking a native notification does (the backend's debug command). */
+    __notificationClick?: (tag: string) => Promise<void>;
+    __worktrees?: () => Promise<import('./lib/fsApi').Worktree[]>;
     /** Whether a pane's terminal has the ligature joiner registered. */
     __paneLigatures?: (paneId: string) => boolean;
   }

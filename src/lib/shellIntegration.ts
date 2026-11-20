@@ -94,15 +94,46 @@ export interface ShellIntegrationHandle extends IDisposable {
   promptInput(): string | null;
 }
 
+/** A notification a program asked the terminal to show (OSC 9 / OSC 777). */
+export interface TerminalNotification {
+  source: 'osc9' | 'osc777';
+  title: string | null;
+  body: string;
+}
+
 /**
- * Registers the OSC handlers on a terminal; events go to `emit`. `onInputStart` runs when the
- * prompt has been drawn (133;B): the moment a command can be typed.
+ * OSC 9 ; <message> (iTerm2, Windows Terminal, Codex): a notification. ConEmu uses OSC 9 with
+ * a number for other things (9;9 folder, 9;4 progress...): those are not.
  */
+export function notificationFromOsc9(data: string): TerminalNotification | null {
+  if (/^\d+(;|$)/.test(data)) return null;
+  const body = data.trim();
+  return body ? { source: 'osc9', title: null, body } : null;
+}
+
+/** OSC 777 ; notify ; <title> ; <body> (urxvt, Ghostty, foot). Other 777 commands: null. */
+export function notificationFromOsc777(data: string): TerminalNotification | null {
+  const [command, title = '', ...rest] = data.split(';');
+  if (command !== 'notify') return null;
+  const body = rest.join(';').trim();
+  if (!title.trim() && !body) return null;
+  return { source: 'osc777', title: title.trim() || null, body };
+}
+
+export interface ShellIntegrationHooks {
+  /** The prompt has been drawn (133;B): the moment a command can be typed. */
+  onInputStart?: () => void;
+  /** A program asked for a notification (OSC 9 / OSC 777). */
+  onNotify?: (notification: TerminalNotification) => void;
+}
+
+/** Registers the OSC handlers on a terminal; events go to `emit`. */
 export function registerShellIntegration(
   term: Terminal,
   emit: (event: ShellEvent) => void,
-  onInputStart?: () => void,
+  hooks: ShellIntegrationHooks = {},
 ): ShellIntegrationHandle {
+  const { onInputStart, onNotify } = hooks;
   // Where the input starts: the cursor when the prompt-end mark arrives.
   let inputStart: { marker: IMarker; x: number } | null = null;
   const clearInput = () => {
@@ -131,12 +162,22 @@ export function registerShellIntegration(
       return handle(parseOsc133)(data);
     }),
     term.parser.registerOscHandler(633, handle(parseOsc633)),
-    // cmd's prompt reports the folder this way (see src-tauri/src/pty/shell.rs). Other OSC 9
-    // uses are left alone.
+    // cmd's prompt reports the folder this way (see src-tauri/src/pty/shell.rs); a plain
+    // message is a notification. ConEmu's other commands (progress...) are left alone.
     term.parser.registerOscHandler(9, (data) => {
       const cwd = cwdFromOsc9(data);
-      if (cwd) emit({ type: 'cwd', cwd });
-      return cwd !== null;
+      if (cwd) {
+        emit({ type: 'cwd', cwd });
+        return true;
+      }
+      const notification = notificationFromOsc9(data);
+      if (notification) onNotify?.(notification);
+      return notification !== null;
+    }),
+    term.parser.registerOscHandler(777, (data) => {
+      const notification = notificationFromOsc777(data);
+      if (notification) onNotify?.(notification);
+      return notification !== null;
     }),
   ];
   return {

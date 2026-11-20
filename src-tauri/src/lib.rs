@@ -1,15 +1,18 @@
 mod commands;
 pub mod explorer;
 mod explorer_commands;
+mod notifications;
 pub mod pty;
 pub mod settings;
 mod settings_commands;
+pub mod worktree;
 
 use tauri::webview::PageLoadEvent;
 use tauri::window::{Color, Effect, EffectsBuilder};
 use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::explorer::WatchManager;
+use crate::notifications::NotificationState;
 use crate::pty::PtyManager;
 use crate::settings::Backdrop;
 use crate::settings_commands::SettingsState;
@@ -52,6 +55,7 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_opener::init())
         .manage(PtyManager::new())
         .manage(WatchManager::new())
+        .manage(NotificationState::default())
         .setup(|app| create_main_window(app))
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
@@ -62,6 +66,11 @@ pub fn run() -> tauri::Result<()> {
             commands::session_busy,
             commands::system_info,
             commands::pty_backend,
+            commands::session_agents,
+            notifications::notifications_listen,
+            notifications::notify,
+            notifications::debug_notification_click,
+            notifications::debug_notification_history,
             explorer_commands::list_dir,
             explorer_commands::watch_start,
             explorer_commands::watch_set,
@@ -72,6 +81,10 @@ pub fn run() -> tauri::Result<()> {
             explorer_commands::trash_entries,
             explorer_commands::open_in_vscode,
             explorer_commands::open_in_file_manager,
+            explorer_commands::worktree_create,
+            explorer_commands::worktree_status,
+            explorer_commands::worktree_remove,
+            explorer_commands::worktree_list,
             settings_commands::settings_load,
             settings_commands::config_read,
             settings_commands::config_write,

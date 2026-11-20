@@ -182,6 +182,34 @@ pub async fn session_busy(
         .map_err(|e| PtyError::Io(format!("busy check failed: {e}")))?
 }
 
+/// The AI agent running in a session, if any (for the agent indicators).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAgent {
+    session_id: SessionId,
+    /// `claude`, `codex` or `gemini`.
+    agent: Option<&'static str>,
+}
+
+/// Which sessions run an AI agent, with one look at the process table for all of them.
+#[tauri::command]
+pub async fn session_agents(
+    manager: State<'_, PtyManager>,
+    session_ids: Vec<SessionId>,
+) -> Result<Vec<SessionAgent>, PtyError> {
+    let manager = manager.inner().clone();
+    // Walks the process table: keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        manager
+            .agents(&session_ids)
+            .into_iter()
+            .map(|(session_id, agent)| SessionAgent { session_id, agent })
+            .collect()
+    })
+    .await
+    .map_err(|e| PtyError::Io(format!("agent check failed: {e}")))
+}
+
 /// Lets xterm adapt to ConPTY (`windowsPty` option). `None` outside Windows.
 #[tauri::command]
 pub fn pty_backend() -> Option<PtyBackend> {

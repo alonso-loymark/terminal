@@ -6,6 +6,7 @@ import { useUi, type CloseTarget } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { panesOf, tabOfPane, tabTitle, type PaneId, type TabId } from '../store/workspaceModel';
 import { sessionBusy } from './pty';
+import { releaseWorktrees, worktreesOf } from './multiAgent';
 import { flushSession } from './sessionSync';
 import { getPane } from './terminalRegistry';
 
@@ -36,6 +37,7 @@ function focusNow(): boolean {
     ui.settings ||
     ui.palette ||
     ui.layoutDialog ||
+    ui.multiAgent ||
     useExplorer.getState().editing
   ) {
     return true;
@@ -120,20 +122,27 @@ export async function requestClosePane(paneId?: PaneId): Promise<void> {
   });
 }
 
-/** Closes without asking. Unmounting a pane closes its session (selective teardown). */
+/**
+ * Closes without asking. Unmounting a pane closes its session (selective teardown); a worktree
+ * Brisa created for it is removed (asking first if it has uncommitted changes).
+ */
 export function closePaneNow(paneId: PaneId): void {
+  const worktrees = worktreesOf([paneId]);
   useWorkspace.getState().closePane(paneId);
   afterClose();
+  if (worktrees.length) void releaseWorktrees(worktrees);
 }
 
 /** Closes without asking. Unmounting the panes closes their sessions (selective teardown). */
 export function closeTabsNow(tabIds: TabId[]): void {
+  const worktrees = worktreesOf(tabIds.flatMap(panesOfTab));
   useWorkspace.getState().closeTabs(tabIds);
   afterClose();
+  if (worktrees.length) void releaseWorktrees(worktrees);
 }
 
 /** What the confirmation dialog closes when accepted (file deletions are the explorer's). */
-export function closeTarget(target: Exclude<CloseTarget, { kind: 'trash' }>): void {
+export function closeTarget(target: Extract<CloseTarget, { kind: 'pane' | 'tabs' }>): void {
   if (target.kind === 'pane') closePaneNow(target.paneId);
   else closeTabsNow(target.tabIds);
 }

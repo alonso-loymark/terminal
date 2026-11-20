@@ -9,6 +9,8 @@ import {
   splitAt,
   startCreate,
 } from '../lib/explorerActions';
+import { blockText, copyBlock, rerunBlock, type BlockPart } from '../lib/blockActions';
+import { BLOCK_AI_ACTIONS } from '../lib/blocks';
 import { readText } from '../lib/clipboard';
 import { parentDir } from '../lib/explorerModel';
 import { copySelection } from '../lib/keybindings';
@@ -37,6 +39,41 @@ const run = (action: () => void) => () => {
   action();
 };
 
+/** The mark of a command block: copy its parts, run it again ("Explicar / arreglar": Fase 7B). */
+function BlockMenu({ paneId, blockId, x, y }: { paneId: PaneId; blockId: number; x: number; y: number }) {
+  const block = blockText(paneId, blockId);
+  if (!block) return null;
+  const failed = block.exitCode !== null && block.exitCode !== 0;
+  const copy = (part: BlockPart) =>
+    run(() => {
+      void copyBlock(paneId, blockId, part);
+      focusActiveTerminal();
+    });
+  return (
+    <Menu x={x} y={y} label="Acciones del bloque" onClose={dismiss}>
+      <MenuLabel>{failed ? `Falló (código ${block.exitCode})` : 'Comando'}</MenuLabel>
+      <MenuItem action="copy-command" onSelect={copy('command')}>
+        Copiar comando
+      </MenuItem>
+      <MenuItem action="copy-output" onSelect={copy('output')}>
+        Copiar salida
+      </MenuItem>
+      <MenuItem action="copy-both" onSelect={copy('both')}>
+        Copiar ambos
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem action="rerun" onSelect={run(() => rerunBlock(paneId, blockId))}>
+        Volver a ejecutar
+      </MenuItem>
+      {BLOCK_AI_ACTIONS && failed && (
+        <MenuItem action="explain-block" onSelect={run(() => focusActiveTerminal())}>
+          Explicar / arreglar
+        </MenuItem>
+      )}
+    </Menu>
+  );
+}
+
 /** The open context menu (tab, group or pane), if any. */
 export function ContextMenus() {
   const menu = useUi((s) => s.menu);
@@ -45,6 +82,7 @@ export function ContextMenus() {
   if (menu.kind === 'group') return <GroupMenu groupId={menu.groupId} x={menu.x} y={menu.y} />;
   if (menu.kind === 'shells') return <ShellMenu x={menu.x} y={menu.y} />;
   if (menu.kind === 'explorer') return <ExplorerMenu path={menu.path} isDir={menu.isDir} isRoot={menu.isRoot} x={menu.x} y={menu.y} />;
+  if (menu.kind === 'block') return <BlockMenu paneId={menu.paneId} blockId={menu.blockId} x={menu.x} y={menu.y} />;
   return <PaneMenu paneId={menu.paneId} x={menu.x} y={menu.y} clipboard={menu.clipboard} />;
 }
 

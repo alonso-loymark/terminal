@@ -69,3 +69,37 @@ export async function onFileDrop(handler: (event: FileDropEvent) => void): Promi
     } else handler({ type: 'over', x: payload.position.x / ratio, y: payload.position.y / ratio });
   });
 }
+
+// ---------------------------------------------------------------- worktrees (multi-agent preset)
+
+export interface Worktree {
+  path: string;
+  repo: string;
+  branch: string;
+  /** Seconds since the epoch. */
+  created: number;
+}
+
+export interface WorktreeStatus {
+  exists: boolean;
+  /** Uncommitted changes. */
+  changes: number;
+}
+
+/** A worktree (new branch from HEAD) of the repository that contains `dir`. */
+export function worktreeCreate(dir: string, label: string): Promise<Worktree> {
+  return invoke('worktree_create', { dir, label });
+}
+
+export function worktreeStatus(path: string): Promise<WorktreeStatus> {
+  return invoke('worktree_status', { path });
+}
+
+/** Only worktrees Brisa created; `force` removes them even with uncommitted changes. */
+export function worktreeRemove(path: string, force: boolean): Promise<{ branchDeleted: boolean }> {
+  return invoke('worktree_remove', { path, force });
+}
+
+export function worktreeList(): Promise<Worktree[]> {
+  return invoke('worktree_list');
+}

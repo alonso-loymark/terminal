@@ -12,13 +12,15 @@ import type { Issue, JsonSchema, Schema } from './schema.ts';
  * terminal: only with the keyboard in a terminal; explorer: only in the file tree.
  */
 export type ActionScope = 'global' | 'terminal' | 'explorer';
-export type ActionCategory = 'app' | 'tabs' | 'panes' | 'terminal' | 'explorer' | 'layouts';
+export type ActionCategory = 'app' | 'tabs' | 'panes' | 'terminal' | 'blocks' | 'agents' | 'explorer' | 'layouts';
 
 export const CATEGORY_LABELS: Record<ActionCategory, string> = {
   app: 'Aplicación',
   tabs: 'Tabs',
   panes: 'Paneles',
   terminal: 'Terminal',
+  blocks: 'Bloques',
+  agents: 'Agentes',
   explorer: 'Explorador',
   layouts: 'Layouts',
 };
@@ -91,6 +93,9 @@ export const ACTIONS: readonly ActionDef[] = [
   def('terminal.newline', 'Salto de línea (agentes de IA; en el resto, Shift+Enter nativo)', 'terminal', 'terminal', ['shift+enter'], {
     paletteHidden: true,
   }),
+  def('blocks.previous', 'Bloque anterior (comando y su salida)', 'blocks', 'terminal', ['ctrl+up'], { repeat: true, passthrough: true, paletteHidden: true }),
+  def('blocks.next', 'Bloque siguiente', 'blocks', 'terminal', ['ctrl+down'], { repeat: true, passthrough: true, paletteHidden: true }),
+  def('agents.multiAgent', 'Abrir multi-agente aquí…', 'agents', 'global', []),
   def('explorer.toggle', 'Mostrar / ocultar el explorador', 'explorer', 'global', ['ctrl+b']),
   def('explorer.toggleHidden', 'Ver / esconder los archivos ocultos', 'explorer', 'global', []),
   def('explorer.rename', 'Renombrar el archivo seleccionado', 'explorer', 'explorer', ['f2'], { paletteHidden: true }),

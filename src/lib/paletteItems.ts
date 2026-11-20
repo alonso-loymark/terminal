@@ -31,7 +31,16 @@ export interface PaletteItem {
 }
 
 /** After these the keyboard goes back to the terminal; the rest open something of their own. */
-const KEEPS_FOCUS = new Set(['app.commandPalette', 'app.settings', 'tab.rename', 'tab.newGroup', 'terminal.find', 'layout.saveTab', 'layout.saveWindow']);
+const KEEPS_FOCUS = new Set([
+  'app.commandPalette',
+  'app.settings',
+  'tab.rename',
+  'tab.newGroup',
+  'terminal.find',
+  'layout.saveTab',
+  'layout.saveWindow',
+  'agents.multiAgent',
+]);
 
 export function paletteItems(): PaletteItem[] {
   const keymap = currentKeymap();
@@ -41,6 +50,7 @@ export function paletteItems(): PaletteItem[] {
 
   for (const action of ACTIONS) {
     if (action.paletteHidden) continue;
+    if (action.category === 'agents' && !useSettings.getState().settings.agents.enabled) continue;
     items.push({
       id: action.id,
       label: action.label,

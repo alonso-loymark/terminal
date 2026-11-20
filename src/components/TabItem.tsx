@@ -7,19 +7,34 @@ import { focusActiveTerminal, requestCloseTabs } from '../lib/tabActions';
 import { useProfile } from '../store/profiles';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
-import { tabIndicator, tabTitle, type TabId } from '../store/workspaceModel';
+import { AGENT_LABELS } from '../lib/agentMonitor';
+import { useSettings } from '../store/settings';
+import { panesOf, tabIndicator, tabTitle, type AgentName, type TabId, type TabIndicator } from '../store/workspaceModel';
 import { ProfileIcon } from './ProfileIcon';
 import { RenameInput } from './RenameInput';
 
-const INDICATOR_LABEL = {
+const INDICATOR_LABEL: Record<NonNullable<TabIndicator>, string> = {
+  'agent-waiting': 'espera tu respuesta',
+  'agent-working': 'trabajando',
+  'agent-finished': 'terminó',
   activity: 'Salida nueva',
   exited: 'El proceso terminó',
   'exited-error': 'El proceso terminó con error',
-} as const;
+};
 
 export function TabItem({ tabId }: { tabId: TabId }) {
   const title = useWorkspace((s) => tabTitle(s, tabId));
-  const indicator = useWorkspace((s) => tabIndicator(s, tabId));
+  const agentsOn = useSettings((s) => s.settings.agents.enabled);
+  const rawIndicator = useWorkspace((s) => tabIndicator(s, tabId));
+  // With agents turned off their states do not show.
+  const indicator = !agentsOn && rawIndicator?.startsWith('agent-') ? null : rawIndicator;
+  // The agent the indicator talks about (the first one in the tab in that state).
+  const agentName = useWorkspace((s): AgentName | null => {
+    const tab = s.tabs[tabId];
+    if (!tab || !indicator?.startsWith('agent-')) return null;
+    const state = indicator.slice('agent-'.length);
+    return panesOf(tab.layout).map((id) => s.panes[id]?.agent).find((a) => a?.state === state)?.name ?? null;
+  });
   const active = useWorkspace((s) => s.activeTabId === tabId);
   const color = useWorkspace((s) => s.tabs[tabId]?.color ?? null);
   const group = useWorkspace((s) => {
@@ -65,8 +80,14 @@ export function TabItem({ tabId }: { tabId: TabId }) {
     focusActiveTerminal();
   };
 
+  const indicatorLabel = indicator
+    ? agentName
+      ? `${AGENT_LABELS[agentName]} ${INDICATOR_LABEL[indicator]}`
+      : INDICATOR_LABEL[indicator]
+    : undefined;
   let tooltip = title;
-  if (indicator && indicator !== 'activity') tooltip += ` — ${INDICATOR_LABEL[indicator]}${exitCode !== null ? ` (código ${exitCode})` : ''}`;
+  if (indicator && agentName) tooltip += ` — ${indicatorLabel}`;
+  else if (indicator && indicator !== 'activity') tooltip += ` — ${indicatorLabel}${exitCode !== null ? ` (código ${exitCode})` : ''}`;
   if (profile) tooltip += `\n${profile.name}`;
   if (cwd) tooltip += `\n${cwd}`;
 
@@ -106,7 +127,7 @@ export function TabItem({ tabId }: { tabId: TabId }) {
           {subtitle && <span className="tab-subtitle">{subtitle}</span>}
         </span>
       )}
-      <span className="tab-indicator" aria-label={indicator ? INDICATOR_LABEL[indicator] : undefined} />
+      <span className="tab-indicator" aria-label={indicatorLabel} data-agent={agentName ?? undefined} />
       <button
         type="button"
         className="tab-close"

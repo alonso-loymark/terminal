@@ -5,7 +5,14 @@
 // bracketed paste, the agent's own "newline" sequence (what its /terminal-setup installs in
 // VS Code) and "Ctrl+C twice to exit". The flavor comes from the executable name, so running it
 // through a node.exe linked as claude.exe / gemini.exe also exercises the terminal's agent
-// detection. Usage: claude.exe fake-agent.mjs   (or: node fake-agent.mjs <claude|gemini>)
+// detection. Usage: claude.exe fake-agent.mjs   (or: node fake-agent.mjs <claude|codex|gemini>)
+//
+// Lines it understands (to test the terminal's agent indicators and notifications):
+//   /work N              a spinner for N seconds (output all the time: "working"), then quiet
+//   /bell                rings the terminal bell (BEL)
+//   /osc9 text           an OSC 9 notification (iTerm2 / Windows Terminal style)
+//   /osc777 title|text   an OSC 777 notify (Ghostty / urxvt style)
+//   /after N <line>      runs one of the above N seconds later
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -31,10 +38,51 @@ function newline() {
   out('\r\n  ');
 }
 
+let working = null;
+
+/** A spinner for `seconds`: output all the time, like an agent at work. */
+function work(seconds) {
+  const frames = '|/-\\';
+  const until = Date.now() + seconds * 1000;
+  let i = 0;
+  clearInterval(working);
+  working = setInterval(() => {
+    if (Date.now() >= until) {
+      clearInterval(working);
+      working = null;
+      out('\r\nlisto');
+      prompt();
+      return;
+    }
+    out(`\r${frames[i++ % frames.length]} trabajando`);
+  }, 100);
+}
+
+/** A test command; true if it prints its own prompt later. */
+function act(line) {
+  const [name, ...words] = line.split(' ');
+  const rest = words.join(' ');
+  if (name === '/work') {
+    work(Number(words[0]) || 3);
+    return true;
+  }
+  if (name === '/after') {
+    // "/after N /bell": the same N seconds later (the test meanwhile hides the pane).
+    setTimeout(() => act(words.slice(1).join(' ')), (Number(words[0]) || 1) * 1000);
+  } else if (name === '/bell') out('\x07');
+  else if (name === '/osc9') out(`\x1b]9;${rest}\x07`);
+  else if (name === '/osc777') {
+    const [title, text = ''] = rest.split('|');
+    out(`\x1b]777;notify;${title};${text}\x07`);
+  }
+  return false;
+}
+
 function submit() {
+  const line = buffer.trim();
   out(`\r\nSUBMIT ${JSON.stringify(buffer)}`);
   buffer = '';
-  prompt();
+  if (!act(line)) prompt();
 }
 
 function ctrlC() {

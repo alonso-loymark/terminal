@@ -28,11 +28,13 @@ const STARTED = Date.now();
  * stages, to close a phase (CLAUDE.md, "Regla de fases").
  */
 const SMOKE = process.argv.includes('--smoke');
-const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'keybindings', 'session', 'close'];
+const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'keybindings', 'session', 'blocks', 'close'];
 const only = SMOKE ? SMOKE_STAGES : process.argv[2]?.split(',').filter(Boolean);
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'brisa-e2e-'));
 const CONFIG_DIR = path.join(WORK, 'config');
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json');
+/** Native notifications go here during the suite (never to the user's screen). */
+const NOTIFY_LOG = path.join(WORK, 'notifications.jsonl');
 fs.mkdirSync(ARTIFACTS, { recursive: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -101,6 +103,7 @@ async function launch() {
     env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${CDP_PORT}`;
     // A throwaway settings.json: the suite never touches the user's own configuration.
     env.BRISA_CONFIG_DIR = CONFIG_DIR;
+    env.BRISA_NOTIFY_LOG = NOTIFY_LOG;
     const logName = launches === 1 ? 'tauri-dev.log' : `tauri-dev-${launches}.log`;
     const logFd = fs.openSync(path.join(ARTIFACTS, logName), 'w');
     dev = spawn('npm run tauri dev', { cwd: ROOT, env, shell: true, stdio: ['ignore', logFd, logFd] });
@@ -743,6 +746,21 @@ const paneLines = (id) =>
     }
     return lines.filter((l) => l.trim());
   }, id);
+
+// ---------------------------------------------------------------- blocks, agents, notifications
+/** A pane's command blocks with their text (lib/blocks.ts). */
+const paneBlocksOf = (id) => page.evaluate((p) => window.__blocks(p).filter(Boolean), id);
+/** How many block marks the pane's gutter shows (`extra`: an attribute selector). */
+const blockMarks = (id, extra = '') => page.$$eval(`${paneSel(id)} .block-mark${extra}`, (els) => els.length);
+/** The native notifications the app asked for (BRISA_NOTIFY_LOG). */
+const notificationsLogged = () =>
+  fs.existsSync(NOTIFY_LOG)
+    ? fs
+        .readFileSync(NOTIFY_LOG, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+    : [];
 
 /** node.exe linked under an agent's name: runs the fake agent and looks like the real one. */
 function agentExe(name) {
@@ -2903,6 +2921,324 @@ const stages = {
     await page.click('[data-layout="E2E cmd"] [data-action="confirm-delete-layout"]');
     check('eliminar un layout desde la configuración', await waitUntil(() => !layoutsOnDisk().includes('E2E cmd') && layoutsOnDisk().includes('// mi comentario'), 3000));
     await closeSettings();
+    await freshTab();
+  },
+
+  async blocks() {
+    await freshTab();
+    if (await ownSettings()) await resetSettings();
+    const id = await activePane();
+    const home = await homeDir();
+    await runIdle("Write-Output ('uno-' + 'bloque')");
+    await runIdle('cmd /c exit 3');
+    await runIdle("1..3 | % { 'linea' + $_ }");
+    let list = await paneBlocksOf(id);
+    const [a, b, c] = list.slice(-3);
+    check(
+      'cada comando con su salida es un bloque (comando, salida, código, carpeta)',
+      a?.command === "Write-Output ('uno-' + 'bloque')" &&
+        a.output === 'uno-bloque' &&
+        a.exitCode === 0 &&
+        a.cwd?.toLowerCase() === home.toLowerCase() &&
+        b?.command === 'cmd /c exit 3' &&
+        b.exitCode === 3 &&
+        b.output === '' &&
+        c?.output === 'linea1\nlinea2\nlinea3',
+      JSON.stringify(list.slice(-3)),
+    );
+    check('un comando que falló tiene su marca roja (sin pasar el mouse)', (await blockMarks(id, '[data-status="error"]')) === 1);
+
+    // Hover: a mark beside the block; a click opens its menu.
+    const at = await textPosition(id, 'uno-bloque');
+    await page.mouse.move(at.x, at.y);
+    check('al pasar el mouse sobre un bloque aparece su marca', await waitUntil(async () => (await blockMarks(id, '[data-hover]')) === 1, 3000));
+    const blockMenu = async () => {
+      const box = await page.locator(`${paneSel(id)} .block-mark[data-hover]`).boundingBox({ timeout: 3000 }).catch(() => null);
+      if (!box) {
+        const marks = await page.$$eval(`${paneSel(id)} .block-mark`, (els) => els.map((e) => `${e.dataset.blockId}:${e.dataset.status}:${e.style.top}`));
+        throw new Error(`sin marca bajo el mouse; marcas ${marks.join(' ')}; ${await paneText(id, 14)}`);
+      }
+      await page.mouse.click(box.x + box.width / 2, box.y + 2);
+      await page.waitForSelector('[role="menu"] [data-action="copy-command"]', { timeout: 3000 });
+    };
+    await blockMenu();
+    const actions = await page.$$eval('[role="menu"] [data-action]', (els) => els.map((e) => e.dataset.action));
+    check('menú del bloque: copiar comando, salida, ambos y volver a ejecutar', ['copy-command', 'copy-output', 'copy-both', 'rerun'].every((x) => actions.includes(x)) && !actions.includes('explain-block'), actions.join(','));
+    await page.click('[role="menu"] [data-action="copy-output"]');
+    check('copiar salida', await waitUntil(async () => (await getClipboard()) === 'uno-bloque', 3000), await getClipboard());
+    await page.mouse.move(at.x, at.y + 1);
+    await blockMenu();
+    await page.click('[role="menu"] [data-action="copy-both"]');
+    // Windows' clipboard stores line breaks as CRLF.
+    check('copiar ambos', await waitUntil(async () => (await getClipboard())?.replace(/\r\n/g, '\n') === "Write-Output ('uno-' + 'bloque')\nuno-bloque", 3000), JSON.stringify(await getClipboard()));
+
+    // Rerun: runs at an empty prompt; only inserts over typed text.
+    await page.mouse.move(at.x, at.y);
+    await blockMenu();
+    await page.click('[role="menu"] [data-action="rerun"]');
+    const rerun = await waitUntil(async () => (await paneBlocksOf(id)).length === list.length + 1 && (await idle(id)), 10000);
+    list = await paneBlocksOf(id);
+    check('volver a ejecutar con el prompt vacío: se ejecuta', rerun && list.at(-1)?.output === 'uno-bloque', JSON.stringify(list.at(-1)));
+    await waitUntil(async () => (await cursorLine()).trim() !== '', 3000);
+    await page.keyboard.type('# escrito ');
+    const failedAt = await textPosition(id, 'exit 3');
+    await page.mouse.move(failedAt.x, failedAt.y);
+    await waitUntil(async () => (await blockMarks(id, '[data-hover][data-status="error"]')) === 1, 3000);
+    const explain = await page.$eval(`${paneSel(id)} .block-explain`, (el) => el.hidden).catch(() => null);
+    check('"Explicar / arreglar" está preparado en los que fallaron, pero oculto', explain === true, String(explain));
+    await blockMenu();
+    await page.click('[role="menu"] [data-action="rerun"]');
+    await sleep(1200);
+    const line = await cursorLine();
+    check('volver a ejecutar con algo escrito: lo inserta sin ejecutar', line.endsWith('# escrito cmd /c exit 3') && (await paneBlocksOf(id)).length === list.length, line);
+    await page.keyboard.press('Escape');
+    await lineMatches(/^PS [A-Za-z]:\\.*>$/);
+
+    // Ctrl+↑ / Ctrl+↓ between blocks.
+    await page.mouse.move(5, 5);
+    list = await paneBlocksOf(id);
+    await page.keyboard.press('Control+ArrowUp');
+    const s1 = await page.evaluate((p) => window.__selectedBlock(p), id);
+    await page.keyboard.press('Control+ArrowUp');
+    const s2 = await page.evaluate((p) => window.__selectedBlock(p), id);
+    const band = await page.$(`${paneSel(id)} .block-selection`);
+    await page.keyboard.press('Control+ArrowDown');
+    const s3 = await page.evaluate((p) => window.__selectedBlock(p), id);
+    await page.keyboard.press('Control+ArrowDown');
+    const s4 = await page.evaluate((p) => window.__selectedBlock(p), id);
+    check(
+      'Ctrl+↑ / Ctrl+↓ saltan entre bloques (y vuelven al prompt)',
+      s1 === list.at(-1).id && s2 === list.at(-2).id && !!band && s3 === list.at(-1).id && s4 === null,
+      JSON.stringify([s1, s2, s3, s4, list.slice(-2).map((x) => x.id)]),
+    );
+
+    // Full-screen programs: no marks while they run, and no block for them.
+    if (fs.existsSync(path.join(GIT_BIN, 'vim.exe'))) {
+      const before = (await paneBlocksOf(id)).length;
+      await run(`& '${GIT_BIN}\\vim.exe' -u NONE`, { waitPrompt: false });
+      await waitUntil(async () => (await bufferType()) === 'alternate', 10000);
+      await sleep(300);
+      const hidden = await page.$eval(`${paneSel(id)} .block-gutter`, (el) => el.hidden);
+      await page.keyboard.type(':q!');
+      await page.keyboard.press('Enter');
+      await waitUntil(async () => (await bufferType()) === 'normal', 10000);
+      await waitUntil(() => idle(id), 10000);
+      check('vim (pantalla completa): sin marcas mientras corre y sin bloque', hidden && (await paneBlocksOf(id)).length === before, `${hidden} ${before}`);
+    }
+    const before = (await paneBlocksOf(id)).length;
+    await run(`& '${agentExe('claude')}' '${FAKE_AGENT}'`, { waitPrompt: false });
+    await waitFor('FAKE-AGENT claude listo', { source: screen });
+    const seen = await waitUntil(async () => (await paneState(id))?.agent?.name === 'claude', 6000);
+    // The gutter is redrawn on the next frame.
+    const agentHidden = await waitUntil(() => page.$eval(`${paneSel(id)} .block-gutter`, (el) => el.hidden), 2000);
+    await exitToPrompt();
+    await waitUntil(() => idle(id), 10000);
+    const after = (await paneBlocksOf(id)).length;
+    check('un agente (claude falso): sin marcas mientras corre y sin bloque', seen && agentHidden && after === before, `${seen} ${agentHidden} ${before}→${after}`);
+
+    if (await ownSettings()) {
+      await writeSettings({ blocks: { enabled: false } });
+      await sleep(200);
+      const gutterHidden = await page.$eval(`${paneSel(id)} .block-gutter`, (el) => el.hidden);
+      await page.keyboard.press('Control+ArrowUp');
+      const selected = await page.evaluate((p) => window.__selectedBlock(p), id);
+      check('blocks.enabled: false → sin marcas y Ctrl+↑ sigue de largo', gutterHidden && selected === null);
+      await resetSettings();
+    }
+    await freshTab();
+  },
+
+  async agents() {
+    if (!(await ownSettings())) return skip('agents', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await writeSettings({ agents: { idleSeconds: 2 } });
+    const agentTab = (await wsState()).active;
+    const id = await activePane();
+    await run(`& '${agentExe('claude')}' '${FAKE_AGENT}'`, { waitPrompt: false });
+    await waitFor('FAKE-AGENT claude listo', { source: screen });
+    const detected = await waitUntil(async () => (await paneState(id))?.agent?.name === 'claude', 6000);
+    check('detecta el agente que corre en el panel (claude)', detected, JSON.stringify((await paneState(id))?.agent));
+
+    // Working while it produces output; waiting once it goes quiet.
+    const agentState = async () => (await paneState(id))?.agent?.state;
+    await page.keyboard.type('/work 3');
+    await page.keyboard.press('Enter');
+    await waitUntil(async () => (await agentState()) === 'working', 3000);
+    const working = await agentState();
+    const tabWorking = await tabAttr(agentTab, 'data-indicator');
+    const badge = await page.locator(`${paneSel(id)} .agent-badge`).textContent({ timeout: 2000 }).catch(() => null);
+    await sleep(1500);
+    check('trabajando mientras produce salida: en la tab y en el panel', working === 'working' && tabWorking === 'agent-working' && badge === 'Claude Code · trabajando' && (await agentState()) === 'working', `${working} ${tabWorking} ${badge}`);
+    const waited = await waitUntil(async () => (await agentState()) === 'waiting', 8000);
+    check('sin salida por agents.idleSeconds: espera tu respuesta', waited && (await tabAttr(agentTab, 'data-indicator')) === 'agent-waiting');
+    check('con el panel a la vista no hay notificación', notificationsLogged().length === 0, JSON.stringify(notificationsLogged()));
+
+    // Hidden (another tab): bell, OSC 9 and OSC 777 become native notifications.
+    const fromHidden = async (line, label) => {
+      await waitUntil(async () => (await activePane()) === id && (await terminalFocused()), 3000);
+      const before = notificationsLogged().length;
+      await page.keyboard.type(`/after 2 ${line}`);
+      await page.keyboard.press('Enter');
+      const other = await openTab();
+      const got = await waitUntil(() => notificationsLogged().length > before, 8000);
+      const entry = notificationsLogged().at(-1);
+      await page.evaluate((tag) => window.__notificationClick(tag), entry?.tag ?? '');
+      const back = await waitUntil(async () => (await wsState()).active === agentTab && (await activePane()) === id, 3000);
+      await page.evaluate((tabId) => window.__workspace.getState().closeTabs([tabId]), other);
+      await waitUntil(async () => (await wsState()).active === agentTab && (await terminalFocused()), 3000);
+      check(label, got && back && entry?.tag === id, JSON.stringify(entry));
+      return entry;
+    };
+    let entry = await fromHidden('/bell', 'campana (BEL) en un panel oculto → notificación nativa; clic → ese panel al frente');
+    check('... del agente: "Claude Code espera tu respuesta"', entry?.title === 'Claude Code espera tu respuesta', entry?.title);
+    entry = await fromHidden('/osc9 Necesito tu permiso', 'OSC 9 en un panel oculto → notificación');
+    check('... con el mensaje del programa', entry?.body.startsWith('Necesito tu permiso'), entry?.body);
+    entry = await fromHidden('/osc777 Revisión|Terminé los tests', 'OSC 777 en un panel oculto → notificación');
+    check('... con su texto', entry?.body.startsWith('Terminé los tests'), entry?.body);
+
+    // The agent exits: finished, until the pane is used again.
+    await exitToPrompt();
+    const finished = await waitUntil(async () => (await agentState()) === 'finished', 6000);
+    check('el agente terminó: indicador "terminado"', finished && (await tabAttr(agentTab, 'data-indicator')) === 'agent-finished');
+    await waitUntil(() => idle(id), 10000);
+    await page.keyboard.type(' ');
+    check('... y se va al volver a usar el panel', await waitUntil(async () => (await paneState(id))?.agent === null, 3000));
+    await page.keyboard.press('Backspace');
+
+    // Codex and Gemini are recognized too.
+    await run(`& '${agentExe('codex')}' '${FAKE_AGENT}'`, { waitPrompt: false });
+    await waitFor('FAKE-AGENT codex listo', { source: screen });
+    check('detecta codex', await waitUntil(async () => (await paneState(id))?.agent?.name === 'codex', 6000));
+    await exitToPrompt();
+    await waitUntil(() => idle(id), 10000);
+    // Seen gone (finished), then the pane is used again.
+    await waitUntil(async () => (await paneState(id))?.agent?.state === 'finished', 6000);
+    await page.keyboard.type(' ');
+    await waitUntil(async () => (await paneState(id))?.agent === null, 3000);
+    await page.keyboard.press('Backspace');
+
+    // A shell in a hidden tab rings or sends OSC 9 (no agent): notified too.
+    const shellBefore = notificationsLogged().length;
+    await runIdle("Start-Sleep -Seconds 2; Write-Host -NoNewline ([char]27 + ']9;Build terminado' + [char]7)", { wait: false });
+    const other = await openTab();
+    const shellNotified = await waitUntil(() => notificationsLogged().length > shellBefore, 8000);
+    check('un programa cualquiera en un panel oculto (OSC 9) → notificación', shellNotified && notificationsLogged().at(-1)?.body === 'Build terminado', JSON.stringify(notificationsLogged().at(-1)));
+    await page.evaluate((tabId) => window.__workspace.getState().closeTabs([tabId]), other);
+
+    // Turned off.
+    await writeSettings({ notifications: { enabled: false }, agents: { idleSeconds: 2 } });
+    await waitUntil(() => idle(id), 10000);
+    const offBefore = notificationsLogged().length;
+    await runIdle("Start-Sleep -Seconds 1; [Console]::Write([char]7)", { wait: false });
+    const other2 = await openTab();
+    await sleep(3000);
+    check('notifications.enabled: false → ninguna notificación', notificationsLogged().length === offBefore);
+    await page.evaluate((tabId) => window.__workspace.getState().closeTabs([tabId]), other2);
+    await writeSettings({ agents: { enabled: false } });
+    await waitUntil(() => idle(id), 10000);
+    await run(`& '${agentExe('claude')}' '${FAKE_AGENT}'`, { waitPrompt: false });
+    await waitFor('FAKE-AGENT claude listo', { source: screen });
+    await sleep(3000);
+    check('agents.enabled: false → sin detección ni indicadores', (await paneState(id))?.agent === null && !(await page.$(`${paneSel(id)} .agent-badge`)));
+    await exitToPrompt();
+    await resetSettings();
+    await freshTab();
+  },
+
+  async multiagent() {
+    if (!(await ownSettings())) return skip('multiagent', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    const gitExe = 'git';
+    const repo = trickyDir('repo multi');
+    const git = (...args) => execFileSync(gitExe, ['-C', repo, ...args], { encoding: 'utf8' });
+    if (!fs.existsSync(path.join(repo, '.git'))) {
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'e2e@example.com');
+      git('config', 'user.name', 'e2e');
+      fs.writeFileSync(path.join(repo, 'leeme.txt'), 'hola');
+      git('add', '.');
+      git('commit', '-q', '-m', 'inicio');
+    }
+    const fake = (name) => `& '${agentExe(name)}' '${FAKE_AGENT}'`;
+    await writeSettings({ agents: { commands: { claude: fake('claude'), codex: fake('codex'), gemini: fake('gemini') } } });
+    await freshTab();
+    await runIdle(`Set-Location -LiteralPath ${psQuote(repo)}`);
+
+    // From the palette: 3 panes (claude, codex, gemini), one worktree each.
+    await paletteRun('multi agente', 'agents.multiAgent');
+    await page.waitForSelector('.multi-agent-dialog', { timeout: 3000 });
+    await page.check('.multi-agent-dialog input[name="panes"][value="3"]');
+    await waitUntil(async () => !(await page.isDisabled('.multi-agent-dialog input[name="worktrees"]')), 5000);
+    await page.check('.multi-agent-dialog input[name="worktrees"]');
+    const tabs = (await wsState()).order.length;
+    await page.click('[data-action="open-multi-agent"]');
+    await waitUntil(async () => (await wsState()).order.length === tabs + 1, 15000);
+    const tab = await activeTab();
+    const panes = leaves(tab.layout);
+    const states = await Promise.all(panes.map(paneState));
+    const paths = states.map((p) => p?.worktree?.path);
+    const names = ['claude', 'codex', 'gemini'];
+    const started = await waitUntil(async () => {
+      for (const [i, p] of panes.entries()) {
+        if ((await paneState(p))?.agent?.name !== names[i]) return false;
+      }
+      return true;
+    }, 25000);
+    check(
+      'multi-agente: una tab con 3 paneles, cada uno con su agente (escrito cuando la shell está lista)',
+      panes.length === 3 && started && tab.layout.direction === 'horizontal',
+      JSON.stringify(await Promise.all(panes.map(async (p) => (await paneState(p))?.agent))),
+    );
+    const listed = git('worktree', 'list', '--porcelain');
+    check(
+      '... con un git worktree por panel (y el panel trabaja ahí)',
+      paths.every((p) => p && fs.existsSync(p) && listed.toLowerCase().includes(p.replace(/\\/g, '/').toLowerCase())) &&
+        states.every((p, i) => p?.startCwd === paths[i]) &&
+        (await page.evaluate(() => window.__worktrees())).length === 3,
+      JSON.stringify(paths),
+    );
+    check('... y la sesión recuerda qué worktrees son de Brisa', await waitUntil(() => JSON.stringify(sessionOnDisk() ?? {}).includes('"worktree"'), 3000));
+
+    // Closing: the clean worktrees go; the one with uncommitted changes asks first.
+    fs.writeFileSync(path.join(paths[1], 'cambio del agente.txt'), 'x');
+    await page.click(tabSel(tab.id), { button: 'right' });
+    await page.click('[role="menu"] [data-action="close"]');
+    await page.waitForSelector('[role="alertdialog"] [data-action="confirm"]', { timeout: 5000 });
+    await page.click('[role="alertdialog"] [data-action="confirm"]');
+    const asked = await waitUntil(async () => /worktree/i.test((await page.locator('[role="alertdialog"] h2').textContent({ timeout: 500 }).catch(() => '')) ?? ''), 15000);
+    const details = asked ? await page.locator('[role="alertdialog"] .dialog-details').textContent() : '';
+    const cancelLabel = asked ? await page.locator('[role="alertdialog"] [data-action="cancel"]').textContent() : '';
+    check('un worktree con cambios sin commitear: pregunta antes de borrarlo', asked && details.includes(paths[1]) && cancelLabel === 'Conservar', `${details} | ${cancelLabel}`);
+    if (asked) await page.click('[role="alertdialog"] [data-action="cancel"]');
+    const cleaned = await waitUntil(() => !fs.existsSync(paths[0]) && !fs.existsSync(paths[2]), 15000);
+    const branches = git('branch', '--list', 'brisa/*');
+    check(
+      '... los limpios se borran (con sus ramas) y el que tiene cambios se conserva',
+      cleaned && fs.existsSync(paths[1]) && (await page.evaluate(() => window.__worktrees())).length === 1 && branches.trim().split('\n').length === 1,
+      branches,
+    );
+
+    // Kept ones are listed in the settings, and can be removed there.
+    await openSettings('agents');
+    await page.click(`[data-worktree="${attrValue(paths[1])}"] [data-action="remove-worktree"]`);
+    const removed = await waitUntil(async () => !fs.existsSync(paths[1]) && (await page.evaluate(() => window.__worktrees())).length === 0, 10000);
+    check('Configuración → Bloques y agentes: borrar un worktree conservado', removed);
+    await closeSettings();
+
+    // Outside a repository: no worktrees offered. Two panes, side by side, in the folder.
+    await waitUntil(async () => (await wsState()).order.length > 0 && (await terminalFocused()), 3000);
+    await runIdle(`Set-Location -LiteralPath ${psQuote(trickyDir(...PARENT_DIR))}`);
+    await paletteRun('multi agente', 'agents.multiAgent');
+    await page.waitForSelector('.multi-agent-dialog', { timeout: 3000 });
+    await sleep(800);
+    const disabled = await page.isDisabled('.multi-agent-dialog input[name="worktrees"]');
+    await page.selectOption('.multi-agent-dialog [data-pane-agent="0"]', 'shell');
+    await page.selectOption('.multi-agent-dialog [data-pane-agent="1"]', 'shell');
+    await page.click('[data-action="open-multi-agent"]');
+    await waitUntil(async () => leaves((await activeTab()).layout).length === 2, 10000);
+    const two = await activeTab();
+    const cwd2 = await paneCwd(leaves(two.layout)[1]);
+    check('fuera de un repositorio: sin worktrees; 2 paneles en la carpeta actual', disabled && cwd2 === trickyDir(...PARENT_DIR), `${disabled} ${cwd2}`);
+    await resetSettings();
     await freshTab();
   },
 

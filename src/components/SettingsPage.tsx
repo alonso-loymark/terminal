@@ -4,6 +4,7 @@ import { openSettingsJson } from '../lib/settingsSync';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { useSettings } from '../store/settings';
 import { useUi, type SettingsSection } from '../store/ui';
+import { AgentsSection } from './settings/AgentsSection';
 import { AppearanceSection, ExplorerSection, TerminalSection } from './settings/GeneralSections';
 import { KeybindingsSection } from './settings/KeybindingsSection';
 import { ProfilesSection } from './settings/ProfilesSection';
@@ -16,6 +17,7 @@ const SECTIONS: readonly (readonly [SettingsSection, string])[] = [
   ['profiles', 'Perfiles'],
   ['terminal', 'Terminal'],
   ['explorer', 'Explorador'],
+  ['agents', 'Bloques y agentes'],
   ['keybindings', 'Atajos'],
   ['session', 'Sesión y layouts'],
 ];
@@ -117,6 +119,7 @@ export function SettingsPage() {
           {section === 'profiles' && <ProfilesSection />}
           {section === 'terminal' && <TerminalSection />}
           {section === 'explorer' && <ExplorerSection />}
+          {section === 'agents' && <AgentsSection />}
           {section === 'keybindings' && <KeybindingsSection />}
           {section === 'session' && <SessionSection />}
         </div>

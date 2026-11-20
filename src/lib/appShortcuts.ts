@@ -67,7 +67,7 @@ export function installAppShortcuts(): () => void {
     if (event.isComposing) return;
     const ui = useUi.getState();
     // A modal dialog owns the keyboard, and so does the settings screen while recording a key.
-    if (ui.confirm || ui.layoutDialog || ui.capturingKeys) return;
+    if (ui.confirm || ui.layoutDialog || ui.multiAgent || ui.capturingKeys) return;
     const found = actionForEvent(event);
     if (!found) return;
     const { action, ctx } = found;

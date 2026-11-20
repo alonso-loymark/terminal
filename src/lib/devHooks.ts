@@ -9,7 +9,10 @@ import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
+import { blockText, paneBlocks, selectedBlock } from './blockActions';
+import { worktreeList } from './fsApi';
 import { pendingInitialCommands } from './initialCommands';
+import { debugNotificationClick } from './pty';
 import { hasLigatures } from './ligatures';
 import { getPane } from './terminalRegistry';
 
@@ -29,6 +32,10 @@ export function installDevHooks(): void {
   window.__layouts = useLayouts;
   window.__session = useSession;
   window.__pendingCommands = pendingInitialCommands;
+  window.__blocks = (paneId) => paneBlocks(paneId).map((b) => blockText(paneId, b.id));
+  window.__selectedBlock = selectedBlock;
+  window.__notificationClick = debugNotificationClick;
+  window.__worktrees = worktreeList;
   window.__paneLigatures = (paneId) => {
     const term = getPane(paneId)?.term;
     return !!term && hasLigatures(term);

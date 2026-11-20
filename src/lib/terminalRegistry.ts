@@ -2,6 +2,7 @@ import type { FitAddon } from '@xterm/addon-fit';
 import type { SearchAddon } from '@xterm/addon-search';
 import type { Terminal } from '@xterm/xterm';
 import type { PaneId } from '../store/workspaceModel';
+import type { BlockTracker } from './blocks';
 import type { GpuRenderer } from './renderer';
 import type { ShellIntegrationHandle } from './shellIntegration';
 import type { TerminalSession } from './terminalSession';
@@ -19,6 +20,8 @@ export interface PaneHandle {
   gpu: GpuRenderer;
   /** Shell integration marks of this terminal (what is typed at the prompt). */
   integration: ShellIntegrationHandle;
+  /** Command blocks of this terminal (OSC 133). */
+  blocks: BlockTracker;
 }
 
 const handles = new Map<PaneId, PaneHandle>();

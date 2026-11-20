@@ -24,6 +24,12 @@ TypeScript y xterm.js sobre ConPTY.
   perfil y la carpeta de cada panel (desactivable).
 - Layouts guardados (`layouts.json`, editable a mano): una tab o la ventana entera con un nombre,
   y un comando inicial por panel que se escribe cuando la shell está lista.
+- Bloques de comandos (con la integración de shell): cada comando con su salida, marca roja si
+  falló, menú para copiar o volver a ejecutar, `Ctrl+↑` / `Ctrl+↓` para saltar entre ellos.
+- Agentes de IA (Claude Code, Codex, Gemini CLI): indicador en la tab y el panel (trabajando,
+  esperando tu respuesta, terminado) y notificaciones de Windows cuando un panel que no está a
+  la vista pide atención (BEL, OSC 9, OSC 777); el clic trae ese panel al frente. Preset
+  "multi-agente aquí" con un git worktree por panel, que se limpia al cerrar. Todo local.
 - Renderizado con WebGL (fallback DOM), búsqueda, links clickeables, copiar/pegar estilo Windows
   Terminal (o menú contextual) y zoom.
 

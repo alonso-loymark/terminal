@@ -59,7 +59,7 @@ async function start(): Promise<void> {
 function currentText(): string {
   const restore = useSettings.getState().settings.session.restore;
   const ws = useWorkspace.getState();
-  const saved = restore && ws.tabOrder.length ? snapshotWindow(ws) : null;
+  const saved = restore && ws.tabOrder.length ? snapshotWindow(ws, ws.tabOrder, { worktrees: true }) : null;
   return sessionToText({ version: 1, window: saved, recent: useSession.getState().recent });
 }
 

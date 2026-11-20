@@ -23,6 +23,8 @@ notify = "8.2.2"
 ignore = "0.4.34"
 
 [target.'cfg(windows)'.dependencies]
+# Toast notifications (WinRT). Already in the tree through WebView2 (webview2-com): same version.
+windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation", "Foundation_Collections"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",

@@ -197,3 +197,15 @@ test('a broken or foreign session file is no session', () => {
   assert.deepEqual(parseSession({ version: 1, window: { tabs: [] }, recent: ['a', 3] }), { version: 1, window: null, recent: ['a'] });
   assert.deepEqual(parseSession({ version: 1, window: null }), { version: 1, window: null, recent: [] });
 });
+
+test('the session keeps which panes own a Brisa worktree; a layout never does', () => {
+  let ws = addTab(emptyWorkspace(), { tabId: 't1', paneId: 'p1', cwd: 'C:\r.worktrees\claude-1' });
+  const worktree = { path: 'C:\r.worktrees\claude-1', repo: 'C:\r', branch: 'brisa/claude-1' };
+  ws = { ...ws, panes: { ...ws.panes, p1: { ...ws.panes.p1!, worktree } } };
+  const session = snapshotWindow(ws, ws.tabOrder, { worktrees: true });
+  const restored = parseSession(JSON.parse(sessionToText({ version: 1, window: session, recent: [] })));
+  const out = instantiate(emptyWorkspace(), restored.window!, { id: ids() }).ws;
+  assert.deepEqual(Object.values(out.panes)[0]?.worktree, worktree);
+  const layout = snapshotWindow(ws);
+  assert.equal(JSON.stringify(windowToJson(layout)).includes('"worktree":'), false);
+});

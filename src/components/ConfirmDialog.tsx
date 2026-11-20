@@ -1,5 +1,6 @@
 import { useEffect, useRef, type KeyboardEvent } from 'react';
 import { trashNow } from '../lib/explorerActions';
+import { forceRemoveWorktrees } from '../lib/multiAgent';
 import { closeTarget, focusActiveTerminal } from '../lib/tabActions';
 import { useUi } from '../store/ui';
 
@@ -23,6 +24,9 @@ export function ConfirmDialog() {
     useUi.getState().closeConfirm();
     if (confirm.target.kind === 'trash') {
       void trashNow(confirm.target.paths);
+      focusActiveTerminal();
+    } else if (confirm.target.kind === 'worktrees') {
+      void forceRemoveWorktrees(confirm.target.paths);
       focusActiveTerminal();
     } else {
       closeTarget(confirm.target);
@@ -58,7 +62,7 @@ export function ConfirmDialog() {
         </ul>
         <div className="dialog-actions">
           <button ref={cancelRef} type="button" data-action="cancel" onClick={cancel}>
-            Cancelar
+            {confirm.cancelLabel ?? 'Cancelar'}
           </button>
           <button ref={acceptRef} type="button" className="danger" data-action="confirm" onClick={accept}>
             {confirm.confirmLabel}
