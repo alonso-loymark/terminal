@@ -19,6 +19,7 @@ import { chromium } from 'playwright-core';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ARTIFACTS = path.join(ROOT, 'e2e', 'artifacts');
 const WIN = path.join(ROOT, 'e2e', 'win.ps1');
+const CAPTION = path.join(ROOT, 'e2e', 'caption.ps1');
 const FAKE_AGENT = path.join(ROOT, 'e2e', 'fake-agent.mjs');
 const GIT_BIN = 'C:\\Program Files\\Git\\usr\\bin';
 const CDP_PORT = Number(process.env.E2E_CDP_PORT ?? 9223);
@@ -29,7 +30,7 @@ const STARTED = Date.now();
  * stages, to close a phase (CLAUDE.md, "Regla de fases").
  */
 const SMOKE = process.argv.includes('--smoke');
-const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'keybindings', 'session', 'blocks', 'ai', 'close'];
+const SMOKE_STAGES = ['startup', 'ctrlc', 'shiftenter', 'tabs', 'panes', 'cwd', 'typing', 'explorercd', 'settings', 'chrome', 'keybindings', 'session', 'blocks', 'ai', 'close'];
 const only = SMOKE ? SMOKE_STAGES : process.argv[2]?.split(',').filter(Boolean);
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'brisa-e2e-'));
 const CONFIG_DIR = path.join(WORK, 'config');
@@ -2038,7 +2039,9 @@ const stages = {
 
     // A file: its path at the prompt, quoted for PowerShell, not run.
     await clickRow(file);
-    const inserted = await waitUntil(async () => (await cursorLine()).endsWith(`> '${file}'`), 3000);
+    // The prompt's own space after ">" may be lost where the line wraps at the pane's width (seen
+    // once at an exact width): what Brisa inserts is the quoted path at the end.
+    const inserted = await waitUntil(async () => /> ?$/.test((await cursorLine()).slice(0, -`'${file}'`.length)) && (await cursorLine()).endsWith(`'${file}'`), 3000);
     check('clic en un archivo: inserta la ruta con comillas sin ejecutarla', inserted && !(await paneState(id)).commandRunning, await cursorLine());
     await page.keyboard.press('Escape');
     await waitUntil(() => atEmptyPrompt(id), 3000);
@@ -2430,8 +2433,12 @@ const stages = {
     await waitUntil(async () => (await cssVar('--bg')) === '#282a36', 3000);
     let chrome = await chromeOf();
     check(
-      'elegir Dracula pinta la terminal y toda la UI (tabs, barra de estado, explorador)',
-      (await paneBackground(id)) === '#282a36' && chrome.filter(Boolean).every((c) => c === 'rgb(33, 34, 44)') && settingsOnDisk().includes('"theme": "dracula"'),
+      'elegir Dracula pinta la terminal y toda la UI (tabs y barra de estado: su chrome; explorador: su sidebar)',
+      (await paneBackground(id)) === '#282a36' &&
+        chrome[0] === 'rgb(25, 26, 33)' &&
+        chrome[1] === 'rgb(25, 26, 33)' &&
+        (chrome[2] === null || chrome[2] === 'rgb(33, 34, 44)') &&
+        settingsOnDisk().includes('"theme": "dracula"'),
       JSON.stringify(chrome),
     );
     await page.click('.theme-card[data-theme-id="light"] .theme-pick');
@@ -2474,6 +2481,166 @@ const stages = {
       (await paneBackground(cmd)) === '#1a1b26' && (await paneBackground(id)) === '#0d1117' && (await cssVar('--bg')) === '#0d1117',
     );
     await resetSettings();
+    await freshTab();
+  },
+
+  async chrome() {
+    if (!(await ownSettings())) return skip('chrome', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await resetSettings();
+    await showExplorer();
+    const cap = (action, button = 'maximize') =>
+      JSON.parse(execFileSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', CAPTION, '-Action', action, '-ProcessId', String(appPid), '-Button', button], { encoding: 'utf8' }).trim() || '{}');
+    const zoomed = () => cap('zoomed').zoomed;
+    if (zoomed()) cap('restore');
+
+    // Our title bar: the tabs and the caption buttons in one bar, a native overlay on the buttons.
+    let probe = cap('probe');
+    check('barra de título propia: tabs y botones de la ventana en la misma barra, sin la barra de Windows', !!(await page.$('.tab-bar .window-controls')) && probe.nativeTitleBar === false, JSON.stringify(probe));
+    check(
+      'Snap Layouts: sobre los botones, una ventana nativa transparente responde HTMINBUTTON / HTMAXBUTTON / HTCLOSE',
+      probe.overlay && probe.layered && probe.noRedirection && probe.hits?.minimize === 8 && probe.hits?.maximize === 9 && probe.hits?.close === 20,
+      JSON.stringify(probe),
+    );
+    const buttons = await page.$eval('.window-controls', (el) => {
+      const r = el.getBoundingClientRect();
+      return { width: r.width * devicePixelRatio, height: r.height * devicePixelRatio };
+    });
+    check('... del mismo tamaño que los botones de la página', Math.abs(probe.width - buttons.width) <= 2 && Math.abs(probe.height - buttons.height) <= 2, `${JSON.stringify(buttons)} vs ${probe.width}x${probe.height}`);
+    const drag = await page.evaluate(() => ['.tab-bar', '.tab-strip', '.tab-bar-space'].map((sel) => document.querySelector(sel)?.getAttribute('data-tauri-drag-region')));
+    check('el espacio vacío de la barra arrastra la ventana (data-tauri-drag-region)', drag.every((v) => v === ''), JSON.stringify(drag));
+    cap('press', 'minimize');
+    const pressed = await waitUntil(async () => (await page.getAttribute('[data-button="minimize"]', 'data-pressed')) === 'true', 2000);
+    cap('leave');
+    const released = await waitUntil(async () => (await page.getAttribute('[data-button="minimize"]', 'data-pressed')) === null, 2000);
+    check('los botones muestran el estado que informa la ventana nativa (presionado / suelto)', pressed && released && !zoomed());
+    cap('click');
+    const maximized = await waitUntil(async () => zoomed() && (await page.getAttribute('[data-button="maximize"]', 'aria-label')) === 'Restaurar', 3000);
+    const noEdge = !(await page.$('.window-resize-top'));
+    cap('click');
+    const restored = await waitUntil(async () => !zoomed() && (await page.getAttribute('[data-button="maximize"]', 'aria-label')) === 'Maximizar', 3000);
+    check('maximizar desde su botón y restaurar (cambia el ícono; maximizada, sin el borde de arriba)', maximized && noEdge && restored && !!(await page.$('.window-resize-top')));
+    // Double click: Tauri's drag script maximizes on a second mousedown (a real double click starts
+    // a native drag on the first, which a synthetic event cannot hold).
+    const doubleClick = (sel) => page.evaluate((x) => document.querySelector(x).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true, button: 0, detail: 2 })), sel);
+    await doubleClick('.tab-bar-space');
+    const dblMax = await waitUntil(zoomed, 3000);
+    await doubleClick('.tab-bar-space');
+    const dblRestore = await waitUntil(() => !zoomed(), 3000);
+    await doubleClick('.tab');
+    await sleep(800);
+    check('doble clic en el espacio vacío maximiza y restaura; sobre una tab, no', dblMax && dblRestore && !zoomed());
+    if (zoomed()) cap('restore');
+    await waitUntil(terminalFocused, 3000);
+
+    // One corner radius for everything, live; cards with a gap when it is above 0.
+    const look = () =>
+      page.evaluate(() => {
+        const radius = (sel) => {
+          const el = document.querySelector(sel);
+          return el ? getComputedStyle(el).borderTopLeftRadius : null;
+        };
+        return {
+          cards: document.documentElement.hasAttribute('data-cards'),
+          gap: getComputedStyle(document.querySelector('.main')).columnGap,
+          pane: radius('.terminal-pane:not([hidden])'),
+          tab: radius('.tab'),
+          sidebar: radius('.sidebar'),
+          status: radius('.status-bar'),
+        };
+      });
+    let l = await look();
+    check('radio 8 (por defecto): paneles y explorador como tarjetas con espacio entre ellos', l.cards && l.gap === '6px' && l.pane === '8px' && l.sidebar === '8px' && l.tab === '6px', JSON.stringify(l));
+    await writeSettings({ appearance: { cornerRadius: 0 } });
+    l = await look();
+    check('appearance.cornerRadius: 0 → todo cuadrado y sin tarjetas, en vivo', !l.cards && l.pane === '0px' && l.sidebar === '0px' && l.tab === '0px', JSON.stringify(l));
+    await writeSettings({ appearance: { cornerRadius: 12 } });
+    l = await look();
+    await page.evaluate(() => window.__ui.getState().openPalette());
+    const palette = await page.$eval('.palette', (el) => getComputedStyle(el).borderTopLeftRadius).catch(() => null);
+    await page.keyboard.press('Escape');
+    check('radio 12: el mismo radio derivado en todo (tabs 9 px, paneles 12 px, paleta 15 px)', l.cards && l.pane === '12px' && l.tab === '9px' && palette === '15px', `${JSON.stringify(l)} paleta ${palette}`);
+
+    // The smoke run stops here (the native bar, every theme and the breadcrumbs: full run).
+    if (SMOKE) {
+      await resetSettings();
+      await waitUntil(terminalFocused, 3000);
+      return;
+    }
+
+    // Cards: the resize handles live in the gap between cards (a card must not clip them).
+    await page.evaluate(() => window.__ai.setState({ panelOpen: true }));
+    const aiHandle = await page.waitForSelector('.ai-resizer', { timeout: 3000 }).then((el) => el.boundingBox());
+    const aiBefore = await page.evaluate(() => window.__ai.getState().panelWidth);
+    await page.mouse.move(aiHandle.x + aiHandle.width / 2, aiHandle.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(aiHandle.x - 60, aiHandle.y + 200, { steps: 6 });
+    await page.mouse.up();
+    const aiAfter = await page.evaluate(() => window.__ai.getState().panelWidth);
+    await page.evaluate(() => window.__ai.setState({ panelOpen: false, panelWidth: 380 }));
+    check('tarjetas: el borde del panel de IA se arrastra (no lo recorta la tarjeta)', aiAfter > aiBefore + 30, `${aiBefore} → ${aiAfter}`);
+    await waitUntil(terminalFocused, 3000);
+
+    // Windows' own title bar, live, and back.
+    await writeSettings({ appearance: { titleBar: 'native' } });
+    const native = await waitUntil(() => cap('probe').nativeTitleBar === true, 5000);
+    probe = cap('probe');
+    check('appearance.titleBar: "native" → la barra de Windows vuelve, en vivo, y los botones propios se van', native && !probe.overlay && !(await page.$('.window-controls')), JSON.stringify(probe));
+    await resetSettings();
+    const back = await waitUntil(() => {
+      const p = cap('probe');
+      return p.nativeTitleBar === false && p.overlay === true;
+    }, 5000);
+    check('... y de vuelta a la barra propia, con Snap Layouts', back && !!(await page.$('.window-controls')));
+    await waitUntil(terminalFocused, 3000);
+
+    // Theme colors: derived from the same theme, a subtle hierarchy, no pure black. Screenshots of
+    // the page (CDP: the app's content only) for a look with corners 0 and 8.
+    const levels = () =>
+      page.evaluate(() => {
+        const v = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim().toLowerCase();
+        return { chrome: v('--chrome'), sidebar: v('--sidebar'), bg: v('--bg') };
+      });
+    const colors = {};
+    for (const theme of ['dark', 'light', 'catppuccin', 'catppuccin-latte', 'dracula', 'tokyo-night', 'one-dark']) {
+      await writeSettings({ theme });
+      colors[theme] = await levels();
+      if (['dark', 'light', 'catppuccin'].includes(theme)) {
+        await shot(`design-${theme}-r8`);
+        await writeSettings({ theme, appearance: { cornerRadius: 0 } });
+        await shot(`design-${theme}-r0`);
+      }
+    }
+    const coherent = Object.values(colors).every((c) => new Set([c.chrome, c.sidebar, c.bg]).size === 3 && !Object.values(c).includes('#000000'));
+    check('cada tema: barra, explorador y terminal con colores propios del tema (distintos, ninguno negro puro)', coherent, JSON.stringify(colors));
+    await resetSettings();
+
+    // Breadcrumbs: when the path does not fit, the first and the last stay and "…" lists the rest.
+    const deep = path.join(WORK, 'diseño', 'una carpeta con nombre largo', 'otra carpeta también larga', 'tres', 'cuatro', 'destino final');
+    fs.mkdirSync(deep, { recursive: true });
+    await page.evaluate((dir) => {
+      window.__explorer.getState().setPinned(dir);
+      window.__explorer.getState().setWidth(230);
+    }, deep);
+    await waitRoot(deep);
+    await sleep(300);
+    const crumbs = await page.$$eval('.breadcrumbs .crumb', (els) => els.map((e) => e.textContent));
+    check('breadcrumbs largos: el primero, "…" y el último (sin cortar el texto)', crumbs[0] === deep.slice(0, 2) && crumbs[1] === '…' && crumbs.at(-1) === 'destino final' && crumbs.length < 8, JSON.stringify(crumbs));
+    await page.click('[data-action="crumbs-more"]');
+    await page.waitForSelector('[role="menu"] [data-action="crumb"]', { timeout: 3000 });
+    const hidden = await page.$$eval('[role="menu"] [data-action="crumb"]', (els) => els.map((e) => e.textContent));
+    check('"…" lista las carpetas ocultas, en orden', hidden.includes('una carpeta con nombre largo') && hidden.indexOf('Users') < hidden.indexOf('una carpeta con nombre largo'), JSON.stringify(hidden));
+    await page.click('[role="menu"] [data-action="crumb"]:has-text("una carpeta con nombre largo")');
+    const target = path.join(WORK, 'diseño', 'una carpeta con nombre largo');
+    check('... y un clic navega ahí', await waitRoot(target), (await explorerState()).root);
+    await page.evaluate(() => window.__explorer.getState().setWidth(2000));
+    await sleep(300);
+    const all = await page.$$eval('.breadcrumbs .crumb', (els) => els.map((e) => e.textContent));
+    check('con lugar, todos los breadcrumbs', !all.includes('…') && all.at(-1) === 'una carpeta con nombre largo', JSON.stringify(all));
+    await page.evaluate(() => {
+      window.__explorer.getState().setPinned(null);
+      window.__explorer.getState().setWidth(260);
+    });
     await freshTab();
   },
 

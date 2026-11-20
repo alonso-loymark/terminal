@@ -163,6 +163,8 @@ pub enum Backdrop {
 pub struct WindowLook {
     pub transparent: bool,
     pub backdrop: Backdrop,
+    /// `appearance.titleBar: "native"`: Windows' own title bar instead of the tabs in it.
+    pub native_title_bar: bool,
 }
 
 /// `appearance.backdrop` and `appearance.opacity` from the settings text. Anything unreadable
@@ -182,9 +184,14 @@ pub fn window_look(text: Option<&str>) -> WindowLook {
         .and_then(|a| a.get("opacity"))
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(100.0);
+    let native_title_bar = appearance
+        .and_then(|a| a.get("titleBar"))
+        .and_then(serde_json::Value::as_str)
+        == Some("native");
     WindowLook {
         transparent: backdrop != Backdrop::None || opacity < 100.0,
         backdrop,
+        native_title_bar,
     }
 }
 
@@ -276,13 +283,22 @@ mod tests {
             mica,
             WindowLook {
                 transparent: true,
-                backdrop: Backdrop::Mica
+                backdrop: Backdrop::Mica,
+                native_title_bar: false,
             }
         );
         let translucent = window_look(Some(r#"{"appearance": {"opacity": 85}}"#));
         assert!(translucent.transparent && translucent.backdrop == Backdrop::None);
         // An unknown effect is the frontend's error to report; the window stays opaque.
         assert!(!window_look(Some(r#"{"appearance": {"backdrop": "glass"}}"#)).transparent);
+    }
+
+    #[test]
+    fn the_title_bar_is_ours_unless_native_is_asked() {
+        assert!(!window_look(None).native_title_bar);
+        assert!(!window_look(Some(r#"{"appearance": {"titleBar": "custom"}}"#)).native_title_bar);
+        assert!(window_look(Some(r#"{"appearance": {"titleBar": "native"}}"#)).native_title_bar);
+        assert!(!window_look(Some(r#"{"appearance": {"titleBar": 3}}"#)).native_title_bar);
     }
 
     #[test]

@@ -98,6 +98,8 @@ Reglas de la arquitectura:
   Agentes y notificaciones: `session_agents` (qué agente corre en cada sesión, una sola foto de
   la tabla de procesos), `notifications_listen` (canal por el que llegan los clics),
   `notify` y, solo en desarrollo, `debug_notification_click` / `debug_notification_history`.
+  Barra de título (`titlebar.rs`): `titlebar_listen` (canal: hover y presionado de los botones),
+  `titlebar_buttons` (dónde están, en px físicos; `null` = ninguno) y `set_title_bar`.
   Worktrees (`explorer_commands.rs` → `worktree.rs`): `worktree_create`, `worktree_status`,
   `worktree_remove` (solo los que Brisa registró) y `worktree_list`.
   IA (`ai_commands.rs` → `ai/`): `ai_configure` (el frontend avisa `ai.enabled`; apagada, el
@@ -275,6 +277,57 @@ que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
   muestra `Ctrl+Shift+T`) y abre la configuración. Ver "Configuración, temas y perfiles".
 - zsh/fish en WSL (pendiente): scripts propios (precmd/preexec en zsh) elegidos por el lanzador.
 
+## Diseño y barra de título
+
+- **Tokens** (al principio de `styles.css`, el único lugar): `--radius` (=
+  `appearance.cornerRadius`, 0–16, por defecto 8) y sus derivados `--radius-xs` (×0,5),
+  `--radius-sm` (×0,75: tabs, botones, campos, chips) y `--radius-lg` (×1,25: diálogos, paleta);
+  `--gap` (6 px entre tarjetas, 0 con esquinas cuadradas), `--space-1..4`, `--line` (borde de
+  1 px), `--shadow-sm/md/lg` (con `--shadow-alpha`, más suave en temas claros), `--hover` y
+  `--pressed` (un tinte del color del texto: sirven sobre cualquier superficie),
+  `--titlebar-height` y `--tab-height`. Ningún `border-radius` en px suelto (salvo los círculos
+  de los indicadores, `50%`). `lib/appearance.ts` publica `--radius`, `--gap` y `--shadow-alpha`
+  en vivo y marca `<html data-cards>` cuando el radio es mayor que 0.
+- **Tarjetas** (`data-cards`): el fondo de la app es el chrome; explorador, panel de IA y cada
+  panel de terminal son tarjetas con borde, radio y `--gap` entre ellas (el espacio entre paneles
+  muestra el chrome; la línea del divisor solo aparece al arrastrar). Con radio 0 vuelven a tocarse
+  con líneas de 1 px. Las tarjetas del explorador y del panel de IA **no** llevan
+  `overflow: hidden`: recortaría el borde de redimensionado, que vive en el espacio entre tarjetas
+  (pasó; lo encontró la e2e). Lo que scrollea adentro redondea sus esquinas de abajo.
+- **Barra de título propia** (`appearance.titleBar: "custom"`, por defecto): sin la barra de
+  Windows (`decorations(false)` + `shadow(true)`, que conserva sombra, bordes de resize y las
+  esquinas de Windows 11). La barra de tabs es la barra de título: su espacio vacío
+  (`data-tauri-drag-region` en `.tab-bar`, `.tab-strip` y `.tab-bar-space`) arrastra la ventana y
+  el doble clic maximiza / restaura (script de Tauri; tabs y botones no arrastran). Un borde de 4 px
+  arriba (`.window-resize-top`, sin maximizar) redimensiona por arriba (`startResizeDragging`).
+  Botones minimizar / maximizar-restaurar / cerrar (`WindowControls.tsx`, 46 px como Windows, con
+  los colores del tema; cerrar en rojo al pasar). Con la ventana inactiva, la barra se atenúa.
+- **Snap Layouts** (`src-tauri/src/titlebar.rs`): Windows 11 los muestra si `WM_NCHITTEST`
+  responde `HTMAXBUTTON` sobre el botón de maximizar, pero el WebView cubre toda el área cliente.
+  Como Windows Terminal: una ventana hija nativa (`BrisaCaptionButtons`, layered + sin bitmap de
+  redirección: no dibuja nada y recibe el mouse) sobre los tres botones, en el hilo principal.
+  Responde `HTMINBUTTON` / `HTMAXBUTTON` / `HTCLOSE`, avisa a la página hover y presionado (la
+  página los pinta) y al soltar manda `SC_MINIMIZE` / `SC_MAXIMIZE` / `SC_RESTORE` / `SC_CLOSE`.
+  La página informa dónde están los botones en px físicos (`devicePixelRatio`) en cada cambio de
+  layout o tamaño. Una ventana hija layered necesita Windows 8+ en el manifiesto: `build.rs`
+  embebe `app.manifest` (el de Tauri + `supportedOS`). Sin la ventana hija, los botones de la
+  página funcionan solos (sin Snap Layouts).
+- **Barra nativa** (`appearance.titleBar: "native"`), en vivo: `set_title_bar` vuelve a poner
+  las decoraciones de Windows, quita la sombra propia y la ventana hija; la barra de tabs queda
+  debajo, sin botones. La ventana se crea con el modo que diga settings.json (`settings::window_look`).
+
+## Colores
+
+- Todo sale del tema: `background` (terminales), `sidebar` (explorador y panel de IA: apenas más
+  oscuro), `chrome` (barra de título, barra de estado y lo que se ve entre tarjetas: más oscuro
+  todavía), `panel` (menús, diálogos, campos), `border`. Nunca negro puro contra el fondo (el
+  "Oscuro" tenía `#010409` contra `#0d1117`).
+- Incluidos: la jerarquía de cada paleta oficial donde existe (Catppuccin crust / mantle / base,
+  Dracula, Tokyo Night, One Dark); Oscuro y Claro, ajustados a mano. Importados o propios sin
+  `ui`: `deriveUi` (oscuros: hacia el negro un 15 % el sidebar y un 30 % el chrome; claros: hacia
+  el texto un 3 % y un 7 %). Test: en todos los temas chrome < sidebar < terminal en luminancia,
+  sutil y sin negro.
+
 ## Explorador de archivos
 
 Barra lateral a la izquierda (`Ctrl+B`), entre la barra de tabs y la de estado. Sigue el cwd del
@@ -312,6 +365,11 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   en `lib/explorerData.ts`; acciones en `lib/explorerActions.ts`.
 - **Árbol virtualizado** (`FileTree.tsx`): filas de 22 px absolutas, solo las visibles más un
   margen. 5000 archivos = ~40 filas en el DOM y ninguna tarea larga (medido en e2e).
+- **Breadcrumbs** (`Sidebar.tsx` + `fitCrumbs` en `explorerModel.ts`, pura y con tests): si la
+  ruta no entra, el primero y el último siempre se ven y los del medio se colapsan en "…" (se
+  conservan los más cercanos a la carpeta actual); "…" abre un menú con los ocultos, en orden. Los
+  anchos salen de una copia invisible de cada crumb; se recalcula al cambiar el ancho del
+  explorador.
 - **Clic en una carpeta** → `cd` en el panel activo **solo si** la integración dice que la shell
   está libre (sin comando en ejecución, OSC 133) y el prompt está vacío (lo escrito desde la
   marca 133;B, `ShellIntegrationHandle.promptInput()`). Si no, no se escribe nada en esa
@@ -367,7 +425,7 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 - **Esquema** (`config/settingsSchema.ts` con la mini librería `config/schema.ts`): una sola
   definición da los tipos de TS (inferidos), los defaults, la validación y el JSON Schema.
   Secciones: `appearance` (fuente, tamaño, line-height, ligaduras, cursor, padding, opacidad,
-  efecto), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
+  efecto, `cornerRadius`, `titleBar`; ver "Diseño y barra de título"), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
   `explorer` (arranque, ancho, ocultos, clic en carpeta), `profiles` (`default`, `list`),
   `session` (`restore`), `blocks` (`enabled`), `agents` (`enabled`, `idleSeconds`, `commands`),
   `notifications` (`enabled`, `bell`, `agents`), `ai` (`enabled`, `provider`, `model`,
@@ -392,8 +450,8 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   nadie le roba el foco; Esc la cierra.
 - **Temas** (`config/themes.ts`): Oscuro (el de siempre), Claro, Catppuccin Mocha y Latte,
   Dracula, Tokyo Night y One Dark. Un tema son los 16 colores ANSI + fondo/texto/cursor/selección
-  y, opcional, los colores de la UI (`ui`: background, chrome, panel, border, text, muted,
-  accent, danger, warning, success); lo que falta se deriva de la paleta. `lib/appearance.ts` los
+  y, opcional, los colores de la UI (`ui`: background, chrome, sidebar, panel, border, text,
+  muted, accent, danger, warning, success); lo que falta se deriva de la paleta (ver "Colores"). `lib/appearance.ts` los
   pone como variables CSS en `<html>` (todo `styles.css` usa variables, también git, estados y
   los colores de tabs/grupos, que tienen una paleta para temas oscuros y otra para claros) y
   cachea las variables en `localStorage` para pintar el tema correcto antes de leer el archivo.
@@ -772,7 +830,8 @@ CLAUDE.md
 index.html, vite.config.ts, tsconfig.json, package.json
 src/                        Frontend (solo render + input)
   main.tsx, App.tsx (título de ventana = tab activa), styles.css
-  components/TabBar.tsx     Barra de tabs + DndContext (TabItem, GroupChip, RenameInput)
+  components/TabBar.tsx     Barra de tabs (y de título: arrastre, doble clic) + DndContext (TabItem, GroupChip, RenameInput)
+  components/WindowControls.tsx  Minimizar / maximizar / cerrar de la barra propia (estado de la ventana nativa)
   components/ContextMenus.tsx  Menús de tab y de grupo (primitivas en Menu.tsx)
   components/ConfirmDialog.tsx Confirmación al cerrar tabs con procesos
   components/Workspace.tsx  Todos los TerminalPane montados y posicionados + divisores + SearchBar
@@ -826,7 +885,8 @@ src/                        Frontend (solo render + input)
   lib/aiErrors.ts           Qué decir ante cada error de la IA y cómo resolverlo
   lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
   lib/ligatures.ts          Ligaduras con un character joiner (+ test)
-  lib/explorerModel.ts      Lógica pura del explorador (+ explorerModel.test.ts)
+  lib/explorerModel.ts      Lógica pura del explorador, breadcrumbs que entran (+ explorerModel.test.ts)
+  lib/windowChrome.ts       Barra propia: minimizar/maximizar/cerrar, maximizada, foco, resize de arriba, titleBar en vivo
   lib/explorerData.ts       Listados perezosos con generación, watcher de lo visible, refresco de git
   lib/explorerActions.ts    cd con guardas, insertar rutas, acciones del menú contextual
   lib/dropTarget.ts         Panel bajo el puntero, resaltado, archivos soltados desde otras apps
@@ -850,6 +910,7 @@ src/                        Frontend (solo render + input)
   store/session.ts          zustand: sesión lista para montar terminales, comandos recientes de la paleta
   store/keymap.ts           Atajos en uso (defaults + settings), conflictos, etiquetas para menús
   store/ui.ts               zustand: renombrado, menú, diálogo, búsqueda, configuración, paleta, layout, toast
+  store/chrome.ts           zustand: barra nativa o propia, maximizada, activa, hover/presionado de los botones
   store/system.ts           zustand: carpeta del usuario y shells detectadas (system_info)
   store/explorer.ts         zustand: estado del explorador (lo persistente va a settings.json)
   store/git.ts              zustand: estado de git por repositorio + refreshGit (un proceso a la vez)
@@ -857,7 +918,10 @@ src/                        Frontend (solo render + input)
   store/profiles.ts         Perfiles en uso (detectados + settings), memoizados
   store/ai.ts               zustand: panel de IA, conversaciones por panel, barra Ctrl+I, diálogo "qué se envía"
 src-tauri/
-  src/lib.rs                Builder de Tauri, ventana principal (transparente solo si se pide), ciclo de vida
+  src/lib.rs                Builder de Tauri, ventana principal (transparente solo si se pide; sin barra de
+                            Windows salvo appearance.titleBar: native), ciclo de vida
+  src/titlebar.rs           Ventana nativa sobre los botones de la barra propia (Snap Layouts) y titleBar en vivo
+  app.manifest, build.rs    Manifiesto de la app: el de Tauri + Windows 8+ (ventanas hijas layered)
   src/commands.rs           Comandos Tauri finos: validan y delegan en PtyManager
   src/explorer_commands.rs  Comandos del explorador (spawn_blocking) y su canal del watcher
   src/settings.rs           Archivos de config: carpeta (+ migración de dev.terminal.desktop), lectura,
@@ -894,6 +958,8 @@ e2e/
                             /osc777, /after N; modo print = claude -p: ver "Pruebas con agentes")
   sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
+  caption.ps1               Botones de la barra propia por mensajes Win32: hit-test (Snap Layouts),
+                            presionar, clic, maximizada (DPI aware; nunca mueve el mouse real)
   recycle.ps1               Verifica que lo borrado por la e2e está en la papelera y lo saca de ahí
   artifacts/                Capturas de la página (CDP) y logs de `tauri dev` (ignorado por git)
 ```
@@ -1073,6 +1139,13 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   respuesta en el panel e "Insertar" lo escribe sin ejecutar; `Ctrl+I` con "matá el proceso que
   usa el puerto 3000"; "Ver qué se envía" con un token en la salida (sale `[REDACTED:…]`);
   Configuración → IA → "Verificar Claude Code"; `ai.enabled: false` → nada de IA.
+- [ ] Barra de título propia (**a mano**: lo que dibuja Windows no sale en las capturas de la
+  página): pasar el mouse por maximizar muestra los Snap Layouts; arrastrar la ventana desde el
+  espacio vacío (incluido llevarla a un borde de la pantalla); doble clic maximiza y restaura;
+  redimensionar desde los cuatro bordes; los botones con el tema claro y el oscuro; con
+  `appearance.titleBar: "native"` vuelve la barra de Windows sin reiniciar.
+- [ ] Diseño: `appearance.cornerRadius` 0 y 8 con tres temas (tabs, paneles divididos, explorador,
+  panel de IA, menús, paleta, configuración); el explorador con una ruta larga colapsa en "…".
 - [ ] Primer arranque tras el renombre: la configuración de `%APPDATA%\dev.terminal.desktop`
   aparece en `%APPDATA%\dev.brisa.desktop` (temas importados incluidos).
 
@@ -1089,6 +1162,7 @@ ver ocultos, guardar layouts, abrir settings.json / layouts.json, abrir multi-ag
 |---|---|
 | `Ctrl+Shift+P` | Paleta de comandos (acciones, tabs, paneles, perfiles, temas, layouts) |
 | `Ctrl+,` | Configuración (otra vez o `Esc`: cerrar) |
+| Arrastrar / doble clic en el espacio vacío de la barra de tabs | Mover la ventana / maximizar o restaurar (barra propia) |
 | `Ctrl+I` | IA: lenguaje natural a comando sobre el panel activo (`Enter` propone, `Enter` otra vez inserta sin ejecutar, `Esc` cancela) |
 | `Ctrl+Shift+I` | IA: panel de chat (también recibe "Explicar / arreglar"; `Esc` cancela la consulta en curso) |
 | `Ctrl+Shift+T` / botón `+` | Nueva tab con el perfil por defecto (en su carpeta inicial o la del panel activo) |
@@ -1239,6 +1313,21 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   como CRLF; leído de vuelta trae `\r\n` (la e2e lo normaliza).
 - **El margen de bloques se dibuja en el siguiente frame**: una prueba que mira `.block-gutter`
   justo después de un cambio (agente detectado, setting) tiene que esperar un frame.
+- **`Process.MainWindowHandle` no es la ventana de la app**: sin la barra nativa, .NET puede
+  elegir la ventana oculta de mensajes de tao ("Tao Thread Event Target"). `win.ps1` y
+  `caption.ps1` buscan la ventana visible del proceso que contiene `WRY_WEBVIEW`.
+- **PowerShell no es DPI aware**: a 150 %, `GetWindowRect` de una ventana per-monitor devuelve
+  coordenadas virtualizadas (207 px se ven como 138). `caption.ps1` llama
+  `SetProcessDpiAwarenessContext` antes de medir. (`win.ps1` no: sus tamaños de resize siguen
+  como siempre.)
+- **tao conserva `WS_CAPTION`** en una ventana sin decoraciones (por la sombra): para saber si la
+  barra de Windows está, mirar dónde empieza el área cliente respecto del borde de la ventana.
+- **Pruebas de la barra propia**: un doble clic sintético por CDP es poco confiable (el primer
+  mousedown inicia el arrastre nativo, que mira el botón real del mouse); la e2e despacha el
+  mousedown con `detail: 2` que escucha el script de Tauri. Un `WM_NCMOUSEMOVE` sintético no deja
+  hover: `TrackMouseEvent` ve el cursor real en otro lado y manda `WM_NCMOUSELEAVE` en el acto; la
+  e2e prueba el estado con "presionado". Los Snap Layouts los dibuja Windows: verificados por el
+  hit-test (`HTMAXBUTTON`), lo visual queda en el smoke manual.
 - **Un toast tapa la terminal**: la "marca del bloque que no aparece bajo el mouse" (vista en la
   7A y otra vez en la 7B) era un toast de la etapa anterior (`layouts`, `session`) justo bajo el
   puntero: el panel recibía `mouseleave` con `relatedTarget = toast`. `freshTab()` y la
@@ -1551,6 +1640,39 @@ entre tabs y paneles), y la tecla igual no llega al programa.
     captura; el error sin sesión sí es real), la API real de Anthropic, versiones de `claude`
     anteriores a 2.1.329 (si no conocen `--safe-mode` o `--effort`, la app pide actualizar).
     Queda en el smoke manual, a criterio del usuario.
+- **Pulido visual — diseño, barra de título y colores: completo y verificado (2026-11-20).**
+  Tokens de diseño en un solo lugar (radios, espacios, bordes, sombras, hover) aplicados a toda la
+  UI; `appearance.cornerRadius` (0–16, por defecto 8) en vivo, con paneles, explorador y panel de
+  IA como tarjetas cuando es mayor que 0. Barra de título propia: las tabs junto a minimizar /
+  maximizar / cerrar, arrastre y doble clic desde el espacio vacío, resize por arriba, Snap
+  Layouts de Windows 11 (ventana hija nativa sobre los botones, como Windows Terminal) y
+  `appearance.titleBar: "native"` en vivo. Colores: barra, explorador y terminal derivados del
+  mismo tema con una jerarquía sutil (color `sidebar` nuevo; paletas oficiales de cada tema;
+  nada de negro puro). Breadcrumbs que colapsan en "…" (primero y último siempre visibles).
+  - De paso: la grilla de Configuración se desbordaba con una ruta larga en el pie (botones
+    cortados); la línea de grupo de las tabs pisaba el subtítulo. `win.ps1` y `caption.ps1`
+    encuentran la ventana de la app aunque `MainWindowHandle` apunte a la de mensajes de tao.
+  - `npm test`: 118 (`fitCrumbs`; jerarquía chrome < sidebar < terminal en todos los temas).
+  - `cargo test`: 69 unitarios (3 nuevos: botón bajo un punto, estado serializado,
+    `appearance.titleBar`) + 6 de IA + 3 explorador + 21 PTY + 2 worktrees.
+  - `npm run e2e`: 397/397 en 298 s. Etapa nueva `chrome` (18 checks: barra propia, hit-test
+    8/9/20 de la ventana hija y su tamaño en px físicos, regiones de arrastre, presionado,
+    maximizar/restaurar por botón y por doble clic, radios 8/0/12 en vivo en tabs, paneles,
+    explorador y paleta, borde del panel de IA arrastrable en modo tarjetas, barra nativa en vivo
+    y de vuelta, colores de los 7 temas, breadcrumbs con "…", y capturas de la página de Oscuro,
+    Claro y Catppuccin con radio 0 y 8 en `e2e/artifacts/design-*.png`). `npm run e2e:smoke` suma
+    la parte esencial de `chrome`: 154/154 en 101 s.
+  - Revisado a ojo (capturas de la página por CDP, regla de capturas): radio 0 y 8 con Oscuro,
+    Claro, Catppuccin Mocha y Latte, Dracula y One Dark; configuración, paleta y menús.
+  - Encontrado por la e2e y corregido: en modo tarjetas el `overflow: hidden` de las tarjetas
+    recortaba el borde de redimensionado del explorador y del panel de IA.
+  - **Release** (CSP de producción, manifiesto embebido): la ventana hija se crea (layered en
+    hija = Windows 8+ en el manifiesto), hit-test 8/9/20, maximizar/restaurar, tarjetas y colores,
+    sin errores de consola (5/5). `brisa.exe` 9,40 → 9,43 MB (+31 KB); CSS 39,6 KB; JS 1030 →
+    1037 KB.
+  - **No verificado**: el flyout de Snap Layouts a la vista, el arrastre y el doble clic con el
+    mouse real (los dibuja / maneja Windows; queda en el smoke manual); Windows 10 (sin esquinas
+    redondeadas del sistema; el borde de 1 px de la sombra sin decoraciones).
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".

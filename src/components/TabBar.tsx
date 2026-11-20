@@ -12,12 +12,14 @@ import { horizontalListSortingStrategy, SortableContext } from '@dnd-kit/sortabl
 import { Fragment } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { focusActiveTerminal } from '../lib/tabActions';
+import { useChrome } from '../store/chrome';
 import { useShortcutLabel } from '../store/keymap';
 import { useUi } from '../store/ui';
 import { useWorkspace } from '../store/workspace';
 import { visibleTabIds } from '../store/workspaceModel';
 import { GroupChip } from './GroupChip';
 import { TabItem } from './TabItem';
+import { WindowControls } from './WindowControls';
 
 const GROUP_PREFIX = 'group:';
 const isGroupTarget = (id: unknown) => String(id).startsWith(GROUP_PREFIX);
@@ -35,7 +37,14 @@ const collisionDetection: CollisionDetection = (args) => {
   });
 };
 
+/**
+ * The tabs. With the custom title bar (the default) this is the window's title bar too: its
+ * empty space drags the window (double click maximizes) and the caption buttons sit at the right.
+ */
 export function TabBar() {
+  const custom = !useChrome((s) => s.nativeTitleBar);
+  // Tauri's drag region: only clicks on these elements themselves (not on tabs or buttons).
+  const drag = custom ? { 'data-tauri-drag-region': '' } : {};
   const tabOrder = useWorkspace((s) => s.tabOrder);
   // The strip: a group chip before the first tab of each group, then the visible tabs.
   const segments = useWorkspace(
@@ -68,8 +77,8 @@ export function TabBar() {
   };
 
   return (
-    <nav className="tab-bar" aria-label="Tabs">
-      <div className="tab-strip" role="tablist" data-tab-count={tabOrder.length}>
+    <nav className="tab-bar" aria-label="Tabs" data-title-bar={custom || undefined} {...drag}>
+      <div className="tab-strip" role="tablist" data-tab-count={tabOrder.length} {...drag}>
         <DndContext sensors={sensors} collisionDetection={collisionDetection} onDragEnd={onDragEnd}>
           <SortableContext items={sortable} strategy={horizontalListSortingStrategy}>
             {segments.map((id) => (
@@ -105,6 +114,8 @@ export function TabBar() {
       >
         ▾
       </button>
+      <div className="tab-bar-space" {...drag} />
+      {custom && <WindowControls />}
     </nav>
   );
 }

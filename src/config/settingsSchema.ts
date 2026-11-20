@@ -80,6 +80,18 @@ export const settingsSchema = object(
         cursorBlink: boolean({ default: true, description: 'El cursor parpadea.' }),
         padding: number({ default: 8, min: 0, max: 48, integer: true, description: 'Margen interno de cada terminal, en px.' }),
         opacity: number({ default: 100, min: 20, max: 100, integer: true, description: 'Opacidad del fondo de la terminal (%). Menos de 100 vuelve la ventana translúcida (requiere reiniciar la app la primera vez).' }),
+        cornerRadius: number({
+          default: 8,
+          min: 0,
+          max: 16,
+          integer: true,
+          description: 'Radio de las esquinas de toda la interfaz en px: tabs, paneles, explorador, menús, diálogos… 0 = todo cuadrado; mayor que 0, los paneles y el explorador se ven como tarjetas separadas.',
+        }),
+        titleBar: oneOf(['custom', 'native'], {
+          default: 'custom',
+          description: 'Barra de título: las tabs en la misma barra que minimizar, maximizar y cerrar (como Windows Terminal), o la barra nativa de Windows encima de las tabs.',
+          labels: { custom: 'Integrada con las tabs', native: 'Nativa de Windows' },
+        }),
         backdrop: oneOf(['none', 'mica', 'acrylic'], {
           default: 'none',
           description: 'Efecto de Windows detrás de la ventana (Windows 11). Activarlo por primera vez requiere reiniciar la app.',

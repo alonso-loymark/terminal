@@ -20,6 +20,8 @@ import { installAppShortcuts } from './lib/appShortcuts';
 import { installFileDrop } from './lib/dropTarget';
 import { installGitRefreshOnCommands } from './lib/explorerData';
 import { initSession } from './lib/sessionSync';
+import { installWindowChrome, startResizeTop } from './lib/windowChrome';
+import { useChrome } from './store/chrome';
 import { useSession } from './store/session';
 import { useWorkspace } from './store/workspace';
 import { tabTitle } from './store/workspaceModel';
@@ -32,6 +34,9 @@ export function App() {
   // Settings, the detected shells, the layouts and the last session take a few ms; waiting avoids
   // starting a shell with the wrong profile, or a tab that the restored session replaces.
   const ready = useSession((s) => s.ready);
+  const custom = !useChrome((s) => s.nativeTitleBar);
+  const maximized = useChrome((s) => s.maximized);
+  const active = useChrome((s) => s.active);
 
   useEffect(() => {
     getCurrentWindow()
@@ -46,11 +51,14 @@ export function App() {
   useEffect(() => installGitRefreshOnCommands(), []);
   useEffect(() => installAgentMonitor(), []);
   useEffect(() => installAi(), []);
+  useEffect(() => installWindowChrome(), []);
 
   if (!ready) return <div className="app" />;
 
   return (
-    <div className="app">
+    <div className="app" data-title-bar={custom ? 'custom' : 'native'} data-maximized={maximized || undefined} data-inactive={!active || undefined}>
+      {/* The title bar covers the window's top edge: resize from there too. */}
+      {custom && !maximized && <div className="window-resize-top" onPointerDown={(e) => e.button === 0 && startResizeTop()} />}
       <TabBar />
       <div className="main">
         <Sidebar />

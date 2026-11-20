@@ -105,6 +105,34 @@ export function breadcrumbs(path: string): Crumb[] {
   return crumbs;
 }
 
+export interface FittedCrumbs {
+  /** Indexes of the crumbs on display, in order. */
+  shown: number[];
+  /** The middle ones collapsed into "…" (empty: no "…"). */
+  hidden: number[];
+}
+
+/**
+ * Which breadcrumbs fit in `available` px (`widths`: each crumb with its separator; `ellipsis`:
+ * the "…" with its separator). The first and the last always show; the middle ones that do not
+ * fit collapse into "…", keeping those closest to the current folder.
+ */
+export function fitCrumbs(widths: readonly number[], available: number, ellipsis: number): FittedCrumbs {
+  const n = widths.length;
+  const all = widths.map((_, i) => i);
+  const total = widths.reduce((sum, w) => sum + w, 0);
+  if (n <= 2 || total <= available) return { shown: all, hidden: [] };
+  let used = (widths[0] ?? 0) + ellipsis + (widths[n - 1] ?? 0);
+  let first = n - 1;
+  while (first - 1 >= 1 && used + (widths[first - 1] ?? 0) <= available) {
+    first--;
+    used += widths[first] ?? 0;
+  }
+  // Everything in the middle fits after all (the "…" would hide nothing): show it all.
+  if (first === 1) return { shown: all, hidden: [] };
+  return { shown: [0, ...all.slice(first)], hidden: all.slice(1, first) };
+}
+
 // ---------------------------------------------------------------- shells
 
 /** C:\Users\Ana → /c/Users/Ana (Git Bash / MSYS); UNC \\srv\share → //srv/share. */

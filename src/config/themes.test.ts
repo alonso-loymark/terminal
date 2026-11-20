@@ -5,6 +5,7 @@ import { validateSettings } from './settingsSchema.ts';
 import {
   BUILTIN_THEMES,
   allThemes,
+  builtinThemes,
   findTheme,
   luminance,
   mix,
@@ -50,6 +51,18 @@ test('the built-in themes are complete and named', () => {
   assert.equal(resolveTheme('dark', []).dark, true);
   assert.equal(resolveTheme('Tokyo Night', []).id, 'tokyo-night', 'by label, any case');
   assert.equal(resolveTheme('no-existe', []).id, 'dark', 'unknown falls back to dark');
+});
+
+test('every theme has a subtle hierarchy: chrome darker than the sidebar, darker than the terminal, never black', () => {
+  const imported = themesFromImport(JSON.stringify(DRACULA_WT)).themes.map((spec) => resolveTheme(spec.name, [spec]));
+  for (const theme of [...builtinThemes(), ...imported]) {
+    const { chrome, sidebar, background } = theme.ui;
+    const [c, s, b] = [chrome, sidebar, background].map(luminance) as [number, number, number];
+    assert.ok(c < s && s < b, `${theme.id}: chrome ${chrome} < sidebar ${sidebar} < terminal ${background}`);
+    assert.ok(b - c < (theme.dark ? 0.03 : 0.2), `${theme.id}: subtle, not a jump (${chrome} vs ${background})`);
+    for (const color of [chrome, sidebar, background]) assert.notEqual(color.toLowerCase(), '#000000', `${theme.id}: no pure black`);
+    assert.ok(c > 0.002, `${theme.id}: chrome ${chrome} is not (almost) black`);
+  }
 });
 
 test('Windows Terminal schemes import: purple is magenta, cursorColor the cursor, UI derived', () => {

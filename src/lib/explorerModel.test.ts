@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   breadcrumbs,
+  fitCrumbs,
   cdCommand,
   flattenTree,
   gitDecorations,
@@ -39,6 +40,20 @@ test('paths: normalize, join, parent, inside, relative', () => {
   assert.equal(relativePath('C:\\proj\\src', 'C:\\proj\\docs\\x.md'), '..\\docs\\x.md');
   assert.equal(relativePath('C:\\proj', 'c:\\PROJ'), '.');
   assert.equal(relativePath('C:\\proj', 'D:\\otro\\x'), 'D:\\otro\\x');
+});
+
+test('breadcrumbs that do not fit collapse in the middle, keeping the first and the last', () => {
+  // C: › Users › Ana › proyectos › cliente › ventas › src
+  const widths = [20, 50, 40, 80, 70, 60, 40];
+  assert.deepEqual(fitCrumbs(widths, 1000, 30), { shown: [0, 1, 2, 3, 4, 5, 6], hidden: [] });
+  assert.deepEqual(fitCrumbs(widths, 200, 30), { shown: [0, 5, 6], hidden: [1, 2, 3, 4] });
+  assert.deepEqual(fitCrumbs(widths, 280, 30), { shown: [0, 4, 5, 6], hidden: [1, 2, 3] });
+  // Only the first and the last: even if they do not fit, they show (the last one truncates).
+  assert.deepEqual(fitCrumbs(widths, 10, 30), { shown: [0, 6], hidden: [1, 2, 3, 4, 5] });
+  assert.deepEqual(fitCrumbs([20, 900], 100, 30), { shown: [0, 1], hidden: [] });
+  // A "…" for a single hidden crumb that fits anyway is pointless: all show.
+  assert.deepEqual(fitCrumbs([20, 25, 40], 86, 30), { shown: [0, 1, 2], hidden: [] });
+  assert.deepEqual(fitCrumbs([], 100, 30), { shown: [], hidden: [] });
 });
 
 test('breadcrumbs: drive and UNC roots, accents', () => {

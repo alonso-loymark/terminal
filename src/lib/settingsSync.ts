@@ -6,6 +6,7 @@
 import { parse } from 'jsonc-parser';
 import type { JSONPath } from 'jsonc-parser';
 import { DEFAULT_SETTINGS, settingsJsonSchema } from '../config/settingsSchema';
+import { useChrome } from '../store/chrome';
 import { useExplorer, type ExplorerPrefs } from '../store/explorer';
 import { reuseEqual, useSettings } from '../store/settings';
 import { loadSystemInfo, useSystem } from '../store/system';
@@ -52,6 +53,7 @@ async function start(): Promise<void> {
     return;
   }
   useSettings.setState({ path: file.path, dir: file.dir, windowTransparent: file.windowTransparent });
+  useChrome.setState({ nativeTitleBar: file.nativeTitleBar });
   apply(file.text);
   try {
     const legacy = takeLegacyExplorer(file.text);

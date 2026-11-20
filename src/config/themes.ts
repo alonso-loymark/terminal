@@ -35,7 +35,12 @@ export type TerminalColorKey = (typeof TERMINAL_KEYS)[number];
 /** The xterm palette (a subset of xterm's ITheme, all set). */
 export type TerminalColors = Record<TerminalColorKey, string>;
 
-export const UI_KEYS = ['background', 'chrome', 'panel', 'border', 'text', 'muted', 'accent', 'danger', 'warning', 'success'] as const;
+/**
+ * The UI's colors, one level each: background (the terminals), sidebar (explorer, AI panel:
+ * barely darker), chrome (title bar, status bar and what is behind the cards: darker still),
+ * panel (menus, dialogs, inputs), border, text...
+ */
+export const UI_KEYS = ['background', 'chrome', 'sidebar', 'panel', 'border', 'text', 'muted', 'accent', 'danger', 'warning', 'success'] as const;
 export type UiColorKey = (typeof UI_KEYS)[number];
 export type UiColors = Record<UiColorKey, string>;
 
@@ -121,9 +126,10 @@ export const BUILTIN_THEMES: readonly Builtin[] = [
     terminal: GITHUB_DARK,
     ui: {
       background: '#0d1117',
-      chrome: '#010409',
+      chrome: '#07090d',
+      sidebar: '#0a0d12',
       panel: '#161b22',
-      border: '#30363d',
+      border: '#262c35',
       text: '#c9d1d9',
       muted: '#8b949e',
       accent: '#58a6ff',
@@ -136,8 +142,9 @@ export const BUILTIN_THEMES: readonly Builtin[] = [
     terminal: GITHUB_LIGHT,
     ui: {
       background: '#ffffff',
-      chrome: '#f6f8fa',
-      panel: '#eaeef2',
+      chrome: '#eef1f4',
+      sidebar: '#f6f8fa',
+      panel: '#ffffff',
       border: '#d0d7de',
       text: '#1f2328',
       muted: '#59636e',
@@ -173,7 +180,7 @@ export const BUILTIN_THEMES: readonly Builtin[] = [
       brightCyan: '#94e2d5',
       brightWhite: '#a6adc8',
     },
-    ui: { chrome: '#11111b', panel: '#313244', border: '#45475a', muted: '#9399b2', accent: '#cba6f7' },
+    ui: { chrome: '#11111b', sidebar: '#181825', panel: '#24243a', border: '#313244', muted: '#9399b2', accent: '#cba6f7' },
   },
   {
     id: 'catppuccin-latte',
@@ -201,7 +208,7 @@ export const BUILTIN_THEMES: readonly Builtin[] = [
       brightCyan: '#179299',
       brightWhite: '#bcc0cc',
     },
-    ui: { chrome: '#e6e9ef', panel: '#dce0e8', border: '#bcc0cc', muted: '#6c6f85', accent: '#8839ef', warning: '#df8e1d' },
+    ui: { chrome: '#dce0e8', sidebar: '#e6e9ef', panel: '#f5f6f9', border: '#ccd0da', muted: '#6c6f85', accent: '#8839ef', warning: '#df8e1d' },
   },
   {
     id: 'dracula',
@@ -229,7 +236,7 @@ export const BUILTIN_THEMES: readonly Builtin[] = [
       brightCyan: '#a4ffff',
       brightWhite: '#ffffff',
     },
-    ui: { chrome: '#21222c', panel: '#343746', border: '#44475a', muted: '#9ea4c4', accent: '#bd93f9' },
+    ui: { chrome: '#191a21', sidebar: '#21222c', panel: '#343746', border: '#3a3c4e', muted: '#9ea4c4', accent: '#bd93f9' },
   },
   {
     id: 'tokyo-night',
@@ -257,7 +264,7 @@ export const BUILTIN_THEMES: readonly Builtin[] = [
       brightCyan: '#7dcfff',
       brightWhite: '#c0caf5',
     },
-    ui: { chrome: '#16161e', panel: '#1f2335', border: '#3b4261', muted: '#737aa2' },
+    ui: { chrome: '#13131a', sidebar: '#16161e', panel: '#1f2335', border: '#292e42', muted: '#737aa2' },
   },
   {
     id: 'one-dark',
@@ -285,7 +292,7 @@ export const BUILTIN_THEMES: readonly Builtin[] = [
       brightCyan: '#6bcbd6',
       brightWhite: '#e6e6e6',
     },
-    ui: { chrome: '#21252b', panel: '#2c313a', border: '#3e4451', muted: '#7f848e' },
+    ui: { chrome: '#1b1f24', sidebar: '#21252b', panel: '#2c313a', border: '#353b45', muted: '#7f848e' },
   },
 ];
 
@@ -328,13 +335,18 @@ export function luminance(color: string): number {
   return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
 }
 
-/** UI colors from the terminal palette, for themes that bring only that (Windows Terminal's). */
+/**
+ * UI colors from the terminal palette, for themes that bring only that (Windows Terminal's):
+ * a subtle hierarchy around the terminal's background, never pure black against it. Dark
+ * themes go darker (sidebar a little, chrome more), light themes go towards the text color.
+ */
 export function deriveUi(t: TerminalColors, dark: boolean): UiColors {
   return {
     background: t.background,
-    chrome: dark ? mix(t.background, '#000000', 0.3) : mix(t.background, t.foreground, 0.04),
-    panel: mix(t.background, t.foreground, dark ? 0.07 : 0.08),
-    border: mix(t.background, t.foreground, dark ? 0.2 : 0.18),
+    chrome: dark ? mix(t.background, '#000000', 0.3) : mix(t.background, t.foreground, 0.07),
+    sidebar: dark ? mix(t.background, '#000000', 0.15) : mix(t.background, t.foreground, 0.03),
+    panel: dark ? mix(t.background, t.foreground, 0.08) : mix(t.background, '#ffffff', 0.6),
+    border: mix(t.background, t.foreground, dark ? 0.15 : 0.16),
     text: t.foreground,
     muted: mix(t.foreground, t.background, 0.38),
     accent: t.blue,

@@ -58,6 +58,27 @@ export function AppearanceSection() {
       <Field label="Margen interno" setting="appearance.padding" hint="Píxeles alrededor de cada terminal.">
         {(id) => <NumberInput id={id} value={a.padding} min={0} max={48} disabled={locked} onCommit={(v) => setSetting(['appearance', 'padding'], v)} />}
       </Field>
+      <Field
+        label="Esquinas redondeadas"
+        setting="appearance.cornerRadius"
+        hint="Radio en px para toda la interfaz: tabs, paneles, explorador, menús y diálogos. 0 = todo cuadrado; con más de 0, los paneles y el explorador son tarjetas separadas."
+      >
+        {(id) => <NumberInput id={id} value={a.cornerRadius} min={0} max={16} disabled={locked} onCommit={(v) => setSetting(['appearance', 'cornerRadius'], v)} />}
+      </Field>
+      <Field label="Barra de título" setting="appearance.titleBar" hint="Integrada: las tabs en la misma barra que minimizar, maximizar y cerrar (como Windows Terminal). Nativa: la de Windows, encima de las tabs.">
+        {(id) => (
+          <Select
+            id={id}
+            value={a.titleBar}
+            disabled={locked}
+            options={[
+              ['custom', 'Integrada con las tabs'],
+              ['native', 'Nativa de Windows'],
+            ]}
+            onCommit={(v) => setSetting(['appearance', 'titleBar'], v)}
+          />
+        )}
+      </Field>
       <Field label="Opacidad del fondo" setting="appearance.opacity">
         {(id) => <Range id={id} value={a.opacity} min={20} max={100} disabled={locked} onCommit={(v) => setSetting(['appearance', 'opacity'], v)} />}
       </Field>

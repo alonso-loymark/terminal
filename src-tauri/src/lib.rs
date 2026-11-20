@@ -7,6 +7,7 @@ mod notifications;
 pub mod pty;
 pub mod settings;
 mod settings_commands;
+mod titlebar;
 pub mod worktree;
 
 use tauri::webview::PageLoadEvent;
@@ -32,7 +33,11 @@ fn create_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .inner_size(1100.0, 700.0)
         .min_inner_size(480.0, 280.0)
         .center()
-        .transparent(look.transparent);
+        .transparent(look.transparent)
+        // The tabs live in our own title bar unless the native one is asked for. Undecorated,
+        // the shadow keeps the resize borders and Windows 11's rounded corners.
+        .decorations(look.native_title_bar)
+        .shadow(true);
     if !look.transparent {
         builder = builder.background_color(Color(13, 17, 23, 255));
     }
@@ -49,6 +54,7 @@ fn create_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(SettingsState {
         dir,
         window_transparent: look.transparent,
+        native_title_bar: look.native_title_bar,
     });
     Ok(())
 }
@@ -129,6 +135,9 @@ pub fn run() -> tauri::Result<()> {
             ai_commands::ai_set_api_key,
             ai_commands::ai_delete_api_key,
             ai_commands::ai_scrub_env,
+            titlebar::titlebar_listen,
+            titlebar::titlebar_buttons,
+            titlebar::set_title_bar,
         ])
         .on_page_load(|webview, payload| {
             #[cfg(debug_assertions)]
@@ -165,6 +174,7 @@ pub fn run() -> tauri::Result<()> {
                 window.state::<PtyManager>().close_owned_by(window.label());
                 window.state::<WatchManager>().stop_owned_by(window.label());
                 window.state::<AiManager>().cancel_owned_by(window.label());
+                titlebar::forget();
             }
         })
         .build(tauri::generate_context!())?;

@@ -2,9 +2,9 @@
 :root {
   color-scheme: dark;
   --bg: #0d1117;
-  --chrome: #010409;
+  --chrome: #07090d;
   --panel: #161b22;
-  --border: #30363d;
+  --border: #262c35;
   --text: #c9d1d9;
   --muted: #8b949e;
   --accent: #58a6ff;
@@ -21,8 +21,38 @@
   --tab-cyan: #39c5cf;
   --tab-orange: #f0883e;
   --tab-grey: #8b949e;
+  --sidebar: #0a0d12;
   --terminal-padding: 8px;
   --ui-font: 12px system-ui, 'Segoe UI', sans-serif;
+
+  /* Design tokens: the one place for corners, spacing, lines and shadows. --radius is
+     appearance.cornerRadius (lib/appearance.ts); every corner of the UI derives from it, so 0
+     makes everything square. --gap: the space between cards (panes, explorer, AI panel), 0
+     when the corners are square. */
+  --radius: 8px;
+  --radius-xs: calc(var(--radius) * 0.5);
+  --radius-sm: calc(var(--radius) * 0.75);
+  --radius-lg: calc(var(--radius) * 1.25);
+  --gap: 6px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --line: 1px solid var(--border);
+  --shadow-alpha: 42%;
+  --shadow-color: color-mix(in srgb, #000 var(--shadow-alpha), transparent);
+  --shadow-sm: 0 2px 8px var(--shadow-color);
+  --shadow-md: 0 8px 24px var(--shadow-color);
+  --shadow-lg: 0 16px 40px var(--shadow-color);
+  /* Hover and press on any surface (a tint of the text color). */
+  --hover: color-mix(in srgb, var(--text) 8%, transparent);
+  --pressed: color-mix(in srgb, var(--text) 14%, transparent);
+  --titlebar-height: 40px;
+  --tab-height: 32px;
+}
+
+.app {
+  background: var(--chrome);
 }
 
 * {
@@ -56,26 +86,43 @@ body,
   background: transparent;
 }
 
-/* ------------------------------------------------------------------ tab bar */
+/* ------------------------------------------------------------------ title bar and tabs */
 
+/* With the custom title bar (the default) the tab bar is the window's title bar: its empty space
+   drags the window (double click maximizes) and the caption buttons sit at the right
+   (components/WindowControls.tsx). With the native one it is just the tab bar. */
 .tab-bar {
   flex: none;
   display: flex;
-  align-items: stretch;
-  height: 36px;
-  padding: 4px 4px 0;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--titlebar-height);
+  padding: 0 var(--space-2);
   background: var(--chrome);
-  border-bottom: 1px solid var(--border);
+  border-bottom: var(--line);
   font: var(--ui-font);
   color: var(--muted);
   user-select: none;
 }
 
+:root[data-cards] .tab-bar {
+  border-bottom: 0;
+}
+
+.tab-bar[data-title-bar] {
+  padding-right: 0;
+}
+
+.app[data-title-bar='native'] {
+  --titlebar-height: 38px;
+}
+
 .tab-strip {
   display: flex;
-  align-items: stretch;
-  gap: 2px;
+  align-items: center;
+  gap: var(--space-1);
   min-width: 0;
+  height: 100%;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -85,23 +132,31 @@ body,
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 0 1 180px;
+  flex: 0 1 200px;
   min-width: 72px;
-  padding: 0 6px 0 12px;
-  border-radius: 6px 6px 0 0;
+  height: var(--tab-height);
+  padding: 0 4px 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   color: var(--muted);
   cursor: default;
   outline: none;
 }
 
 .tab:hover {
-  background: var(--panel);
+  background: var(--hover);
   color: var(--text);
 }
 
 .tab[data-active] {
   background: var(--bg);
+  border-color: var(--border);
   color: var(--text);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .tab[data-dragging] {
@@ -109,24 +164,24 @@ body,
   opacity: 0.85;
 }
 
-/* Tab color: a stripe on top. Group color: a line under the tab. */
+/* Tab color: a stripe on top. Group color: a line under the tab. Both inside the tab. */
 .tab::before,
 .tab::after {
   content: '';
   position: absolute;
-  left: 6px;
-  right: 6px;
+  left: 8px;
+  right: 8px;
   height: 2px;
-  border-radius: 2px;
+  border-radius: min(2px, var(--radius));
 }
 
 .tab::before {
-  top: 0;
+  top: 1px;
   background: var(--tab-color);
 }
 
 .tab::after {
-  bottom: 0;
+  bottom: 1px;
   background: var(--group-color);
 }
 
@@ -179,11 +234,11 @@ body,
 
 .tab-close {
   flex: none;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: inherit;
   font: 14px/1 system-ui, sans-serif;
@@ -197,39 +252,43 @@ body,
 }
 
 .tab-close:hover {
-  background: var(--border);
+  background: var(--hover);
+}
+
+.tab-new,
+.tab-new-menu {
+  flex: none;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
 }
 
 .tab-new {
-  flex: none;
   width: 28px;
-  margin: 2px 0 4px 4px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
   font: 18px/1 system-ui, sans-serif;
-  cursor: pointer;
+}
+
+.tab-new-menu {
+  width: 18px;
+  margin-left: -2px;
+  font: 11px/1 system-ui, sans-serif;
 }
 
 .tab-new:hover,
 .tab-new-menu:hover {
-  background: var(--panel);
+  background: var(--hover);
   color: var(--text);
 }
 
-.tab-new-menu {
-  flex: none;
-  width: 18px;
-  margin: 2px 0 4px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font: 11px/1 system-ui, sans-serif;
-  cursor: pointer;
+/* Empty space of the title bar: drags the window. */
+.tab-bar-space {
+  flex: 1;
+  align-self: stretch;
+  min-width: 32px;
 }
 
 .group-chip {
@@ -238,9 +297,9 @@ body,
   align-items: center;
   gap: 6px;
   max-width: 160px;
-  margin: 4px 2px 6px;
+  height: calc(var(--tab-height) - 6px);
   padding: 0 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--group-color);
   color: var(--chip-text);
   font-weight: 600;
@@ -265,7 +324,7 @@ body,
 
 .group-count {
   padding: 0 5px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: rgb(0 0 0 / 25%);
   font-size: 11px;
 }
@@ -275,12 +334,77 @@ body,
   min-width: 0;
   padding: 2px 4px;
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg);
   color: var(--text);
   font: inherit;
   font-weight: normal;
   outline: none;
+}
+
+/* Minimize, maximize / restore, close: Windows' sizes, the theme's colors. With the native
+   overlay (Snap Layouts) the hover and press states come from it (data-hover, data-pressed). */
+.window-controls {
+  flex: none;
+  display: flex;
+  align-self: stretch;
+}
+
+.caption-button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.caption-button svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+.window-controls:not([data-native]) .caption-button:hover,
+.caption-button[data-hover] {
+  background: var(--hover);
+}
+
+.window-controls:not([data-native]) .caption-button:active,
+.caption-button[data-pressed] {
+  background: var(--pressed);
+}
+
+.window-controls:not([data-native]) .caption-button[data-button='close']:hover,
+.caption-button[data-button='close'][data-hover] {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.window-controls:not([data-native]) .caption-button[data-button='close']:active,
+.caption-button[data-button='close'][data-pressed] {
+  background: #b22a1b;
+  color: #fff;
+}
+
+/* An inactive window dims its title bar, like Windows. */
+.app[data-inactive] .caption-button:not([data-hover]),
+.app[data-inactive] .tab[data-active] {
+  color: var(--muted);
+}
+
+/* The title bar covers the window's top edge: resize from its first pixels. */
+.window-resize-top {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  height: 4px;
+  cursor: ns-resize;
 }
 
 /* ------------------------------------------------------------------ explorer */
@@ -292,23 +416,43 @@ body,
   display: flex;
 }
 
+/* Rounded corners: the explorer, the terminals and the AI panel are cards on the chrome, with
+   a small space between them. */
+:root[data-cards] .main {
+  gap: var(--gap);
+  padding: 0 var(--gap) var(--gap);
+}
+
 .sidebar {
   position: relative;
   flex: none;
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--chrome);
-  border-right: 1px solid var(--border);
+  background: var(--sidebar);
+  border-right: var(--line);
   font: var(--ui-font);
   color: var(--text);
   user-select: none;
 }
 
+:root[data-cards] .sidebar,
+:root[data-cards] .ai-panel {
+  border: var(--line);
+  border-radius: var(--radius);
+}
+
+/* The card's own background is rounded; what scrolls inside follows its bottom corners. (No
+   overflow: hidden on the card: it would also clip the resize handle in the gap.) */
+:root[data-cards] .file-tree,
+:root[data-cards] .ai-turns {
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+
 .sidebar-resizer {
   position: absolute;
   top: 0;
-  right: -4px;
+  right: calc(-4px - var(--gap) / 2);
   z-index: 5;
   width: 7px;
   height: 100%;
@@ -326,17 +470,19 @@ body,
   background: var(--accent);
 }
 
+/* position: relative for the breadcrumbs' invisible measuring copy. */
 .explorer-header {
+  position: relative;
   flex: none;
   display: flex;
   align-items: center;
   gap: 2px;
-  height: 30px;
-  padding: 0 4px 0 6px;
-  border-bottom: 1px solid var(--border);
+  height: 32px;
+  padding: 0 var(--space-1) 0 6px;
+  border-bottom: var(--line);
 }
 
-/* Scrolled to the end by the header, so long paths show their last folders. */
+/* When the path does not fit, the middle folders collapse into "…" (Sidebar.tsx). */
 .breadcrumbs {
   flex: 1;
   min-width: 0;
@@ -344,6 +490,28 @@ body,
   align-items: center;
   overflow: hidden;
   white-space: nowrap;
+}
+
+/* An invisible copy of every crumb, to measure them. */
+.breadcrumbs-measure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  white-space: nowrap;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* The last one may still be too long alone: it truncates. */
+.crumb-wrap[data-last] {
+  min-width: 0;
+}
+
+.crumb-wrap[data-last] .crumb {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .crumb-wrap {
@@ -354,7 +522,7 @@ body,
 .crumb {
   padding: 2px 3px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -362,11 +530,12 @@ body,
 }
 
 .crumb:hover {
-  background: var(--panel);
+  background: var(--hover);
   color: var(--text);
 }
 
-.crumb-wrap:last-child .crumb {
+/* The current folder. */
+.crumb[data-current] {
   color: var(--text);
   font-weight: 600;
 }
@@ -385,7 +554,7 @@ body,
   height: 24px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -398,12 +567,12 @@ body,
 }
 
 .explorer-button:hover {
-  background: var(--panel);
+  background: var(--hover);
   color: var(--text);
 }
 
 .explorer-button[aria-pressed='true'] {
-  background: var(--panel);
+  background: var(--hover);
   color: var(--accent);
 }
 
@@ -436,7 +605,7 @@ body,
 }
 
 .tree-row:hover {
-  background: var(--panel);
+  background: var(--hover);
 }
 
 .tree-row[data-selected] {
@@ -492,7 +661,7 @@ body,
   flex: none;
   width: 12px;
   height: 12px;
-  border-radius: 2px;
+  border-radius: min(2px, var(--radius));
 }
 
 .tree-icon[data-kind='dir'] {
@@ -504,7 +673,7 @@ body,
 .tree-icon[data-kind='file'] {
   width: 9px;
   border: 1.5px solid var(--muted);
-  border-radius: 1px;
+  border-radius: min(1px, var(--radius));
 }
 
 .tree-icon[data-link] {
@@ -544,7 +713,7 @@ body,
   z-index: 200;
   padding: 2px 8px;
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--panel);
   color: var(--text);
   font: var(--ui-font);
@@ -560,7 +729,7 @@ body,
   margin: 6px;
   padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--panel);
 }
 
@@ -577,7 +746,7 @@ body,
   flex: none;
   padding: 2px 6px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg);
   color: var(--text);
   font: inherit;
@@ -600,6 +769,11 @@ body,
   background: var(--bg);
 }
 
+/* Cards: the space between panes shows the chrome. */
+:root[data-cards] .workspace {
+  background: transparent;
+}
+
 /* A path dragged from the explorer or from Windows Explorer will be typed in this pane. */
 .terminal-pane[data-drop-target] {
   outline: 2px dashed var(--accent);
@@ -619,6 +793,12 @@ body,
   position: absolute;
 }
 
+:root[data-cards] .terminal-pane {
+  overflow: hidden;
+  border-radius: var(--radius);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
 /* Where xterm lives: the pane minus the padding (what the fit addon measures). */
 .terminal-host {
   position: absolute;
@@ -633,6 +813,11 @@ body,
 .terminal-pane[data-focused] {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
+}
+
+:root[data-cards] .terminal-pane[data-focused] {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .pane-divider {
@@ -670,8 +855,15 @@ body,
   height: 1px;
 }
 
+/* Cards: the gap itself separates the panes; the line shows only while dragging. */
+:root[data-cards] .pane-divider::after {
+  background: transparent;
+}
+
 .pane-divider:hover::after,
-.pane-divider[data-dragging]::after {
+.pane-divider[data-dragging]::after,
+:root[data-cards] .pane-divider:hover::after,
+:root[data-cards] .pane-divider[data-dragging]::after {
   background: var(--accent);
 }
 
@@ -695,16 +887,22 @@ body,
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 22px;
-  padding: 0 10px;
+  height: 24px;
+  padding: 0 var(--space-3);
   background: var(--chrome);
-  border-top: 1px solid var(--border);
+  border-top: var(--line);
   font: var(--ui-font);
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
   user-select: none;
   overflow: hidden;
+}
+
+:root[data-cards] .status-bar {
+  height: 22px;
+  margin-top: calc(-1 * var(--gap) / 2);
+  border-top: 0;
 }
 
 .status-cwd {
@@ -757,7 +955,7 @@ body,
 .status-settings {
   padding: 0 4px;
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--danger);
   font: inherit;
@@ -765,7 +963,7 @@ body,
 }
 
 .status-settings:hover {
-  background: var(--panel);
+  background: var(--hover);
 }
 
 .status-shell {
@@ -802,8 +1000,8 @@ body,
   padding: 4px 6px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
   font: var(--ui-font);
   color: var(--text);
 }
@@ -813,7 +1011,7 @@ body,
   padding: 4px 6px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text);
   font: inherit;
   outline: none;
@@ -835,7 +1033,7 @@ body,
   padding: 0;
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text);
   font: inherit;
   cursor: pointer;
@@ -860,8 +1058,8 @@ body,
   padding: 4px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
   font: var(--ui-font);
   color: var(--text);
 }
@@ -873,7 +1071,7 @@ body,
   width: 100%;
   padding: 6px 8px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -962,8 +1160,8 @@ body,
   padding: 16px 18px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 60%);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   font: 13px system-ui, 'Segoe UI', sans-serif;
   color: var(--text);
 }
@@ -994,7 +1192,7 @@ body,
 .dialog-actions button {
   padding: 6px 14px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text);
   font: inherit;
@@ -1022,7 +1220,7 @@ body,
   min-width: 16px;
   height: 14px;
   padding: 0 2px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   font: 600 9px/1 'Cascadia Mono', Consolas, monospace;
   letter-spacing: -0.3px;
 }
@@ -1053,17 +1251,18 @@ body,
   background: rgb(0 0 0 / 45%);
 }
 
+/* minmax(0, 1fr): a long path in the footer must not widen the column past the dialog. */
 .settings {
   display: grid;
-  grid-template-columns: 170px 1fr;
+  grid-template-columns: 170px minmax(0, 1fr);
   grid-template-rows: 1fr auto;
   width: min(900px, calc(100vw - 32px));
   height: min(640px, calc(100vh - 32px));
   overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 50%);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   font: 13px system-ui, 'Segoe UI', sans-serif;
   color: var(--text);
 }
@@ -1086,7 +1285,7 @@ body,
 .settings-nav button {
   padding: 7px 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -1130,7 +1329,7 @@ body,
 
 .settings-field {
   display: grid;
-  grid-template-columns: 180px 1fr;
+  grid-template-columns: 180px minmax(0, 1fr);
   align-items: start;
   gap: 12px;
   padding: 7px 0;
@@ -1157,7 +1356,7 @@ body,
   padding: 5px 8px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   font: inherit;
   outline: none;
@@ -1209,7 +1408,7 @@ body,
 .settings-button {
   padding: 5px 12px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text);
   font: inherit;
@@ -1255,7 +1454,7 @@ body,
   margin: 0 0 14px;
   padding: 10px 12px;
   border: 1px solid var(--warning);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--warning) 10%, transparent);
 }
 
@@ -1302,7 +1501,7 @@ body,
   width: 100%;
   padding: 6px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -1322,7 +1521,7 @@ body,
   height: 64px;
   overflow: hidden;
   border: 1px solid;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   font: 11px 'Cascadia Mono', Consolas, monospace;
 }
 
@@ -1334,7 +1533,7 @@ body,
 
 .theme-chrome span {
   width: 24px;
-  border-radius: 2px;
+  border-radius: min(2px, var(--radius));
 }
 
 .theme-line {
@@ -1368,7 +1567,7 @@ body,
   height: 20px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--panel);
   color: var(--muted);
   font: 14px/1 system-ui, sans-serif;
@@ -1386,7 +1585,7 @@ body,
   gap: 8px;
   padding: 6px;
   border: 1px dashed transparent;
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 
 /* A theme file dragged from Windows Explorer over the import area. */
@@ -1419,7 +1618,7 @@ body,
   padding: 0;
   list-style: none;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 
 .profile-item + .profile-item {
@@ -1454,7 +1653,7 @@ body,
 
 .profile-badge {
   padding: 1px 6px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--bg);
   color: var(--muted);
   font-size: 11px;
@@ -1502,7 +1701,7 @@ body,
   gap: 12px;
   min-height: 32px;
   padding: 3px 6px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
 }
 
 .key-row:hover {
@@ -1535,7 +1734,7 @@ body,
   gap: 4px;
   padding: 2px 4px 2px 8px;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   font: 12px 'Cascadia Mono', Consolas, monospace;
   white-space: nowrap;
@@ -1555,7 +1754,7 @@ body,
 .key-add {
   padding: 0 5px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--muted);
   font: inherit;
@@ -1581,7 +1780,7 @@ body,
 .key-recorder {
   padding: 3px 10px;
   border: 1px solid var(--accent);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--text);
   font: inherit;
@@ -1706,8 +1905,8 @@ body,
   overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 55%);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   font: 13px system-ui, 'Segoe UI', sans-serif;
   color: var(--text);
 }
@@ -1716,7 +1915,7 @@ body,
   margin: 8px;
   padding: 8px 10px;
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text);
   font: inherit;
@@ -1736,7 +1935,7 @@ body,
   align-items: center;
   gap: 10px;
   padding: 6px 8px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   cursor: default;
 }
 
@@ -1779,7 +1978,7 @@ body,
 .palette-item kbd {
   padding: 1px 5px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--muted);
   font: 11px 'Cascadia Mono', Consolas, monospace;
 }
@@ -1801,8 +2000,8 @@ body,
   transform: translateX(-50%);
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
   font: var(--ui-font);
   color: var(--text);
 }
@@ -1831,7 +2030,7 @@ body,
   width: 3px;
   padding: 0;
   border: 0;
-  border-radius: 2px;
+  border-radius: min(2px, var(--radius));
   background: var(--muted);
   opacity: 0.55;
   pointer-events: auto;
@@ -1870,7 +2069,7 @@ body,
   z-index: 1;
   padding: 1px 6px;
   border: 1px solid var(--danger);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--panel);
   color: var(--text);
   font: var(--ui-font);
@@ -1893,7 +2092,7 @@ body,
   gap: 6px;
   padding: 2px 8px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--panel) 85%, transparent);
   color: var(--muted);
   font: 11px system-ui, 'Segoe UI', sans-serif;
@@ -1974,8 +2173,8 @@ body,
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--chrome);
-  border-left: 1px solid var(--border);
+  background: var(--sidebar);
+  border-left: var(--line);
   font: var(--ui-font);
   color: var(--text);
 }
@@ -1983,7 +2182,7 @@ body,
 .ai-resizer {
   position: absolute;
   top: 0;
-  left: -4px;
+  left: calc(-4px - var(--gap) / 2);
   z-index: 5;
   width: 7px;
   height: 100%;
@@ -2028,7 +2227,7 @@ body,
   height: 22px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: transparent;
   color: var(--muted);
   font-size: 16px;
@@ -2061,7 +2260,7 @@ body,
 .ai-question {
   margin-bottom: 6px;
   padding: 6px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--panel);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -2080,7 +2279,7 @@ body,
 .ai-paragraph code,
 .ai-context code {
   padding: 0 3px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--panel);
   font-family: 'Cascadia Mono', Consolas, monospace;
 }
@@ -2088,7 +2287,7 @@ body,
 .ai-command {
   margin: 6px 0 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   overflow: hidden;
 }
@@ -2125,7 +2324,7 @@ body,
 .ai-button {
   padding: 3px 10px;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--panel);
   color: var(--text);
   font: inherit;
@@ -2230,7 +2429,7 @@ body,
   margin: 6px 0;
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--danger) 60%, transparent);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
@@ -2266,7 +2465,7 @@ body,
   max-width: 100%;
   padding: 1px 2px 1px 8px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--panel);
 }
 
@@ -2313,7 +2512,7 @@ body,
   width: 100%;
   padding: 6px 8px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text);
   font: inherit;
@@ -2346,9 +2545,9 @@ body,
   width: min(680px, 100%);
   padding: 6px 8px;
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--panel);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  box-shadow: var(--shadow-md);
   font: var(--ui-font);
   color: var(--text);
   pointer-events: auto;
@@ -2369,7 +2568,7 @@ body,
   min-width: 0;
   padding: 5px 6px;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--text);
   font: 13px system-ui, 'Segoe UI', sans-serif;
@@ -2383,7 +2582,7 @@ body,
 .ai-proposal {
   margin-top: 6px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   overflow: hidden;
 }
@@ -2426,7 +2625,7 @@ body,
   padding: 8px 10px;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   font: 12px 'Cascadia Mono', Consolas, monospace;
   white-space: pre-wrap;
@@ -2455,3 +2654,4 @@ body,
 .settings-hint[data-status='ok'] {
   color: var(--success);
 }
+

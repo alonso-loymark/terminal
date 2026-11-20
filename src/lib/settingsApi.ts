@@ -1,7 +1,7 @@
 // The only module that talks to the backend about the app's files (settings.json, the session,
 // saved layouts) and the window's look (like lib/pty.ts for terminals and lib/fsApi.ts for the
 // explorer).
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 
 export interface SettingsFile {
   path: string;
@@ -11,6 +11,8 @@ export interface SettingsFile {
   text: string | null;
   /** The window was created transparent: a backdrop and translucency can apply live. */
   windowTransparent: boolean;
+  /** The window was created with Windows' own title bar. */
+  nativeTitleBar: boolean;
 }
 
 export function loadSettingsFile(): Promise<SettingsFile> {
@@ -61,4 +63,30 @@ export function setWindowLook(look: {
   background: string;
 }): Promise<WindowLookResult> {
   return invoke('set_window_look', look);
+}
+
+// ---------------------------------------------------------------- custom title bar
+
+export type CaptionButton = 'minimize' | 'maximize' | 'close';
+
+/** The caption buttons as the native overlay sees them (Windows: Snap Layouts). */
+export interface CaptionState {
+  /** The overlay is in place: hover and clicks come from it, not from the page. */
+  native: boolean;
+  hover: CaptionButton | null;
+  pressed: CaptionButton | null;
+}
+
+export function titlebarListen(onEvent: (state: CaptionState) => void): Promise<void> {
+  return invoke('titlebar_listen', { onEvent: new Channel<CaptionState>(onEvent) });
+}
+
+/** Where the page's caption buttons are (physical px, client area); null: none (native title bar). */
+export function titlebarButtons(rect: { x: number; y: number; width: number; height: number } | null): Promise<void> {
+  return invoke('titlebar_buttons', { rect });
+}
+
+/** `appearance.titleBar`, live: our title bar with the tabs, or Windows' own. */
+export function setTitleBar(custom: boolean): Promise<void> {
+  return invoke('set_title_bar', { custom });
 }

@@ -39,6 +39,11 @@ TypeScript y xterm.js sobre ConPTY.
   ejecuta solo y los destructivos se marcan.
 - Renderizado con WebGL (fallback DOM), búsqueda, links clickeables, copiar/pegar estilo Windows
   Terminal (o menú contextual) y zoom.
+- Barra de título propia con las tabs, como Windows Terminal: arrastrar la ventana desde el espacio
+  vacío, doble clic para maximizar y Snap Layouts de Windows 11 sobre el botón de maximizar (o la
+  barra nativa, con `"appearance.titleBar": "native"`). Un radio de esquinas para toda la interfaz
+  (`"appearance.cornerRadius"`: 0 = todo cuadrado; mayor, paneles y explorador como tarjetas) y
+  colores de barras, explorador y terminal derivados del mismo tema.
 
 La configuración vive en `%APPDATA%\dev.brisa.desktop\`. Si existe la de la versión anterior
 (`%APPDATA%\dev.terminal.desktop`, cuando la app se llamaba "Terminal"), se migra sola al primer

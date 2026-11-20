@@ -10,6 +10,8 @@ export type MenuState =
   | { kind: 'block'; paneId: PaneId; blockId: number; x: number; y: number }
   /** "▾" next to "+": a new tab with any profile. */
   | { kind: 'shells'; x: number; y: number }
+  /** "…" in the explorer's breadcrumbs: the folders it hides. */
+  | { kind: 'crumbs'; crumbs: { label: string; path: string }[]; x: number; y: number }
   /** Right click in the explorer: on an entry, or on the empty area (the root folder). */
   | { kind: 'explorer'; path: string; isDir: boolean; isRoot: boolean; x: number; y: number };
 

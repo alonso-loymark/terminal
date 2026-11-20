@@ -14,6 +14,8 @@ use crate::settings::{self, Backdrop, ConfigFile};
 pub struct SettingsState {
     pub dir: PathBuf,
     pub window_transparent: bool,
+    /// The window was created with Windows' own title bar (`appearance.titleBar: "native"`).
+    pub native_title_bar: bool,
 }
 
 impl SettingsState {
@@ -41,6 +43,8 @@ pub struct SettingsFile {
     text: Option<String>,
     /// The window can show a backdrop / translucency (it was created transparent).
     window_transparent: bool,
+    /// The window has Windows' own title bar (as created, or as last set live).
+    native_title_bar: bool,
 }
 
 #[tauri::command]
@@ -48,12 +52,14 @@ pub async fn settings_load(state: State<'_, SettingsState>) -> Result<SettingsFi
     let path = state.file(ConfigFile::Settings);
     let dir = state.dir.clone();
     let window_transparent = state.window_transparent;
+    let native_title_bar = state.native_title_bar;
     blocking(move || {
         Ok(SettingsFile {
             text: settings::read(&path)?,
             path: path.display().to_string(),
             dir: dir.display().to_string(),
             window_transparent,
+            native_title_bar,
         })
     })
     .await

@@ -1,12 +1,13 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { loadDir, syncWatches } from '../lib/explorerData';
 import { openFolder, openTabAt } from '../lib/explorerActions';
-import { breadcrumbs, flattenTree, pathKey, visibleDirs } from '../lib/explorerModel';
+import { breadcrumbs, fitCrumbs, flattenTree, pathKey, visibleDirs, type Crumb, type FittedCrumbs } from '../lib/explorerModel';
 import { flushExplorerPrefs } from '../lib/settingsSync';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { SIDEBAR_DEFAULT, SIDEBAR_MIN, useExplorer } from '../store/explorer';
 import { refreshGit } from '../store/git';
 import { useSystem } from '../store/system';
+import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { spawnOf } from '../store/workspaceModel';
 import { FileTree } from './FileTree';
@@ -67,31 +68,99 @@ export function Sidebar() {
   );
 }
 
-function ExplorerHeader({ root }: { root: string | null }) {
-  const pinned = useExplorer((s) => s.pinned);
-  const showHidden = useExplorer((s) => s.showHidden);
-  const crumbs = root ? breadcrumbs(root) : [];
-  // Long paths: keep the last folders in sight.
+/**
+ * The path as breadcrumbs. When it does not fit, the first and the last always show and the
+ * middle folders collapse into "…", which lists them (lib/explorerModel.ts → fitCrumbs).
+ */
+function Breadcrumbs({ root }: { root: string }) {
+  const crumbs = useMemo(() => breadcrumbs(root), [root]);
   const nav = useRef<HTMLElement>(null);
+  const measure = useRef<HTMLDivElement>(null);
+  const [fit, setFit] = useState<FittedCrumbs>(() => ({ shown: crumbs.map((_, i) => i), hidden: [] }));
+
+  // The widths come from an invisible copy of every crumb; the room, from the nav itself.
   useLayoutEffect(() => {
-    if (nav.current) nav.current.scrollLeft = nav.current.scrollWidth;
-  }, [root]);
+    const navEl = nav.current;
+    const copy = measure.current;
+    if (!navEl || !copy) return;
+    const compute = () => {
+      const widths = [...copy.querySelectorAll<HTMLElement>('[data-measure="crumb"]')].map((el) => el.getBoundingClientRect().width);
+      const ellipsis = copy.querySelector<HTMLElement>('[data-measure="ellipsis"]')?.getBoundingClientRect().width ?? 24;
+      const next = fitCrumbs(widths, navEl.clientWidth, ellipsis);
+      setFit((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+    };
+    compute();
+    const observer = new ResizeObserver(compute);
+    observer.observe(navEl);
+    return () => observer.disconnect();
+  }, [crumbs]);
 
   // Pinned: browse the pinned folder. Following: like a click on a folder (cd, or navigate).
   const onCrumb = (path: string) => openFolder(path, true);
+  const last = crumbs.length - 1;
+  const hidden = fit.hidden.map((i) => crumbs[i]).filter((c): c is Crumb => !!c);
+
+  return (
+    <>
+      <div ref={measure} className="breadcrumbs-measure" aria-hidden="true">
+        {crumbs.map((crumb, i) => (
+          <span key={crumb.path} className="crumb-wrap" data-measure="crumb">
+            {i > 0 && <span className="crumb-sep">›</span>}
+            <span className="crumb" data-current={i === last || undefined}>
+              {crumb.label}
+            </span>
+          </span>
+        ))}
+        <span className="crumb-wrap" data-measure="ellipsis">
+          <span className="crumb-sep">›</span>
+          <span className="crumb">…</span>
+        </span>
+      </div>
+      <nav ref={nav} className="breadcrumbs" aria-label="Ruta actual" title={root}>
+        {fit.shown.map((index, k) => {
+          const crumb = crumbs[index];
+          if (!crumb) return null;
+          return (
+            <Fragment key={crumb.path}>
+              {k === 1 && hidden.length > 0 && (
+                <span className="crumb-wrap">
+                  <span className="crumb-sep">›</span>
+                  <button
+                    type="button"
+                    className="crumb crumb-more"
+                    data-action="crumbs-more"
+                    aria-haspopup="menu"
+                    title={hidden.map((c) => c.label).join(' › ')}
+                    onClick={(event) => {
+                      const box = event.currentTarget.getBoundingClientRect();
+                      useUi.getState().openMenu({ kind: 'crumbs', crumbs: hidden, x: box.left, y: box.bottom });
+                    }}
+                  >
+                    …
+                  </button>
+                </span>
+              )}
+              <span className="crumb-wrap" data-last={index === last || undefined}>
+                {index > 0 && <span className="crumb-sep">›</span>}
+                <button type="button" className="crumb" data-path={crumb.path} data-current={index === last || undefined} title={crumb.path} onClick={() => onCrumb(crumb.path)}>
+                  {crumb.label}
+                </button>
+              </span>
+            </Fragment>
+          );
+        })}
+      </nav>
+    </>
+  );
+}
+
+function ExplorerHeader({ root }: { root: string | null }) {
+  const pinned = useExplorer((s) => s.pinned);
+  const showHidden = useExplorer((s) => s.showHidden);
 
   return (
     <div className="explorer-header">
-      <nav ref={nav} className="breadcrumbs" aria-label="Ruta actual" title={root ?? undefined}>
-        {crumbs.map((crumb, i) => (
-          <span key={crumb.path} className="crumb-wrap">
-            {i > 0 && <span className="crumb-sep">›</span>}
-            <button type="button" className="crumb" data-path={crumb.path} title={crumb.path} onClick={() => onCrumb(crumb.path)}>
-              {crumb.label}
-            </button>
-          </span>
-        ))}
-      </nav>
+      {root ? <Breadcrumbs key={root} root={root} /> : <nav className="breadcrumbs" aria-label="Ruta actual" />}
       <button
         type="button"
         className="explorer-button"

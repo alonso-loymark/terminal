@@ -2,6 +2,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { TAB_COLORS } from '../config/colors';
 import {
   copyPath,
+  openFolder,
   openInEditor,
   openInWindowsExplorer,
   openTabAt,
@@ -91,7 +92,21 @@ export function ContextMenus() {
   if (menu.kind === 'shells') return <ShellMenu x={menu.x} y={menu.y} />;
   if (menu.kind === 'explorer') return <ExplorerMenu path={menu.path} isDir={menu.isDir} isRoot={menu.isRoot} x={menu.x} y={menu.y} />;
   if (menu.kind === 'block') return <BlockMenu paneId={menu.paneId} blockId={menu.blockId} x={menu.x} y={menu.y} />;
+  if (menu.kind === 'crumbs') return <CrumbsMenu crumbs={menu.crumbs} x={menu.x} y={menu.y} />;
   return <PaneMenu paneId={menu.paneId} x={menu.x} y={menu.y} clipboard={menu.clipboard} />;
+}
+
+/** "…" in the explorer's breadcrumbs: the folders it hides, from the root down. */
+function CrumbsMenu({ crumbs, x, y }: { crumbs: { label: string; path: string }[]; x: number; y: number }) {
+  return (
+    <Menu x={x} y={y} label="Carpetas ocultas de la ruta" onClose={dismiss}>
+      {crumbs.map((crumb) => (
+        <MenuItem key={crumb.path} action="crumb" onSelect={run(() => openFolder(crumb.path, true))}>
+          <span title={crumb.path}>{crumb.label}</span>
+        </MenuItem>
+      ))}
+    </Menu>
+  );
 }
 
 /** Right click in the file explorer (an entry, or the empty area for the root folder). */

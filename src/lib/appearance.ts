@@ -36,6 +36,7 @@ function uiVariables(theme: Theme, settings: Settings, translucent: boolean): Re
   return {
     '--bg': translucent ? withAlpha(ui.background, opacity) : ui.background,
     '--chrome': translucent ? withAlpha(ui.chrome, chromeAlpha) : ui.chrome,
+    '--sidebar': translucent ? withAlpha(ui.sidebar, chromeAlpha) : ui.sidebar,
     '--panel': ui.panel,
     '--border': ui.border,
     '--text': ui.text,
@@ -47,6 +48,10 @@ function uiVariables(theme: Theme, settings: Settings, translucent: boolean): Re
     // Text on a group chip (its background is the group color).
     '--chip-text': theme.dark ? ui.chrome : '#ffffff',
     '--terminal-padding': `${settings.appearance.padding}px`,
+    // Design tokens (styles.css derives the rest): corners, and the space between cards.
+    '--radius': `${settings.appearance.cornerRadius}px`,
+    '--gap': settings.appearance.cornerRadius > 0 ? '6px' : '0px',
+    '--shadow-alpha': theme.dark ? '42%' : '16%',
     ...Object.fromEntries(Object.entries(tabs).map(([name, color]) => [`--tab-${name}`, color])),
   };
 }
@@ -60,8 +65,9 @@ function setVariables(variables: Record<string, string>, dark: boolean): void {
 /** Paints the last theme right away (main.tsx, before React): no dark flash on a light theme. */
 export function applyCachedTheme(): void {
   try {
-    const cached = JSON.parse(localStorage.getItem(CACHE_KEY) ?? 'null') as { variables: Record<string, string>; dark: boolean } | null;
+    const cached = JSON.parse(localStorage.getItem(CACHE_KEY) ?? 'null') as { variables: Record<string, string>; dark: boolean; cards?: boolean } | null;
     if (cached?.variables) setVariables(cached.variables, cached.dark);
+    document.documentElement.toggleAttribute('data-cards', cached?.cards ?? true);
   } catch {
     // No cache: the stylesheet's defaults (dark) until the settings load.
   }
@@ -77,8 +83,10 @@ function applyUi(): void {
   setVariables(variables, theme.dark);
   document.documentElement.dataset.theme = theme.id;
   document.documentElement.toggleAttribute('data-translucent', translucent);
+  // Rounded corners: panes, explorer and AI panel become separate cards.
+  document.documentElement.toggleAttribute('data-cards', s.settings.appearance.cornerRadius > 0);
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ variables, dark: theme.dark }));
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ variables, dark: theme.dark, cards: s.settings.appearance.cornerRadius > 0 }));
   } catch {
     // Only a convenience for the next start.
   }
