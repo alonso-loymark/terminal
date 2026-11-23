@@ -3,6 +3,7 @@ import { useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type Keyb
 import {
   ChevronsDownUp,
   ClipboardPaste,
+  ImagePlus,
   Code,
   Columns2,
   Copy,
@@ -68,6 +69,7 @@ const ICONS: Record<string, LucideIcon> = {
   'copy-output': Copy,
   'copy-both': Copy,
   paste: ClipboardPaste,
+  'paste-image': ImagePlus,
   'select-all': TextSelect,
   find: Search,
   clear: Eraser,

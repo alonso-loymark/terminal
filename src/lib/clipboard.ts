@@ -17,6 +17,35 @@ export async function readText(): Promise<string | null> {
   }
 }
 
+export interface ClipboardContents {
+  /** Its text, if it has any (null when empty). */
+  text: string | null;
+  /** Its image (an image and no text: a screenshot, "Copiar imagen"...), read on demand. */
+  image: (() => Promise<Blob>) | null;
+}
+
+/**
+ * What the clipboard holds, for the paste gestures that are not the browser's own (right click,
+ * a menu, the palette). Chromium hands bitmaps over as PNG. Text only if the webview refuses.
+ */
+export async function readClipboard(): Promise<ClipboardContents> {
+  try {
+    const items = await navigator.clipboard.read();
+    let text: string | null = null;
+    let image: (() => Promise<Blob>) | null = null;
+    for (const item of items) {
+      if (text === null && item.types.includes('text/plain')) {
+        text = (await (await item.getType('text/plain')).text()) || null;
+      }
+      const type = item.types.find((t) => t.startsWith('image/'));
+      if (!image && type) image = () => item.getType(type);
+    }
+    return { text, image };
+  } catch {
+    return { text: await readText(), image: null };
+  }
+}
+
 function legacyCopy(text: string): boolean {
   const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const area = document.createElement('textarea');

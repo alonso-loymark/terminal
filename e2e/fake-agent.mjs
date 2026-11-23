@@ -8,12 +8,20 @@
 // detection. Usage: claude.exe fake-agent.mjs   (or: node fake-agent.mjs <claude|codex|gemini>)
 //
 // Lines it understands (to test the terminal's agent indicators and notifications):
-//   /work N              a spinner for N seconds (output all the time: "working"), then quiet
+//   /work N [plain]      a spinner for N seconds (output all the time: "working") with Claude
+//                        Code's working hint "(Ns · esc to interrupt)" (`plain`: without it),
+//                        erased when done, like the real one; then quiet
+//   /redraw MS|off       while idle, repaints its prompt line every MS ms (a TUI's timers)
+//   /lag MS|off          echoes what is typed MS ms late (a TUI in a long conversation)
 //   /bell                rings the terminal bell (BEL)
 //   /osc9 text           an OSC 9 notification (iTerm2 / Windows Terminal style)
 //   /osc777 title|text   an OSC 777 notify (Ghostty / urxvt style)
 //   /after N <line>      runs one of the above N seconds later
 //   /tui S N [calm]      S seconds of a TUI like Claude Code in a long conversation (see startTui)
+//
+// The clipboard image key of each agent in Windows (what Brisa forwards when an image is pasted):
+// Claude Code reads it on Alt+V (ESC v), Codex on Ctrl+V (0x16), Gemini and agy on either. On its
+// key it prints "IMAGEN <key>"; on the other one, "TECLA <key> sin efecto".
 //
 // Print mode (`claude -p`, what Brisa's AI layer runs): `node fake-agent.mjs print <args>`, usually
 // through a .cmd wrapper given to the app as its claude (BRISA_CLAUDE_PATH / ai.claudePath).
@@ -54,6 +62,10 @@ const flavor = (process.argv[2] ?? exeName).toLowerCase();
 const NEWLINE = flavor === 'gemini' ? '\\\r\n' : '\x1b\r';
 const PASTE_START = '\x1b[200~';
 const PASTE_END = '\x1b[201~';
+const ALT_V = '\x1bv';
+const CTRL_V = '\x16';
+// Verified in each agent's code (see lib/imagePasteModel.ts).
+const IMAGE_KEYS = { claude: [ALT_V], codex: [CTRL_V], gemini: [CTRL_V, ALT_V], agy: [CTRL_V, ALT_V] }[flavor] ?? [];
 const log = process.env.FAKE_AGENT_LOG;
 
 let buffer = '';
@@ -72,22 +84,45 @@ function newline() {
 
 let working = null;
 
-/** A spinner for `seconds`: output all the time, like an agent at work. */
-function work(seconds) {
+/**
+ * A spinner for `seconds`: output all the time, like an agent at work, with Claude Code's working
+ * hint (unless `plain`). The line is erased when done: the real ones leave no hint behind.
+ */
+function work(seconds, plain = false) {
   const frames = '|/-\\';
-  const until = Date.now() + seconds * 1000;
+  const started = Date.now();
+  const until = started + seconds * 1000;
   let i = 0;
   clearInterval(working);
   working = setInterval(() => {
     if (Date.now() >= until) {
       clearInterval(working);
       working = null;
-      out('\r\nlisto');
+      out('\r\x1b[2Klisto');
       prompt();
       return;
     }
-    out(`\r${frames[i++ % frames.length]} trabajando`);
+    const hint = plain ? '' : ` (${Math.floor((Date.now() - started) / 1000)}s · esc to interrupt)`;
+    out(`\r${frames[i++ % frames.length]} trabajando${hint}`);
   }, 100);
+}
+
+/** `/redraw MS`: repaints the prompt line while idle (some TUIs do, on timers). */
+let redrawing = null;
+function redraw(ms) {
+  clearInterval(redrawing);
+  redrawing = ms > 0 ? setInterval(() => !working && !tui && out(`\r\x1b[2K› ${buffer.split('\n').at(-1)}`), ms) : null;
+}
+
+/** `/lag MS`: echo typed characters this late. */
+let lag = 0;
+const echo = (text) => (lag > 0 ? setTimeout(() => out(text), lag) : out(text));
+
+function imageKey(seq) {
+  const name = seq === ALT_V ? 'alt+v' : 'ctrl+v';
+  out(IMAGE_KEYS.includes(seq) ? `\r\nIMAGEN ${name}` : `\r\nTECLA ${name} sin efecto`);
+  prompt();
+  out(buffer);
 }
 
 // ---------------------------------------------------------------- TUI load (performance)
@@ -203,14 +238,16 @@ function act(line) {
   const [name, ...words] = line.split(' ');
   const rest = words.join(' ');
   if (name === '/work') {
-    work(Number(words[0]) || 3);
+    work(Number(words[0]) || 3, words[1] === 'plain');
     return true;
   }
+  if (name === '/redraw') redraw(Number(words[0]) || 0);
+  else if (name === '/lag') lag = Number(words[0]) || 0;
   if (name === '/tui') {
     startTui(Number(words[0]) || 20, Number(words[1]) || 3000, words[2] === 'calm');
     return true;
   }
-  if (name === '/after') {
+  else if (name === '/after') {
     // "/after N /bell": the same N seconds later (the test meanwhile hides the pane).
     setTimeout(() => act(words.slice(1).join(' ')), (Number(words[0]) || 1) * 1000);
   } else if (name === '/bell') out('\x07');
@@ -248,6 +285,7 @@ function key(ch) {
   if (tui) return tui.key(ch);
   if (ch === '\r') submit();
   else if (ch === '\x03') ctrlC();
+  else if (ch === CTRL_V) imageKey(CTRL_V);
   else if (ch === '\x7f' || ch === '\b') {
     if (buffer) {
       buffer = buffer.slice(0, -1);
@@ -255,7 +293,7 @@ function key(ch) {
     }
   } else if (ch >= ' ') {
     buffer += ch;
-    out(ch);
+    echo(ch);
   }
 }
 
@@ -278,7 +316,10 @@ function consume(final) {
     } else if (pending.startsWith(NEWLINE)) {
       pending = pending.slice(NEWLINE.length);
       newline();
-    } else if (!final && (NEWLINE.startsWith(pending) || PASTE_START.startsWith(pending))) {
+    } else if (pending.startsWith(ALT_V)) {
+      pending = pending.slice(ALT_V.length);
+      if (!tui) imageKey(ALT_V);
+    } else if (!final && (NEWLINE.startsWith(pending) || PASTE_START.startsWith(pending) || ALT_V.startsWith(pending))) {
       // Possibly the first half of a split sequence: give the rest a moment to arrive.
       flushTimer = setTimeout(() => consume(true), 50);
       return;

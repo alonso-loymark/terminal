@@ -1,33 +1,43 @@
 // AI agents in the panes. Which one runs is asked to the backend (it looks at each session's
 // process tree, like Shift+Enter does), only for panes running a command; what it is doing is
-// read from the terminal: working while it produces output, waiting for the user when it rings
-// (BEL), sends a notification (OSC 9 / OSC 777) or goes quiet for `agents.idleSeconds`, finished
-// when it exits. Requests for attention become native Windows notifications when the pane is
+// read from the terminal (lib/agentState.ts): idle when it starts, working while its working hint
+// is on screen (or, for an agent that never showed one, while its output lasts), waiting for the
+// user once it stops, rings (BEL) or sends a notification (OSC 9 / OSC 777), finished when it
+// exits. Requests for attention become native Windows notifications when the pane is
 // not on screen (another tab, a zoomed sibling, the window minimized or in the background); a
 // click on one brings Brisa forward with that pane focused.
 import { useSettings } from '../store/settings';
 import { useWorkspace } from '../store/workspace';
 import { isPaneVisible, tabOfPane, tabTitle, type AgentName, type AgentState, type PaneId } from '../store/workspaceModel';
+import { GAP_MS, GRACE_MS, SUSTAIN_MS, hasWorkingHint, nextAgentState } from './agentState';
 import { listenNotifications, notify, sessionAgents } from './pty';
 import type { TerminalNotification } from './shellIntegration';
 import { focusActiveTerminal } from './tabActions';
+import { getPane } from './terminalRegistry';
 
 export const AGENT_LABELS: Record<AgentName, string> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini', agy: 'agy' };
 
 /** How often the backend is asked which agents run (only for panes running something). */
 const POLL_MS = 2000;
 const TICK_MS = 1000;
-/** Output this soon after a keystroke is its echo, not the agent working. */
-const ECHO_MS = 300;
-/** After an agent asks for the user, a redraw this soon does not mean it went back to work. */
-const GRACE_MS = 1500;
+/**
+ * Output this soon after a keystroke is its echo (or the prompt reacting to it), not the agent
+ * working. Generous: in a long conversation a TUI's echo can take hundreds of ms.
+ */
+const ECHO_MS = 1000;
 /** At most one bell notification per pane this often (a burst of bells is one). */
 const BELL_GAP_MS = 5000;
 
 interface Activity {
+  /** Last output that was not an echo, and when its run started (see agentState.ts). */
   output: number;
+  runStart: number;
   input: number;
+  /** When it became idle or started waiting. */
   waitingSince: number;
+  /** The agent has shown its working hint, and when last. */
+  hintSeen: boolean;
+  hintLastSeen: number;
   notified: number;
 }
 
@@ -35,7 +45,7 @@ const activity = new Map<PaneId, Activity>();
 const act = (paneId: PaneId): Activity => {
   let a = activity.get(paneId);
   if (!a) {
-    a = { output: Date.now(), input: 0, waitingSince: 0, notified: 0 };
+    a = { output: 0, runStart: 0, input: 0, waitingSince: 0, hintSeen: false, hintLastSeen: 0, notified: 0 };
     activity.set(paneId, a);
   }
   return a;
@@ -45,7 +55,7 @@ const settings = () => useSettings.getState().settings;
 const ws = () => useWorkspace.getState();
 
 function setState(paneId: PaneId, name: AgentName, state: AgentState): void {
-  if (state === 'waiting') act(paneId).waitingSince = Date.now();
+  if (state === 'waiting' || state === 'idle') act(paneId).waitingSince = Date.now();
   ws().setPaneAgent(paneId, { name, state });
 }
 
@@ -79,14 +89,18 @@ function agentWaiting(paneId: PaneId, name: AgentName, message: string | null, b
 
 // ---------------------------------------------------------------- what the terminal sees
 
-/** A batch of output arrived from the pane's program. */
+/** A batch of output arrived from the pane's program (hot path: O(1), no store write unless it changes). */
 export function noteOutput(paneId: PaneId): void {
   const a = act(paneId);
   const now = Date.now();
   if (now - a.input < ECHO_MS) return;
+  if (now - a.output > GAP_MS) a.runStart = now;
   a.output = now;
+  // Output that lasts says "working" at once for an agent that never showed its hint (the tick,
+  // which reads the screen, would take up to a second). A redraw, a blink or a burst does not.
+  if (a.hintSeen || now - a.runStart < SUSTAIN_MS || now - a.waitingSince < GRACE_MS) return;
   const agent = ws().panes[paneId]?.agent;
-  if (agent?.state === 'waiting' && now - a.waitingSince > GRACE_MS) setState(paneId, agent.name, 'working');
+  if (agent?.state === 'waiting' || agent?.state === 'idle') setState(paneId, agent.name, 'working');
 }
 
 /** The user typed in the pane. */
@@ -151,8 +165,9 @@ function seen(paneId: PaneId, name: AgentName | null): void {
   const current = pane.agent;
   if (name) {
     if (!current || current.name !== name || current.state === 'finished') {
-      act(paneId).output = Date.now();
-      setState(paneId, name, 'working');
+      // A new agent: nothing known about it yet (its startup render is not work).
+      Object.assign(act(paneId), { output: 0, runStart: 0, hintSeen: false, hintLastSeen: 0 });
+      setState(paneId, name, 'idle');
     }
   } else if (current && current.state !== 'finished') {
     setState(paneId, current.name, 'finished');
@@ -160,12 +175,52 @@ function seen(paneId: PaneId, name: AgentName | null): void {
   }
 }
 
-/** An agent that has been quiet long enough is waiting for the user. */
+/** The pane's current screen (not where the user scrolled to), wrapped rows joined. */
+function screenLines(paneId: PaneId): string[] {
+  const term = getPane(paneId)?.term;
+  if (!term) return [];
+  const buffer = term.buffer.active;
+  const lines: string[] = [];
+  for (let y = buffer.baseY; y < buffer.baseY + term.rows; y++) {
+    const line = buffer.getLine(y);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  return lines;
+}
+
+/**
+ * Once a second, for the panes with an agent: is its working hint on screen? Then what it is
+ * doing (agentState.ts): an agent that stopped working is waiting for the user.
+ */
 function tick(): void {
-  const idle = settings().agents.idleSeconds * 1000;
+  const idleMs = settings().agents.idleSeconds * 1000;
   const now = Date.now();
   for (const pane of Object.values(ws().panes)) {
-    if (pane.agent?.state === 'working' && now - act(pane.id).output >= idle) agentWaiting(pane.id, pane.agent.name, null);
+    const agent = pane.agent;
+    if (!agent || agent.state === 'finished') continue;
+    const a = act(pane.id);
+    const hint = hasWorkingHint(screenLines(pane.id));
+    if (hint) {
+      a.hintSeen = true;
+      a.hintLastSeen = now;
+    }
+    const next = nextAgentState({
+      now,
+      state: agent.state,
+      hint,
+      hintSeen: a.hintSeen,
+      hintLastSeen: a.hintLastSeen,
+      lastOutput: a.output,
+      runStart: a.runStart,
+      waitingSince: a.waitingSince,
+      idleMs,
+    });
+    if (next === agent.state) continue;
+    if (next === 'waiting') agentWaiting(pane.id, agent.name, null);
+    else setState(pane.id, agent.name, next);
   }
 }
 

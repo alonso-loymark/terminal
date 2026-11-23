@@ -143,6 +143,12 @@ export const settingsSchema = object(
           description: 'Clic derecho: copiar la selección o pegar (Windows Terminal), o un menú contextual (VS Code).',
           labels: { copyPaste: 'Copiar / pegar', menu: 'Menú contextual' },
         }),
+        imagePaste: oneOf(['auto', 'key', 'path'], {
+          default: 'auto',
+          description:
+            'Pegar con una imagen (y sin texto) en el portapapeles: "auto" le reenvía la tecla al agente de IA que corre en el panel (Claude Code: Alt+V; Codex, Gemini y agy: Ctrl+V) para que lea el portapapeles, y sin agente guarda la imagen como PNG y pega su ruta; "key" siempre reenvía la tecla (Ctrl+V cruda si no hay agente); "path" siempre pega la ruta.',
+          labels: { auto: 'Automático', key: 'Reenviar la tecla', path: 'Pegar la ruta' },
+        }),
       },
       { description: 'Comportamiento de las terminales.' },
     ),

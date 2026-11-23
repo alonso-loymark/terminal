@@ -50,10 +50,11 @@ export type ShellEvent =
 /** AI agents the backend recognizes in a session's process tree. */
 export type AgentName = 'claude' | 'codex' | 'gemini' | 'agy';
 /**
- * working: producing output; waiting: asked for the user (BEL / OSC 9 / OSC 777) or went quiet
- * for a while; finished: the agent exited (until the pane is used again).
+ * idle: running, nothing going on (just started); working: its working hint on screen, or output
+ * that lasts (lib/agentState.ts); waiting: done working, or asked for the user (BEL / OSC 9 /
+ * OSC 777); finished: the agent exited (until the pane is used again).
  */
-export type AgentState = 'working' | 'waiting' | 'finished';
+export type AgentState = 'idle' | 'working' | 'waiting' | 'finished';
 
 export interface PaneAgent {
   name: AgentName;

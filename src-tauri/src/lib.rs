@@ -2,8 +2,11 @@ pub mod agents;
 pub mod ai;
 mod ai_commands;
 mod commands;
+pub mod dragdrop;
 pub mod explorer;
 mod explorer_commands;
+mod image_commands;
+pub mod images;
 mod notifications;
 pub mod orchestrator;
 mod orchestrator_commands;
@@ -20,6 +23,7 @@ use tauri::{App, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEven
 use crate::agents::{AgentsConfig, AgentsManager};
 use crate::ai::{AiConfig, AiManager, Endpoint};
 use crate::explorer::WatchManager;
+use crate::image_commands::DropState;
 use crate::notifications::NotificationState;
 use crate::orchestrator_commands::OrchestratorState;
 use crate::pty::PtyManager;
@@ -111,7 +115,18 @@ pub fn run() -> tauri::Result<()> {
         .manage(OrchestratorState::default())
         .manage(WatchManager::new())
         .manage(NotificationState::default())
-        .setup(|app| create_main_window(app))
+        .manage(DropState::default())
+        .setup(|app| {
+            // Pasted / dropped images of earlier runs: only the old ones go.
+            std::thread::spawn(|| {
+                let _ = images::remove_old(
+                    &images::images_dir(),
+                    images::KEEP_FOR,
+                    std::time::SystemTime::now(),
+                );
+            });
+            create_main_window(app)
+        })
         .invoke_handler(tauri::generate_handler![
             commands::create_session,
             commands::write_to_session,
@@ -128,6 +143,10 @@ pub fn run() -> tauri::Result<()> {
             notifications::notify,
             notifications::debug_notification_click,
             notifications::debug_notification_history,
+            image_commands::save_pasted_image,
+            image_commands::drop_listen,
+            image_commands::take_dropped_image,
+            image_commands::debug_drop,
             explorer_commands::list_dir,
             explorer_commands::watch_start,
             explorer_commands::watch_set,

@@ -6,7 +6,8 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { memo, useEffect, useRef } from 'react';
 import { shellSpec } from '../config/profiles';
 import { terminalLook, type TerminalLook } from '../lib/appearance';
-import { copyText, readText } from '../lib/clipboard';
+import { copyText } from '../lib/clipboard';
+import { pasteClipboard } from '../lib/imagePaste';
 import { copySelection } from '../lib/keybindings';
 import { setLigatures } from '../lib/ligatures';
 import { paneStyle, sameRect } from '../lib/paneGeometry';
@@ -170,9 +171,7 @@ export const TerminalPane = memo(
           copySelection(term);
           return;
         }
-        void readText().then((text) => {
-          if (text) term.paste(text);
-        });
+        void pasteClipboard(paneId);
       };
       host.addEventListener('contextmenu', onContextMenu);
 

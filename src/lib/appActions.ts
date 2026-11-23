@@ -9,7 +9,7 @@ import type { Layout, PaneId, SplitId } from '../store/workspaceModel';
 import { aiEnabled, cancelPaneQuery, explainLastFailed, toggleCommandBar, togglePanel } from './aiActions';
 import { navigateBlocks } from './blockActions';
 import { openOrchestrator } from './orchestratorActions';
-import { readText } from './clipboard';
+import { pasteClipboard, pasteClipboardImageAsFile } from './imagePaste';
 import { copySelection } from './keybindings';
 import { openLayoutsJson } from './layoutsSync';
 import { openSettingsJson } from './settingsSync';
@@ -123,13 +123,15 @@ const RUNNERS: Record<ActionId, Runner> = {
     const term = terminal(ctx)?.term;
     if (term) copySelection(term);
   },
+  // The browser's own paste keys fire the paste event: xterm takes text, lib/imagePaste.ts an image.
   'terminal.paste': (ctx) => {
     if (ctx.event && NATIVE_PASTE(ctx.event)) return 'native';
-    const term = terminal(ctx)?.term;
-    if (!term) return;
-    void readText().then((text) => {
-      if (text) term.paste(text);
-    });
+    const paneId = ctx.paneId ?? selectActivePaneId(ws());
+    if (paneId) void pasteClipboard(paneId);
+  },
+  'terminal.pasteImageFile': (ctx) => {
+    const paneId = ctx.paneId ?? selectActivePaneId(ws());
+    if (paneId) void pasteClipboardImageAsFile(paneId);
   },
   'terminal.selectAll': (ctx) => terminal(ctx)?.term.selectAll(),
   'terminal.clear': (ctx) => terminal(ctx)?.term.clear(),

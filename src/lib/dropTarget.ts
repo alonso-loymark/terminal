@@ -1,9 +1,11 @@
 // Dropping paths on a terminal: which pane is under the pointer, its highlight while dragging, and
-// files dropped from Windows Explorer (Tauri's native drag & drop, which on Windows replaces the
-// browser's HTML5 one: drags inside the page use pointer events instead).
+// what other apps drop (Brisa's native drop target, dragdrop.rs, which on Windows replaces the
+// browser's HTML5 drag & drop: drags inside the page use pointer events instead): files from
+// Windows Explorer as paths, and images that are not files (a browser's) saved and pasted.
 import { useExplorer } from '../store/explorer';
 import { insertPaths } from './explorerActions';
 import { onFileDrop } from './fsApi';
+import { dropImage } from './imagePaste';
 import { getPane } from './terminalRegistry';
 
 /** The visible pane at these page coordinates, if any. */
@@ -36,6 +38,13 @@ export function dropPaths(paths: string[], x: number, y: number): boolean {
   return ok;
 }
 
+/** An image dropped from a browser or another app: saved and pasted into the pane under the pointer. */
+function dropImageAt(id: number, x: number, y: number): void {
+  markDropTarget(null);
+  const paneId = paneAt(x, y);
+  if (paneId) void dropImage(paneId, id);
+}
+
 /** Other drop zones (the theme import on the settings screen): `[data-file-drop]` elements. */
 const zones = new Map<string, (paths: string[]) => void>();
 
@@ -60,20 +69,27 @@ function markZone(zone: HTMLElement | null): void {
   if (zone) zone.dataset.dropTarget = '';
 }
 
-/** Files dragged in from other apps. Returns the uninstaller. */
+/** Files and images dragged in from other apps. Returns the uninstaller. */
 export function installFileDrop(): () => void {
   let disposed = false;
   let unlisten: (() => void) | null = null;
   void onFileDrop((event) => {
-    const zone = event.type === 'leave' ? null : zoneAt(event.x, event.y);
+    if (event.type === 'leave') {
+      markZone(null);
+      markDropTarget(null);
+      return;
+    }
+    // Images that are not files only go to a terminal (the zones take files: theme import).
+    const image = event.type === 'dropImage' || (event.type === 'over' && event.image);
+    const zone = image ? null : zoneAt(event.x, event.y);
     markZone(event.type === 'over' ? zone : null);
     if (zone && event.type === 'drop') {
       zones.get(zone.dataset.fileDrop ?? '')?.(event.paths);
       return;
     }
     if (event.type === 'over') markDropTarget(zone ? null : paneAt(event.x, event.y));
-    else if (event.type === 'leave') markDropTarget(null);
-    else dropPaths(event.paths, event.x, event.y);
+    else if (event.type === 'drop') dropPaths(event.paths, event.x, event.y);
+    else dropImageAt(event.id, event.x, event.y);
   })
     .then((stop) => {
       if (disposed) stop();

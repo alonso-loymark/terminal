@@ -12,7 +12,7 @@ import {
 } from '../lib/explorerActions';
 import { blockText, copyBlock, rerunBlock, type BlockPart } from '../lib/blockActions';
 import { attachBlock, explainBlock } from '../lib/aiActions';
-import { readText } from '../lib/clipboard';
+import { pasteClipboard, pasteClipboardImageAsFile } from '../lib/imagePaste';
 import { parentDir } from '../lib/explorerModel';
 import { copySelection } from '../lib/keybindings';
 import { closeOtherTabs, focusActiveTerminal, groupTab, requestClosePane, requestCloseTabs } from '../lib/tabActions';
@@ -257,13 +257,16 @@ function PaneMenu({ paneId, x, y, clipboard = false }: { paneId: PaneId; x: numb
           <MenuItem
             action="paste"
             shortcut={shortcutLabel('terminal.paste')}
-            onSelect={act(() => {
-              void readText().then((text) => {
-                if (text) term.paste(text);
-              });
-            })}
+            onSelect={act(() => void pasteClipboard(paneId))}
           >
             Pegar
+          </MenuItem>
+          <MenuItem
+            action="paste-image"
+            shortcut={shortcutLabel('terminal.pasteImageFile')}
+            onSelect={act(() => void pasteClipboardImageAsFile(paneId))}
+          >
+            Pegar imagen como archivo
           </MenuItem>
           <MenuItem action="select-all" onSelect={act(() => term.selectAll())}>
             Seleccionar todo

@@ -86,6 +86,7 @@ export const ACTIONS: readonly ActionDef[] = [
   }),
   def('terminal.copy', 'Copiar', 'terminal', 'terminal', ['ctrl+shift+c', 'ctrl+insert']),
   def('terminal.paste', 'Pegar', 'terminal', 'terminal', ['ctrl+v', 'ctrl+shift+v', 'shift+insert']),
+  def('terminal.pasteImageFile', 'Pegar imagen como archivo', 'terminal', 'terminal', []),
   def('terminal.selectAll', 'Seleccionar todo', 'terminal', 'terminal', []),
   def('terminal.clear', 'Limpiar la terminal', 'terminal', 'terminal', []),
   def('terminal.find', 'Buscar', 'terminal', 'terminal', ['ctrl+shift+f']),

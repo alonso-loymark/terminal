@@ -4,7 +4,9 @@ import { useWorkspace } from '../store/workspace';
 import type { AgentState, PaneId } from '../store/workspaceModel';
 import { AgentIcon } from './AgentIcon';
 
+/** Idle (just started, nothing going on): only its name. */
 export const AGENT_STATE_LABELS: Record<AgentState, string> = {
+  idle: '',
   working: 'trabajando',
   waiting: 'espera tu respuesta',
   finished: 'terminó',
@@ -19,7 +21,8 @@ export function AgentBadge({ paneId }: { paneId: PaneId }) {
     <div className="agent-badge" data-agent={agent.name} data-state={agent.state} role="status">
       <AgentIcon agent={agent.name} />
       <span className="agent-dot" aria-hidden="true" />
-      {AGENT_LABELS[agent.name]} · {AGENT_STATE_LABELS[agent.state]}
+      {AGENT_LABELS[agent.name]}
+      {AGENT_STATE_LABELS[agent.state] && ` · ${AGENT_STATE_LABELS[agent.state]}`}
     </div>
   );
 }

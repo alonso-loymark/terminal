@@ -1,7 +1,6 @@
 // The explorer's only door to the backend (like lib/pty.ts for terminals): typed wrappers of the
 // file-system commands, the per-page watcher channel and native file drops.
 import { Channel, invoke } from '@tauri-apps/api/core';
-import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DirEntry, GitStatus } from './explorerModel';
 
 export type WatchId = number;
@@ -52,22 +51,49 @@ export function openInFileManager(path: string): Promise<void> {
 }
 
 export type FileDropEvent =
-  | { type: 'over'; x: number; y: number }
+  /** `image`: an image that is not a file (dragged from a browser or another app). */
+  | { type: 'over'; x: number; y: number; image: boolean }
   | { type: 'drop'; x: number; y: number; paths: string[] }
+  /** Its bytes wait in the backend: `takeDroppedImage(id)`. */
+  | { type: 'dropImage'; x: number; y: number; id: number; name: string }
+  | { type: 'leave' };
+
+type DropMessage =
+  | { type: 'over'; x: number; y: number; image: boolean }
+  | { type: 'drop'; x: number; y: number; paths: string[] }
+  | { type: 'dropImage'; x: number; y: number; id: number; name: string }
   | { type: 'leave' };
 
 /**
- * Files dragged from Windows Explorer (or any app) over the window. Positions are CSS pixels
- * of the page. Returns the unsubscriber.
+ * Drags from other apps over the window: files from Windows Explorer (or any app) and images
+ * that are not files (Brisa's own drop target, see dragdrop.rs). Positions are CSS pixels of the
+ * page. Each page load listens again. Returns the unsubscriber.
  */
 export async function onFileDrop(handler: (event: FileDropEvent) => void): Promise<() => void> {
-  return getCurrentWebview().onDragDropEvent(({ payload }) => {
+  let active = true;
+  const channel = new Channel<DropMessage>((message) => {
+    if (!active) return;
+    if (message.type === 'leave') {
+      handler(message);
+      return;
+    }
     const ratio = window.devicePixelRatio || 1;
-    if (payload.type === 'leave') handler({ type: 'leave' });
-    else if (payload.type === 'drop') {
-      handler({ type: 'drop', x: payload.position.x / ratio, y: payload.position.y / ratio, paths: payload.paths });
-    } else handler({ type: 'over', x: payload.position.x / ratio, y: payload.position.y / ratio });
+    handler({ ...message, x: message.x / ratio, y: message.y / ratio });
   });
+  await invoke('drop_listen', { onEvent: channel });
+  return () => {
+    active = false;
+  };
+}
+
+/** The bytes of a dropped image (once). */
+export async function takeDroppedImage(id: number): Promise<Uint8Array> {
+  return new Uint8Array(await invoke<ArrayBuffer>('take_dropped_image', { id }));
+}
+
+/** Saves a PNG in Brisa's temporary folder (old ones are removed after a few hours). Returns its path. */
+export function savePastedImage(png: Uint8Array): Promise<string> {
+  return invoke('save_pasted_image', png);
 }
 
 // ---------------------------------------------------------------- worktrees (multi-agent preset)

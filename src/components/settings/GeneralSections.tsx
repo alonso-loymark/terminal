@@ -139,6 +139,25 @@ export function TerminalSection() {
           />
         )}
       </Field>
+      <Field
+        label="Pegar una imagen"
+        setting="terminal.imagePaste"
+        hint="Con una imagen y sin texto en el portapapeles. Las imágenes guardadas se borran solas a las pocas horas."
+      >
+        {(id) => (
+          <Select
+            id={id}
+            value={t.imagePaste}
+            disabled={locked}
+            options={[
+              ['auto', 'Automático: la tecla al agente; sin agente, la ruta'],
+              ['key', 'Reenviar la tecla (el programa lee el portapapeles)'],
+              ['path', 'Guardar como PNG y pegar la ruta'],
+            ]}
+            onCommit={(v) => setSetting(['terminal', 'imagePaste'], v)}
+          />
+        )}
+      </Field>
     </section>
   );
 }

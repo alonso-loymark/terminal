@@ -19,6 +19,7 @@ import { installOrchestrator } from './lib/orchestratorActions';
 import { installAppearance } from './lib/appearance';
 import { installAppShortcuts } from './lib/appShortcuts';
 import { installFileDrop } from './lib/dropTarget';
+import { installImagePaste } from './lib/imagePaste';
 import { installGitRefreshOnCommands } from './lib/explorerData';
 import { initSession } from './lib/sessionSync';
 import { installWindowChrome, installWindowTitle, startResizeTop } from './lib/windowChrome';
@@ -40,6 +41,7 @@ export function App() {
   useEffect(() => installAppearance(), []);
   useEffect(() => installAppShortcuts(), []);
   useEffect(() => installFileDrop(), []);
+  useEffect(() => installImagePaste(), []);
   useEffect(() => installGitRefreshOnCommands(), []);
   useEffect(() => installAgentMonitor(), []);
   useEffect(() => installAi(), []);

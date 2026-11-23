@@ -435,6 +435,26 @@ const activeTab = async () => {
 const activePane = async () => (await activeTab()).activePaneId;
 const paneSel = (id) => `[data-pane-id="${id}"]`;
 const paneBox = (id) => page.locator(paneSel(id)).boundingBox();
+/**
+ * A drop from another app on the middle of a pane, through the same path as Brisa's native drop
+ * target (`debug_drop`, dev only): `{ paths }` from Windows Explorer, or `{ image, format, name }`
+ * (bytes as an array; format "file" = a browser's virtual file, "png", "dib").
+ */
+async function debugDrop(id, args) {
+  const box = await paneBox(id);
+  return page.evaluate(
+    async ({ args, x, y }) => {
+      const ratio = window.devicePixelRatio;
+      try {
+        await window.__TAURI_INTERNALS__.invoke('debug_drop', { x: Math.round(x * ratio), y: Math.round(y * ratio), ...args });
+        return 'ok';
+      } catch (error) {
+        return String(error);
+      }
+    },
+    { args, x: box.x + box.width / 2, y: box.y + box.height / 2 },
+  );
+}
 const paneAttr = (id, name) => page.getAttribute(paneSel(id), name);
 const paneSize = (id) =>
   page.evaluate((id) => {
@@ -2565,24 +2585,8 @@ const stages = {
     await page.keyboard.press('Alt+ArrowLeft');
     await waitUntil(async () => (await activePane()) === id, 3000);
 
-    // Files dropped from Windows Explorer: the same native event Tauri emits.
-    const box = await paneBox(right);
-    const emitted = await page.evaluate(
-      async ({ paths, x, y }) => {
-        const ratio = window.devicePixelRatio;
-        try {
-          await window.__TAURI_INTERNALS__.invoke('plugin:event|emit_to', {
-            target: { kind: 'Webview', label: 'main' },
-            event: 'tauri://drag-drop',
-            payload: { paths, position: { x: x * ratio, y: y * ratio } },
-          });
-          return 'ok';
-        } catch (error) {
-          return String(error);
-        }
-      },
-      { paths: [file, sub], x: box.x + box.width / 2, y: box.y + box.height / 2 },
-    );
+    // Files dropped from Windows Explorer: through the same path as Brisa's native drop target.
+    const emitted = await debugDrop(right, { paths: [file, sub] });
     const osDrop = await waitUntil(async () => (await paneCursorLine(right)).endsWith(`> '${file}' '${sub}'`), 3000);
     check('soltar archivos del Explorador de Windows en un panel: rutas entre comillas', osDrop, `${emitted} | ${await paneCursorLine(right)}`);
     await waitUntil(async () => (await activePane()) === right, 3000);
@@ -3803,18 +3807,48 @@ const stages = {
     const detected = await waitUntil(async () => (await paneState(id))?.agent?.name === 'claude', 6000);
     check('detecta el agente que corre en el panel (claude)', detected, JSON.stringify((await paneState(id))?.agent));
 
-    // Working while it produces output; waiting once it goes quiet.
+    // Quiet at its prompt (it just started): no "trabajando", only its name, even when it repaints
+    // on its own timers and echoes what is typed late (a long conversation).
     const agentState = async () => (await paneState(id))?.agent?.state;
+    const badgeText = () => page.locator(`${paneSel(id)} .agent-badge`).textContent({ timeout: 2000 }).catch(() => null);
+    const statesFor = async (ms) => {
+      const seen = new Set();
+      for (const end = Date.now() + ms; Date.now() < end; await sleep(150)) seen.add(await agentState());
+      return [...seen];
+    };
+    for (const line of ['/redraw 700', '/lag 600']) {
+      await page.keyboard.type(line);
+      await page.keyboard.press('Enter');
+    }
+    await page.keyboard.type('escribo con el eco atrasado');
+    const quiet = await statesFor(3500);
+    check(
+      'quieto en su prompt (redibuja solo, eco atrasado): sin "trabajando", solo su nombre',
+      !quiet.includes('working') && (await agentState()) === 'idle' && (await badgeText()) === 'Claude Code' && (await tabAttr(agentTab, 'data-indicator')) !== 'agent-working',
+      `${quiet} | ${await badgeText()}`,
+    );
+    await page.keyboard.press('Control+c');
+    await page.keyboard.type('/lag 0');
+    await page.keyboard.press('Enter');
+
+    // Working while its working hint is on screen; waiting once it is gone.
     await page.keyboard.type('/work 3');
     await page.keyboard.press('Enter');
     await waitUntil(async () => (await agentState()) === 'working', 3000);
     const working = await agentState();
     const tabWorking = await tabAttr(agentTab, 'data-indicator');
-    const badge = await page.locator(`${paneSel(id)} .agent-badge`).textContent({ timeout: 2000 }).catch(() => null);
+    const badge = await badgeText();
     await sleep(1500);
-    check('trabajando mientras produce salida: en la tab y en el panel', working === 'working' && tabWorking === 'agent-working' && badge === 'Claude Code · trabajando' && (await agentState()) === 'working', `${working} ${tabWorking} ${badge}`);
+    check('trabajando mientras muestra su aviso ("esc to interrupt"): en la tab y en el panel', working === 'working' && tabWorking === 'agent-working' && badge === 'Claude Code · trabajando' && (await agentState()) === 'working', `${working} ${tabWorking} ${badge}`);
     const waited = await waitUntil(async () => (await agentState()) === 'waiting', 8000);
-    check('sin salida por agents.idleSeconds: espera tu respuesta', waited && (await tabAttr(agentTab, 'data-indicator')) === 'agent-waiting');
+    check('terminó (el aviso se fue): espera tu respuesta', waited && (await tabAttr(agentTab, 'data-indicator')) === 'agent-waiting');
+    // It showed its hint: from now on only the hint says it works, not a fast repaint.
+    await page.keyboard.type('/redraw 250');
+    await page.keyboard.press('Enter');
+    const afterWork = await statesFor(3500);
+    check('después de trabajar, redibujar rápido no lo vuelve "trabajando"', !afterWork.includes('working') && (await agentState()) === 'waiting', String(afterWork));
+    await page.keyboard.type('/redraw 0');
+    await page.keyboard.press('Enter');
     check('con el panel a la vista no hay notificación', notificationsLogged().length === notifiedBefore, JSON.stringify(notificationsLogged().slice(notifiedBefore)));
 
     // Hidden (another tab): bell, OSC 9 and OSC 777 become native notifications.
@@ -3853,6 +3887,12 @@ const stages = {
     await run(`& '${agentExe('codex')}' '${FAKE_AGENT}'`, { waitPrompt: false });
     await waitFor('FAKE-AGENT codex listo', { source: screen });
     check('detecta codex', await waitUntil(async () => (await paneState(id))?.agent?.name === 'codex', 6000));
+    // An agent that never shows a working hint: output that lasts is work, silence is waiting.
+    await page.keyboard.type('/work 3 plain');
+    await page.keyboard.press('Enter');
+    const plainWorking = await waitUntil(async () => (await agentState()) === 'working', 4000);
+    const plainWaiting = plainWorking && (await waitUntil(async () => (await agentState()) === 'waiting', 8000));
+    check('sin aviso de trabajo: la salida que dura es "trabajando" y el silencio "espera tu respuesta"', plainWorking && plainWaiting, String(await agentState()));
     await exitToPrompt();
     await waitUntil(() => idle(id), 10000);
     // Seen gone (finished), then the pane is used again.
@@ -3886,6 +3926,152 @@ const stages = {
     check('agents.enabled: false → sin detección ni indicadores', (await paneState(id))?.agent === null && !(await page.$(`${paneSel(id)} .agent-badge`)));
     await exitToPrompt();
     await resetSettings();
+    await freshTab();
+  },
+
+  async images() {
+    if (!(await ownSettings())) return skip('images', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    await resetSettings();
+    const id = await activePane();
+    const created = [];
+    const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const savedPng = (file) => {
+      if (file) created.push(file);
+      return !!file && fs.existsSync(file) && fs.readFileSync(file).subarray(0, 8).equals(PNG_MAGIC);
+    };
+    // An image and no text on the clipboard, like a screenshot: the page writes a PNG.
+    const putImage = () =>
+      page.evaluate(async () => {
+        const canvas = new OffscreenCanvas(3, 2);
+        const context = canvas.getContext('2d');
+        context.fillStyle = '#e0457b';
+        context.fillRect(0, 0, 3, 2);
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': await canvas.convertToBlob({ type: 'image/png' }) })]);
+        const items = await navigator.clipboard.read();
+        return items.some((i) => i.types.includes('image/png')) && !items.some((i) => i.types.includes('text/plain'));
+      });
+    // A path to one of Brisa's saved images at the end of the prompt, between quotes `q`.
+    const savedPath = (q) => new RegExp(`${q}([A-Za-z]:\\\\[^${q}]*\\\\brisa-images\\\\brisa-[\\d-]+\\.png)${q}$`);
+    const pastedPath = async (q) => {
+      let line = '';
+      await waitUntil(async () => savedPath(q).test((line = await paneCursorLine(id))), 6000);
+      return { line, path: line.match(savedPath(q))?.[1] ?? null };
+    };
+    const clearPrompt = async () => {
+      await page.keyboard.press('Escape');
+      await waitUntil(() => atEmptyPrompt(id), 3000);
+    };
+    // What the fake agent submits (it prints SUBMIT <JSON of its input>): waits for the pasted
+    // path at its prompt, presses Enter and reads the new SUBMIT.
+    const submits = async () => (await text()).split('\n').filter((l) => l.startsWith('SUBMIT '));
+    const submittedPath = async () => {
+      const before = (await submits()).length;
+      await waitUntil(async () => (await paneCursorLine(id)).endsWith('.png"'), 6000);
+      await page.keyboard.press('Enter');
+      let value = '';
+      await waitUntil(async () => {
+        const all = await submits();
+        if (all.length <= before) return false;
+        try {
+          value = JSON.parse(all.at(-1).slice('SUBMIT '.length));
+        } catch {
+          value = all.at(-1);
+        }
+        return true;
+      }, 5000);
+      return { value, path: String(value).match(/^"([A-Za-z]:\\.*\\brisa-images\\brisa-[\d-]+\.png)" $/)?.[1] ?? null };
+    };
+
+    check('el portapapeles tiene una imagen y ningún texto', await putImage());
+    await waitUntil(terminalFocused, 3000);
+    await page.keyboard.press('Control+v');
+    let got = await pastedPath("'");
+    check('Ctrl+V con una imagen en PowerShell (sin agente): la guarda como PNG y pega su ruta entre comillas', savedPng(got.path), got.line);
+    await clearPrompt();
+    const box = await paneBox(id);
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: 'right' });
+    got = await pastedPath("'");
+    check('clic derecho con una imagen: lo mismo', savedPng(got.path), got.line);
+    await clearPrompt();
+    await setClipboard('texto-' + 'comun');
+    await page.keyboard.press('Control+v');
+    check('con texto en el portapapeles, Ctrl+V pega el texto como siempre', await waitUntil(async () => (await paneCursorLine(id)).endsWith('texto-comun'), 3000), await paneCursorLine(id));
+    await clearPrompt();
+
+    // "key" without an agent: a raw Ctrl+V for whatever program runs (the sink records it).
+    await writeSettings({ terminal: { imagePaste: 'key' } });
+    await putImage();
+    const sinkFile = path.join(WORK, 'imagen-sink.bin');
+    await run(`node ${psQuote(path.join(ROOT, 'e2e', 'sink.mjs'))} ${psQuote(sinkFile)}`, { waitPrompt: false });
+    await waitFor((s) => s.includes('SINK listo'), { source: () => paneText(id, 500) });
+    await page.keyboard.press('Control+v');
+    const raw = await waitUntil(() => fs.existsSync(sinkFile) && fs.readFileSync(sinkFile).includes(0x16), 4000);
+    await page.keyboard.press('Control+d');
+    check('modo "key" sin agente: le llega Ctrl+V cruda (0x16) al programa', raw, fs.existsSync(sinkFile) ? fs.readFileSync(sinkFile).toString('hex') : 'sin archivo');
+    await waitUntil(atShellPrompt, 5000);
+    await resetSettings();
+
+    // Each agent gets the key it reads the clipboard image on (in Windows).
+    for (const [agent, key] of [
+      ['codex', 'ctrl+v'],
+      ['gemini', 'ctrl+v'],
+      ['agy', 'ctrl+v'],
+      ['claude', 'alt+v'],
+    ]) {
+      await run(`& '${agentExe(agent)}' '${FAKE_AGENT}'`, { waitPrompt: false });
+      await waitFor(`FAKE-AGENT ${agent} listo`, { source: screen });
+      const before = count(await text(), `IMAGEN ${key}`);
+      await waitUntil(terminalFocused, 3000);
+      await page.keyboard.press('Control+v');
+      const forwarded = await waitUntil(async () => count(await text(), `IMAGEN ${key}`) > before, 5000);
+      check(`${agent}: Ctrl+V con una imagen le reenvía su tecla (${key}) para que lea el portapapeles`, forwarded && !(await text()).includes('TECLA'), (await screen()).split('\n').filter(Boolean).slice(-3).join(' | '));
+      if (agent !== 'claude') await exitToPrompt();
+    }
+
+    // Claude Code still running. "path": always the file, in double quotes for an agent.
+    await writeSettings({ terminal: { imagePaste: 'path' } });
+    await page.keyboard.press('Control+v');
+    got = await submittedPath();
+    check('modo "path" con un agente: la ruta del PNG entre comillas dobles', savedPng(got.path), got.value);
+    await resetSettings();
+    await paletteRun('pegar imagen como archivo', 'terminal.pasteImageFile', false);
+    await waitUntil(terminalFocused, 3000);
+    got = await submittedPath();
+    check('paleta → "Pegar imagen como archivo": la ruta aunque corra un agente', savedPng(got.path), got.value);
+
+    // Dropped from a browser (a virtual JPEG file): saved as PNG, its path pasted.
+    const jpeg = await page.evaluate(async () => {
+      const canvas = new OffscreenCanvas(4, 3);
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#33aa77';
+      context.fillRect(0, 0, 4, 3);
+      return [...new Uint8Array(await (await canvas.convertToBlob({ type: 'image/jpeg' })).arrayBuffer())];
+    });
+    let dropped = await debugDrop(id, { image: jpeg, format: 'file', name: 'foto del navegador.jpg' });
+    got = await submittedPath();
+    check('soltar una imagen de un navegador sobre el agente: PNG guardado y su ruta pegada', dropped === 'ok' && savedPng(got.path), `${dropped} | ${got.value}`);
+    await exitToPrompt();
+
+    // A bitmap from another app (CF_DIB, 2×2, 32 bits) on PowerShell: a PNG, shell quoting.
+    const u32 = (v) => {
+      const b = Buffer.alloc(4);
+      b.writeUInt32LE(v);
+      return b;
+    };
+    const u16 = (v) => {
+      const b = Buffer.alloc(2);
+      b.writeUInt16LE(v);
+      return b;
+    };
+    const dib = [...Buffer.concat([u32(40), u32(2), u32(2), u16(1), u16(32), u32(0), Buffer.alloc(20), Buffer.alloc(16, 0x90)])];
+    await waitUntil(() => atEmptyPrompt(id), 3000);
+    dropped = await debugDrop(id, { image: dib, format: 'dib' });
+    got = await pastedPath("'");
+    check('soltar un bitmap de otra app (DIB) en PowerShell: convertido a PNG, ruta con las comillas de la shell', dropped === 'ok' && savedPng(got.path), `${dropped} | ${got.line}`);
+    await clearPrompt();
+
+    for (const file of created) fs.rmSync(file, { force: true });
     await freshTab();
   },
 

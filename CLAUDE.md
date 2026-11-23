@@ -19,7 +19,7 @@ ejecutable `brisa.exe`, identificador `dev.brisa.desktop`.)
 | Drag & drop de tabs | **@dnd-kit** (`core` 6, `sortable` 10, `utilities` 3; la API estable, no `@dnd-kit/react` 0.x) |
 | Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
 | Configuración | `settings.json` y `layouts.json` (JSONC) leídos con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`); `session.json` (JSON que escribe la app) |
-| Notificaciones | **windows** 0.62 (WinRT `ToastNotification`), solo con las features de toasts; ya estaba en el árbol por WebView2 (`webview2-com`), misma versión. Win32 sigue con `windows-sys` |
+| Notificaciones y drop target | **windows** 0.62 (WinRT `ToastNotification`; y OLE para el drop target propio, `dragdrop.rs`: las mismas features Win32 que ya compila wry más `Memory` y `DataExchange`) + **windows-core** 0.62 (el macro `#[implement]` de un objeto COM); los dos ya estaban en el árbol por WebView2 y wry, misma versión. El resto de Win32 sigue con `windows-sys` |
 | IA | El CLI de Claude Code (`claude -p`, la suscripción del usuario) o la API de Anthropic por **WinHTTP** (`windows-sys`, feature `Win32_Networking_WinHttp`: parte de Windows, sin crate HTTP); la API key en el **Administrador de credenciales** (`Win32_Security_Credentials`). Sin dependencias nuevas |
 
 ## Arquitectura
@@ -114,6 +114,10 @@ Reglas de la arquitectura:
   Agentes y notificaciones: `session_agents` (qué agente corre en cada sesión, una sola foto de
   la tabla de procesos), `notifications_listen` (canal por el que llegan los clics),
   `notify` y, solo en desarrollo, `debug_notification_click` / `debug_notification_history`.
+  Imágenes (`image_commands.rs` → `images.rs`, `dragdrop.rs`; ver "Imágenes: pegar y soltar"):
+  `save_pasted_image` (el PNG como cuerpo crudo del pedido; devuelve la ruta), `drop_listen`
+  (canal de los drops de otras apps; instala el drop target propio), `take_dropped_image` (los
+  bytes de una imagen soltada, una vez) y, solo en desarrollo, `debug_drop`.
   Barra de título (`titlebar.rs`): `titlebar_listen` (canal: hover y presionado de los botones),
   `titlebar_buttons` (dónde están, en px físicos; `null` = ninguno) y `set_title_bar`.
   Worktrees (`explorer_commands.rs` → `worktree.rs`): `worktree_create`, `worktree_status`,
@@ -436,11 +440,12 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   comillas). Git Bash: ruta MSYS entre comillas simples (`'\''` para una comilla). Siempre con
   comillas y un espacio al final.
 - **Arrastrar** una fila a una terminal pega la ruta en **ese** panel (lo resalta mientras tanto).
-  Con `dragDropEnabled` (default de Tauri) el drag & drop HTML5 no funciona en Windows: el
-  arrastre interno usa pointer events (`lib/dropTarget.ts`, `paneAt` con `elementFromPoint`).
-  Archivos desde el Explorador de Windows: evento nativo `onDragDropEvent` de Tauri (posición en
-  píxeles físicos → CSS) → mismo `insertPaths`. La e2e emite ese mismo evento con
-  `plugin:event|emit_to`.
+  El drag & drop HTML5 no funciona en Windows (el drop target nativo reemplaza al de WebView2):
+  el arrastre interno usa pointer events (`lib/dropTarget.ts`, `paneAt` con `elementFromPoint`).
+  Archivos desde el Explorador de Windows: el drop target propio de Brisa (`dragdrop.rs`, canal
+  de `drop_listen`; posición en píxeles físicos → CSS) → mismo `insertPaths`. Imágenes que no
+  son archivos (de un navegador u otra app): ver "Imágenes: pegar y soltar". La e2e suelta con
+  `debug_drop`, que entra por el mismo camino que un drop real.
 - **Git**: rama (↑/↓ y • si hay cambios) en la barra de estado para el cwd del panel activo;
   colores en el árbol (modificado amarillo, nuevo/sin seguir verde, renombrado azul,
   conflicto/borrado rojo; las carpetas toman el cambio más fuerte de adentro; ignorados y ocultos
@@ -479,7 +484,7 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 - **Esquema** (`config/settingsSchema.ts` con la mini librería `config/schema.ts`): una sola
   definición da los tipos de TS (inferidos), los defaults, la validación y el JSON Schema.
   Secciones: `appearance` (fuente, tamaño, line-height, ligaduras, cursor, padding, opacidad,
-  efecto, `cornerRadius`, `titleBar`; ver "Diseño y barra de título"), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
+  efecto, `cornerRadius`, `titleBar`; ver "Diseño y barra de título"), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho, `imagePaste`),
   `explorer` (arranque, ancho, ocultos, clic en carpeta, `fileIcons`), `profiles` (`default`, `list`),
   `session` (`restore`), `blocks` (`enabled`), `agents` (`enabled`, `idleSeconds`, `commands`),
   `notifications` (`enabled`, `bell`, `agents`), `ai` (`enabled`, `provider`, `model`,
@@ -701,11 +706,25 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   (o que no pueden decirlo: cmd, perfiles sin integración) o que ya tenían uno. El backend usa
   la misma detección que Shift+Enter (`pty/agents.rs`, una foto de la tabla de procesos para
   todas las sesiones). Con todos los paneles en un prompt libre no se consulta nada.
-- **Estados** (`Pane.agent`: `{ name, state }`): *trabajando* (produce salida), *esperando tu
-  respuesta* (sonó la campana, mandó OSC 9 / OSC 777, o lleva `agents.idleSeconds` sin salida,
-  6 s por defecto) y *terminado* (el proceso salió; se va al volver a tipear en el panel). La
-  salida hasta 300 ms después de una tecla es eco, no trabajo; y durante 1,5 s después de un
-  aviso explícito, un redibujo no lo devuelve a *trabajando*.
+- **Estados** (`Pane.agent`: `{ name, state }`, reglas puras en `lib/agentState.ts`, con tests):
+  - *quieto* (`idle`, recién detectado: el badge muestra solo el nombre, la tab ningún
+    indicador);
+  - *trabajando*: **su aviso de trabajo en pantalla**, que los cuatro muestran entre paréntesis
+    con el tiempo mientras trabajan (Claude Code "(12s · ↑ 1.2k tokens · esc to interrupt)",
+    Codex "(5s • esc to interrupt)", Gemini "(esc to cancel, 5s)", agy "(12s · esc to cancel)";
+    sacado del código de cada uno). Se lee la pantalla actual (no el scroll) de los paneles con
+    agente una vez por segundo (`hasWorkingHint`: un "esc to cancel" sin duración es un diálogo,
+    que espera al usuario). Un agente que **nunca** mostró el aviso (otra versión, otro texto):
+    salida sostenida, una racha sin pausas de más de 400 ms durante 1,5 s;
+  - *esperando tu respuesta*: el aviso se fue hace 1,5 s (o `agents.idleSeconds` sin salida, 6 s
+    por defecto, si nunca lo mostró), sonó la campana o mandó OSC 9 / OSC 777. Un permiso que
+    pide Claude Code también (no muestra el aviso);
+  - *terminado*: el proceso salió (se va al volver a tipear en el panel).
+  Antes cualquier salida lo volvía *trabajando*: un TUI quieto en su prompt redibuja (resize,
+  foco, sus timers) y en una conversación larga su eco tarda cientos de ms, así que Claude Code
+  esperando que escribas decía "trabajando". Ahora un agente que ya mostró su aviso solo vuelve a
+  *trabajando* con el aviso; la salida hasta 1 s después de una tecla es eco; y durante 1,5 s
+  después de quedar quieto o de un aviso explícito, nada lo devuelve a *trabajando*.
 - **Indicadores**: en la tab (`tabIndicator`: esperando > proceso con error > trabajando >
   terminado > actividad; punto animado / ámbar / anillo verde, con el agente en el tooltip) y
   en el panel (`AgentBadge`, arriba a la derecha: "Claude Code · espera tu respuesta").
@@ -746,6 +765,66 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 - Nada de esto se probó con Claude Code real (regla: las pruebas usan el agente falso). Fuentes:
   https://code.claude.com/docs/en/terminal-config, https://code.claude.com/docs/en/settings,
   https://code.claude.com/docs/en/hooks y https://developers.openai.com/codex/config-sample.
+
+## Imágenes: pegar y soltar
+
+Pegar una imagen en un agente (Claude Code, Codex, Gemini, agy) como en la terminal de VS Code,
+y arrastrar una imagen desde un navegador u otra app. Lógica pura en `lib/imagePasteModel.ts`
+(con tests), el resto en `lib/imagePaste.ts`; backend en `images.rs` y `dragdrop.rs`.
+
+- **Pegar** (Ctrl+V / Ctrl+Shift+V / Shift+Insert, clic derecho, "Pegar" del menú del panel, la
+  paleta o un atajo propio): con **texto** en el portapapeles, lo de siempre. Con una **imagen y
+  sin texto** (captura, "Copiar imagen"), `terminal.imagePaste`:
+  - `auto` (por defecto): si corre un agente en el panel (se le pregunta al backend en el acto:
+    el monitor puede estar apagado o atrasado) se le **reenvía su tecla** y el agente lee el
+    portapapeles por su cuenta; si no, la imagen se guarda como PNG y se **pega su ruta**;
+  - `key`: siempre la tecla (sin agente, Ctrl+V cruda, `0x16`, para el programa que sea);
+  - `path`: siempre la ruta.
+  Las teclas del navegador disparan `paste`: un listener en captura sobre `window` lo toma antes
+  que xterm solo cuando no hay texto y hay un ítem `image/*` (si no, xterm pegaba nada y el
+  programa nunca veía la tecla). Los demás gestos leen con `navigator.clipboard.read()`
+  (Chromium entrega los bitmaps como `image/png`; si falla, `readText`).
+- **La tecla de cada agente en Windows** (verificado en el código de cada uno; ninguna prueba con
+  agentes reales). A través de ConPTY Ctrl+V = `0x16` y Alt+V = `ESC v`; va por la cola de
+  entrada, como cualquier tecla:
+
+  | Agente | Tecla | De dónde sale |
+  |---|---|---|
+  | Claude Code | **Alt+V** | binario 2.1.329: `chat:imagePaste` es `alt+v` en Windows (`ctrl+v` solo en WSL, donde la terminal la toma para texto). Un pegado vacío no lee la imagen en Windows (solo en macOS/WSL). Lee la imagen con PowerShell (`System.Windows.Forms.Clipboard`) |
+  | Codex | Ctrl+V | código fuente (`keymap.rs`): `fixed.paste_image` = Ctrl+V y Ctrl+Alt+V. No instalado acá |
+  | Gemini CLI | Ctrl+V | 0.65.0: `input.paste` = Ctrl+V, Cmd+V o Alt+V; la imagen la lee con PowerShell y la guarda en el proyecto (`@ruta`) |
+  | agy | Ctrl+V | 1.5.13 (Go): Ctrl+V, y Alt+V como alternativa en Windows (su changelog) |
+
+- **Como archivo**: el frontend lleva la imagen a PNG (si no lo es: `createImageBitmap` +
+  `OffscreenCanvas`, así JPEG, WebP, GIF o BMP salen PNG), `save_pasted_image` la recibe como
+  cuerpo crudo del pedido (`InvokeBody::Raw`, sin base64), valida la firma PNG y un tope de 64 MB,
+  y la escribe en `%TEMP%\brisa-images\brisa-<ms>.png` (nunca pisa). La ruta se pega como un
+  pegado (bracketed si el programa lo pidió): **con un agente**, la ruta de Windows entre
+  comillas dobles (los cuatro sacan las comillas y la adjuntan: Claude Code y Codex reconocen
+  una ruta de imagen pegada, Gemini la convierte en `@ruta`; verificado en su código); **sin
+  agente**, con las comillas de la shell (`quotePath`, como el explorador).
+- **Limpieza**: las imágenes de Brisa (`brisa-*.png` de esa carpeta, nada más) de más de 6 horas
+  se borran al arrancar y antes de cada imagen nueva.
+- **"Pegar imagen como archivo"** (`terminal.pasteImageFile`, paleta y menú del panel, sin
+  atajo por defecto): siempre la ruta, aunque corra un agente o haya texto al lado.
+- **Soltar desde otras apps** (`dragdrop.rs`): wry solo acepta archivos (CF_HDROP) y rechaza el
+  resto; un navegador arrastra una imagen como **archivo virtual** (`FileGroupDescriptorW` +
+  `FileContents`: bytes sin ruta) y otras apps, un bitmap (`PNG`, `CF_DIBV5`, `CF_DIB`). Brisa
+  registra su propio `IDropTarget` en las ventanas de WebView2 cuando la página llama a
+  `drop_listen` (en cada carga), reemplazando el de wry, que igual queda activo hasta entonces y
+  deja `AllowExternalDrop(false)` (sin eso, un drop podía navegar la página). Archivos → rutas
+  (CF_HDROP o el arreglo de shell items para rutas largas, como wry) → `insertPaths`. Imagen →
+  la primera por orden: archivo virtual con nombre de imagen (los bytes originales), "PNG", DIB
+  (se le arma la cabecera de `.bmp`); se valida la firma (un link arrastrado es un `.url`
+  virtual: no es imagen). Los bytes esperan en Rust (`take_dropped_image`, los últimos 4) y la
+  página hace lo mismo que con "Pegar imagen como archivo" en el panel bajo el puntero. Las
+  zonas de soltar de la configuración (importar temas) solo toman archivos.
+- **e2e** (etapa `images`): la página pone un PNG en el portapapeles (`navigator.clipboard.write`),
+  Ctrl+V y clic derecho en PowerShell pegan la ruta de un PNG real; `key` sin agente le manda
+  `0x16` a `sink.mjs`; el agente falso de cada sabor recibe su tecla (imprime `IMAGEN <tecla>`;
+  la del otro, `TECLA … sin efecto`); `path`, la paleta y una imagen soltada (`debug_drop`: un
+  JPEG de "navegador" y un DIB de "otra app") pegan la ruta de un PNG. Los formatos reales de
+  OLE se prueban en `tests/dragdrop.rs` con `IDataObject` de verdad (`SHCreateDataObject`).
 
 ## Preset multi-agente y worktrees
 
@@ -1167,7 +1246,10 @@ src/                        Frontend (solo render + input)
   lib/appActions.ts         Qué hace cada acción (desde su atajo o la paleta)
   lib/blocks.ts             BlockTracker: bloques de comandos (OSC 133), margen, navegación, texto
   lib/blockActions.ts       Menú de un bloque (copiar, volver a ejecutar) y la API de bloques (contexto de la IA)
-  lib/agentMonitor.ts       Agentes por panel (trabajando/esperando/terminado) y notificaciones nativas
+  lib/agentMonitor.ts       Agentes por panel (quieto/trabajando/esperando/terminado) y notificaciones nativas
+  lib/agentState.ts         Estado de un agente: aviso de trabajo en pantalla, salida sostenida (puro, + test)
+  lib/imagePaste.ts         Imágenes al pegar (evento paste, portapapeles) y al soltar: tecla del agente o PNG + ruta
+  lib/imagePasteModel.ts    Tecla de cada agente, modo → qué hacer, cómo escribir la ruta (puro, + test)
   lib/multiAgent.ts         Preset multi-agente, worktrees por panel y su limpieza al cerrar
   lib/aiApi.ts              Punto de IPC de la IA (consultas con canal, cancelar, estado, API key, entorno)
   lib/aiActions.ts          Explicar / chat / comando: contexto, redacción, envío en streaming, cancelar, insertar
@@ -1199,7 +1281,7 @@ src/                        Frontend (solo render + input)
   lib/tabActions.ts         Cerrar con confirmación, cerrar ventana con la última tab, foco
   lib/appShortcuts.ts       Despacho de todos los atajos (un listener en captura sobre window)
   lib/keybindings.ts        copySelection (copiar y limpiar la selección)
-  lib/clipboard.ts          navigator.clipboard con fallback
+  lib/clipboard.ts          navigator.clipboard con fallback; readClipboard: texto o imagen
   lib/renderer.ts           GpuRenderer: WebGL solo mientras se ve, fallback al DOM, loseContext al ocultar
   lib/paneGeometry.ts       Rectángulos del layout → CSS de panes y divisores (gap, mínimo en px)
   lib/devHooks.ts           Solo dev: window.__terminal / __workspace / __ui / __settings / __layouts /
@@ -1230,6 +1312,10 @@ src-tauri/
                             escritura atómica, JSONC mínimo (sin Tauri)
   src/settings_commands.rs  Comandos de los archivos de config y del aspecto de la ventana (Mica/Acrylic)
   src/notifications.rs      Toasts de WinRT (AUMID registrado, clic → ventana al frente + panel), log de e2e
+  src/images.rs             Imágenes pegadas o soltadas: guardar PNG en %TEMP%\brisa-images, limpiar las viejas,
+                            firmas, DIB → BMP (sin Tauri; tests unitarios)
+  src/dragdrop.rs           Drop target propio (OLE): archivos, archivo virtual de un navegador, PNG / DIB
+  src/image_commands.rs     Comandos de imágenes: guardar, canal de drops, tomar la imagen soltada, debug_drop
   src/worktree.rs           Worktrees del preset multi-agente: crear, estado, borrar (solo los de Brisa)
   src/ai_commands.rs        Comandos de la IA (configurar, consultar con canal, cancelar, estado, API key)
   src/orchestrator_commands.rs  Comandos del orquestador (agentes, plan y trabajadores con canal, archivos, diff)
@@ -1263,10 +1349,12 @@ src-tauri/
                             errores, cancelación del árbol, credenciales, IA apagada
   tests/agents.rs           Orquestador con el claude falso: modelos detectados, trabajador que edita y
                             reporta costo, denegación → retomar, cancelar el árbol, plan, análisis, diff
+  tests/dragdrop.rs         Drop target con IDataObject reales: archivo virtual, link, PNG, DIB, CF_HDROP
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
-  fake-agent.mjs            Agente de IA falso (claude/codex/gemini/agy según el exe; /work, /bell, /osc9,
-                            /osc777, /after N, /tui S N [calm] = un TUI como Claude Code en una
+  fake-agent.mjs            Agente de IA falso (claude/codex/gemini/agy según el exe; /work [plain], /redraw,
+                            /lag, /bell, /osc9, /osc777, /after N, la tecla de imagen de cada sabor,
+                            /tui S N [calm] = un TUI como Claude Code en una
                             conversación larga; modo print = claude -p: texto, initialize, plan y
                             trabajador; ver "Pruebas con agentes" y "Rendimiento")
   sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
@@ -1286,8 +1374,8 @@ npm run build                           # typecheck (tsc) + build del frontend
 npm test                                # tests unitarios del frontend (node --test, sin dependencias)
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
-npm run e2e:smoke                       # lo esencial (~105 s): en cada cambio
-npm run e2e                             # todas las etapas (~6 min): para cerrar una fase
+npm run e2e:smoke                       # lo esencial (~105 s): solo si el usuario lo pide
+npm run e2e                             # todas las etapas (~6 min): la corre el usuario
 npm run e2e -- tabs,groups              # solo algunas etapas
 npm run e2e -- perf                     # rendimiento con dos agentes falsos (~60 s; ver "Rendimiento")
 E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en el puerto 9223
@@ -1338,9 +1426,12 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
   mode, bracketed paste, la secuencia de salto de línea de cada agente y "Ctrl+C dos veces para
   salir". Se ejecuta con un `node.exe` enlazado como `claude.exe` / `codex.exe` / `gemini.exe`,
   así la detección de agentes se prueba con el mismo nombre de imagen que el real. Para los
-  indicadores y notificaciones entiende `/work N` (spinner = trabajando), `/bell`,
-  `/osc9 texto`, `/osc777 título|texto` y `/after N <línea>` (lo mismo, N segundos después:
-  la prueba mientras tanto oculta el panel). El preset multi-agente de la e2e corre el agente
+  indicadores y notificaciones entiende `/work N` (spinner con el aviso de Claude Code
+  "(Ns · esc to interrupt)", borrado al terminar; `/work N plain`, sin aviso), `/redraw MS`
+  (redibuja su prompt quieto), `/lag MS` (eco atrasado), `/bell`, `/osc9 texto`,
+  `/osc777 título|texto` y `/after N <línea>` (lo mismo, N segundos después: la prueba mientras
+  tanto oculta el panel). Imita la tecla de imagen de cada agente en Windows (Claude Code
+  Alt+V; Codex Ctrl+V; Gemini y agy las dos): imprime `IMAGEN <tecla>`. El preset multi-agente de la e2e corre el agente
   falso poniendo `agents.commands` en su settings.json descartable.
 - **IA** (Fase 7B): ninguna prueba lanza `claude -p` real ni llama a la API real de Anthropic.
   El agente falso tiene modo `print` (`node fake-agent.mjs print <args>`): habla el stream-json
@@ -1397,21 +1488,30 @@ app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa 
 
 ## Regla de fases
 
-**Cada fase tiene que compilar y funcionar antes de empezar la siguiente.** Una fase está
-terminada solo si:
+**Cada fase tiene que compilar y funcionar antes de empezar la siguiente.** No se apilan fases
+sobre una rota; si algo queda pendiente, se anota en "Estado" antes de seguir.
 
-1. `npm run build` y `npm test` pasan sin errores.
-2. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` y `cargo test` pasan.
-3. `npm run e2e` pasa completo (cubre automáticamente casi todo el smoke test de abajo).
+**Pruebas (para ahorrar tokens; pedido del usuario, 2026-11-23):**
 
-Durante el trabajo, después de **cada cambio**: `npm run e2e:smoke` (arranque, Ctrl+C,
-Shift+Enter con agentes falsos, tabs, paneles, shell integration, estrés de entrada, explorador,
-settings.json en vivo, atajos configurables, sesión, bloques y cierre; ~105 s, tiene que quedar
-por debajo de 2 min). La suite completa (`npm run e2e`, ~6 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
-ni `src-tauri/`: el HMR de Vite o el rebuild de `tauri dev` reinician la app a mitad de camino.
-Cada etapa imprime su duración (`== etapa: N s`).
+- **Durante una tarea**, solo los tests de lo que cambió: los unitarios del módulo tocado
+  (`node --test --test-reporter=dot src/lib/<módulo>.test.ts`, `cargo test -q <filtro>`) y las
+  etapas e2e de esa área (`npm run e2e -- <etapa>[,<etapa>]`). **Ni la e2e completa ni el smoke**
+  salvo que el usuario lo pida explícitamente.
+- **Al terminar**: `npm run build`, `cargo fmt --check`, `cargo clippy --all-targets -- -D
+  warnings` y los tests del área tocada. Nada más.
+- **Un fallo sin relación con el cambio** no se investiga ni se vuelve a correr: una línea en el
+  reporte y se sigue.
+- **No repetir corridas que ya pasaron** para confirmar estabilidad.
+- **Salida silenciosa**: solo resumen y fallos (`--test-reporter=dot`, `cargo test -q`, la e2e
+  filtrada: `npm run e2e -- <etapa> 2>&1 | grep -E "^(FAIL|SKIP)|checks OK"`).
+- **La e2e completa la corre el usuario** a mano y pasa los fallos, si los hay.
+- **Reporte final corto**: qué cambió, qué se probó y qué tiene que probar a mano el usuario.
+  Sin tablas ni detalles salvo que haya algo importante.
 
-Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fases sobre una rota.
+Mientras corre cualquier e2e, no tocar `src/` ni `src-tauri/`: el HMR de Vite o el rebuild de
+`tauri dev` reinician la app a mitad de camino. Cada etapa imprime su duración (`== etapa: N s`);
+el smoke (`npm run e2e:smoke`, ~105 s) y la completa (`npm run e2e`, ~6 min) siguen existiendo
+para cuando el usuario los pida o los corra.
 
 ### Smoke test manual
 
@@ -1460,6 +1560,15 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   panel muestran trabajando / esperando / terminado. **A mano**: con el panel en otra tab, una
   notificación de Windows real; el clic trae Brisa al frente con ese panel. "Abrir multi-agente
   aquí" en un repo con worktrees; al cerrar la tab, los limpios se borran y uno con cambios pregunta.
+  Con Claude Code real quieto en su prompt (y mientras escribís en él): el badge dice solo
+  "Claude Code", nunca "trabajando"; trabajando dice "trabajando" y al terminar "espera tu
+  respuesta".
+- [ ] Imágenes (automatizado con el agente falso; **a mano y a criterio del usuario** con agentes
+  reales): una captura (Win+Shift+S) → Ctrl+V en Claude Code adjunta la imagen ([Image #1]);
+  lo mismo en Codex / Gemini / agy si están; en PowerShell pega la ruta de un PNG; "Pegar
+  imagen como archivo" desde la paleta. **A mano** (la e2e no arrastra entre procesos):
+  arrastrar una imagen desde Chrome/Edge y desde Firefox a un panel, y un archivo del
+  Explorador de Windows como siempre.
 - [ ] IA (automatizado con el claude falso y la API falsa; **a mano y a criterio del usuario**
   con Claude Code real o una API key real): un comando que falla → "Explicar / arreglar" →
   respuesta en el panel e "Insertar" lo escribe sin ejecutar; `Ctrl+I` con "matá el proceso que
@@ -1495,7 +1604,7 @@ Todos los atajos de la tabla (salvo los del mouse y los internos de un widget) s
 settings.json (ver "Atajos configurables"). Sin atajo por defecto, solo desde la paleta: cerrar
 tab, cerrar las demás, duplicar, quitar del grupo, igualar paneles, seleccionar todo, limpiar,
 ver ocultos, guardar layouts, abrir settings.json / layouts.json, abrir multi-agente aquí, abrir
-orquestador aquí, explicar el último comando que falló (IA).
+orquestador aquí, explicar el último comando que falló (IA), pegar imagen como archivo.
 
 | Atajo | Acción |
 |---|---|
@@ -1667,6 +1776,15 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   hover: `TrackMouseEvent` ve el cursor real en otro lado y manda `WM_NCMOUSELEAVE` en el acto; la
   e2e prueba el estado con "presionado". Los Snap Layouts los dibuja Windows: verificados por el
   hit-test (`HTMAXBUTTON`), lo visual queda en el smoke manual.
+- **Claude Code en Windows pega imágenes con Alt+V, no con Ctrl+V** (`chat:imagePaste`; Ctrl+V
+  solo en WSL) y un pegado vacío no lee el portapapeles (solo en macOS/WSL): reenviar Ctrl+V o
+  pegar "nada" no sirve. Cada agente tiene su tecla (ver "Imágenes: pegar y soltar").
+- **wry solo acepta archivos en un drop**: devuelve `DROPEFFECT_NONE` si no hay CF_HDROP ni
+  shell items con ruta, así que una imagen arrastrada desde un navegador (archivo virtual) ni
+  llegaba a la página. Brisa reemplaza su `IDropTarget` (`dragdrop.rs`) cuando la página llama a
+  `drop_listen`; wry queda habilitado a propósito por su `AllowExternalDrop(false)`. Si un día
+  WebView2 recrea sus ventanas hijas (no pasa al recargar), el drop vuelve a ser el de wry
+  (archivos sí, imágenes no) hasta la próxima carga de la página.
 - **Un toast tapa la terminal**: la "marca del bloque que no aparece bajo el mouse" (vista en la
   7A y otra vez en la 7B) era un toast de la etapa anterior (`layouts`, `session`) justo bajo el
   puntero: el panel recibía `mouseleave` con `relatedTarget = toast`. `freshTab()` y la
@@ -2178,6 +2296,37 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   - **No verificado**: Claude Code y agy reales (regla de pruebas; el patrón de Ink del agente
     falso sale de cómo dibuja Ink, no de una captura de Claude Code), una máquina más lenta, y el
     eco por debajo de 16 ms (no alcanzable con el ConPTY del sistema: ~16,5 ms son de conhost).
+- **Imágenes al pegar y soltar; indicador de agentes: completo y verificado (2026-11-23).**
+  Bug: con una imagen (y sin texto) en el portapapeles, Ctrl+V no hacía nada (xterm pegaba
+  texto vacío y el programa nunca recibía la tecla). Ahora, con `terminal.imagePaste` (`auto`
+  por defecto, `key`, `path`): a un agente se le reenvía **su** tecla para que lea el
+  portapapeles (Claude Code Alt+V; Codex, Gemini y agy Ctrl+V; investigado en el código de cada
+  uno: los binarios y paquetes instalados acá y el fuente de Codex); sin agente, la imagen se
+  guarda como PNG en `%TEMP%\brisa-images` (se borra a las 6 h) y se pega su ruta entre comillas.
+  "Pegar imagen como archivo" en la paleta y el menú del panel. Arrastrar imágenes desde un
+  navegador u otra app (no solo archivos): drop target propio en Rust que reemplaza al de wry
+  (archivo virtual, PNG, DIB → PNG en la página → misma ruta pegada). Otro bug: el indicador
+  decía "Claude Code · trabajando" con Claude Code quieto en su prompt (cualquier redibujo o un
+  eco atrasado contaba como trabajo): ahora manda el aviso de trabajo en pantalla ("esc to
+  interrupt" / "(… esc to cancel)"), con salida sostenida como respaldo, y un estado *quieto*
+  nuevo (solo el nombre). Sin dependencias nuevas (`windows-core` y las features de `windows`
+  ya estaban en el árbol por wry).
+  - `npm test` de lo tocado: `imagePasteModel` (4: tecla por agente y modo, comillas), `agentState`
+    (4: avisos de los cuatro agentes y lo que no lo es, redibujos y ráfagas, aviso aprendido,
+    silencio), modelo de workspace, esquema de settings y atajos.
+  - `cargo test`: `images` (5: guardar sin pisar, solo PNG y con tope, limpieza de las viejas y
+    solo las nuestras, firmas, DIB → BMP con máscaras y paleta), `dragdrop` (2: descriptor de
+    archivos virtuales, solo imágenes reales) y `tests/dragdrop.rs` (4, con `IDataObject` reales:
+    imagen de navegador como archivo virtual con el tamaño del descriptor, link arrastrado,
+    PNG y DIB de otra app, CF_HDROP con tildes y espacios).
+  - `npm run e2e -- clipboard,explorercd,behavior,agents,images`: 57/57 en 93 s. Etapa nueva
+    `images` (13 checks); `agents` suma 3 (quieto con redibujos y eco atrasado, redibujo rápido
+    después de trabajar, agente sin aviso); `explorercd` suelta archivos con `debug_drop`.
+  - **No verificado**: los agentes reales leyendo la imagen con su tecla (regla de pruebas; las
+    teclas salen de su código: Claude Code 2.1.329, Gemini 0.65.0, agy 1.5.13, Codex por su
+    fuente), el aviso de trabajo de cada agente en pantalla (sale de sus strings, no de una
+    captura), un arrastre real desde Chrome/Edge/Firefox u otra app (la e2e entra por
+    `debug_drop`; los formatos OLE, por `tests/dragdrop.rs`). Queda en el smoke manual.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
