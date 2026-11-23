@@ -21,6 +21,8 @@ import { promptReady } from '../lib/initialCommands';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { getPane, registerPane, unregisterPane, type PaneHandle } from '../lib/terminalRegistry';
 import { TerminalSession } from '../lib/terminalSession';
+import { throttleLatest } from '../lib/throttle';
+import { coalesceViewportSync } from '../lib/xtermViewport';
 import { profileFor } from '../store/profiles';
 import { useSettings } from '../store/settings';
 import { loadSystemInfo } from '../store/system';
@@ -34,6 +36,8 @@ import { AgentBadge } from './AgentBadge';
  * shell that stays silent this long gets the status bar notice (it clears if it reports later).
  */
 const INTEGRATION_TIMEOUT_MS = 20_000;
+/** At most one title update per pane in this window (see `throttleLatest`). */
+const TITLE_MS = 150;
 
 /** Links open on Ctrl+click (like VS Code and Windows Terminal), never on a plain click. */
 function openLink(event: MouseEvent, uri: string): void {
@@ -94,6 +98,7 @@ export const TerminalPane = memo(
       term.loadAddon(search);
       term.loadAddon(new WebLinksAddon(openLink));
       term.open(inner);
+      coalesceViewportSync(term);
       host.style.background = look.background;
       setLigatures(term, look.ligatures);
       host.dataset.renderer = 'dom';
@@ -219,7 +224,10 @@ export const TerminalPane = memo(
       });
       observer.observe(inner);
 
-      const titleSubscription = term.onTitleChange((title) => workspace().setPaneTitle(paneId, title));
+      // Agents animate their title (a spinner, every frame): the tab follows a few times per
+      // second. Every update runs all the store's selectors.
+      const setTitle = throttleLatest((title: string) => workspace().setPaneTitle(paneId, title), TITLE_MS);
+      const titleSubscription = term.onTitleChange(setTitle);
 
       // Theme, font, zoom, cursor...: applied live (also when the pane's profile changes, or the
       // profile's theme). Hidden panes refit when shown.
@@ -262,6 +270,7 @@ export const TerminalPane = memo(
         term.textarea?.removeEventListener('blur', onBlur);
         host.removeEventListener('pointerdown', onFocus);
         titleSubscription.dispose();
+        setTitle.cancel();
         window.clearTimeout(integrationTimer);
         integration.dispose();
         unregisterPane(paneId, handle);

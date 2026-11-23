@@ -126,3 +126,25 @@ export function listenNotifications(onActivate: (tag: string) => void): Promise<
 export function debugNotificationClick(tag: string): Promise<void> {
   return invoke('debug_notification_click', { tag });
 }
+
+/** Output counters of one session (bytes read from the PTY, batches sent, backlog). */
+export interface PtyOutputStats {
+  bytesRead: number;
+  reads: number;
+  batches: number;
+  maxBatch: number;
+  backlog: number;
+  maxBacklog: number;
+  /** Flow-control pauses asked by the page. */
+  pauses: number;
+}
+
+/** Development only: the output counters of every session (the performance e2e reads them). */
+export function debugPtyStats(): Promise<[SessionId, PtyOutputStats][]> {
+  return invoke('debug_pty_stats');
+}
+
+/** Flow control: stop reading the session's output while its terminal catches up, or resume. */
+export function pauseOutput(sessionId: SessionId, paused: boolean): Promise<void> {
+  return invoke('pause_output', { sessionId, paused });
+}

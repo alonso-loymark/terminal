@@ -886,6 +886,444 @@ function agentExe(name) {
   return exe;
 }
 
+// ---------------------------------------------------------------- performance helpers
+/**
+ * CPU time (ms, since each process started) and private memory (MB) of the app's process tree,
+ * by role: the app (Rust), WebView2 (renderer, GPU, browser, others), ConPTY's conhost, the
+ * shells and the agents.
+ */
+function appProcesses() {
+  const script = `
+$all = Get-CimInstance Win32_Process
+$kids = @{}
+foreach ($p in $all) { $kids[[int]$p.ParentProcessId] += ,$p }
+function Get-Tree([int]$id) { foreach ($c in $kids[$id]) { $c; Get-Tree ([int]$c.ProcessId) } }
+$out = @{}
+foreach ($p in @($all | Where-Object ProcessId -eq ${appPid}) + @(Get-Tree ${appPid})) {
+  $cmd = [string]$p.CommandLine
+  $role = if ([int]$p.ProcessId -eq ${appPid}) { 'app' }
+    elseif ($p.Name -eq 'msedgewebview2.exe') {
+      if ($cmd -match '--type=renderer') { 'renderer' } elseif ($cmd -match '--type=gpu-process') { 'gpu' } elseif ($cmd -notmatch '--type=') { 'browser' } else { 'webview-otros' }
+    }
+    elseif ($p.Name -match '^(conhost|OpenConsole)\\.exe$') { 'conpty' }
+    elseif ($p.Name -match '^(powershell|pwsh)\\.exe$') { 'shells' }
+    elseif ($p.Name -match '^(claude|agy|codex|gemini|node)\\.exe$') { 'agentes' }
+    else { 'otros' }
+  if (-not $out[$role]) { $out[$role] = @{ cpu = 0.0; mem = 0.0 } }
+  $out[$role].cpu += ([double]$p.KernelModeTime + [double]$p.UserModeTime) / 10000
+  $out[$role].mem += [math]::Round($p.PrivatePageCount / 1MB, 1)
+}
+$out | ConvertTo-Json -Compress`;
+  return { at: Date.now(), roles: JSON.parse(powershell(script)) };
+}
+/** CPU % of one core per role between two `appProcesses()` snapshots, and memory at the end. */
+function cpuBetween(a, b) {
+  const seconds = (b.at - a.at) / 1000;
+  const out = {};
+  for (const [role, now] of Object.entries(b.roles)) {
+    const before = a.roles[role]?.cpu ?? 0;
+    out[role] = { cpu: Math.round(((now.cpu - before) / 10 / seconds) * 10) / 10, mem: Math.round(now.mem) };
+  }
+  return out;
+}
+const percentile = (values, q) => {
+  if (!values.length) return null;
+  const sorted = [...values].sort((x, y) => x - y);
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+};
+const round1 = (v) => (v === null || v === undefined ? null : Math.round(v * 10) / 10);
+const dist = (values) => ({
+  n: values.length,
+  p50: round1(percentile(values, 0.5)),
+  p95: round1(percentile(values, 0.95)),
+  max: round1(values.length ? Math.max(...values) : null),
+});
+/** Frames per second, frame-time percentiles and the share of frames over two vsyncs. */
+function frameStats(stamps) {
+  const deltas = stamps.slice(1).map((t, i) => t - stamps[i]);
+  const seconds = stamps.length > 1 ? (stamps.at(-1) - stamps[0]) / 1000 : 0;
+  return {
+    fps: seconds ? round1(deltas.length / seconds) : 0,
+    p95: round1(percentile(deltas, 0.95)),
+    max: round1(deltas.length ? Math.max(...deltas) : null),
+    long: deltas.length ? round1((100 * deltas.filter((d) => d > 33.4).length) / deltas.length) : null,
+  };
+}
+/**
+ * Probes in the page (dev only): per pane, how stale the output is when xterm parses it (the
+ * fake agent's OSC 5379 stamps), bytes handed to xterm vs parsed (its write buffer), renders;
+ * long tasks, event-loop lag, frames (rAF) and key echo.
+ */
+const installPerfProbe = (panes) =>
+  page.evaluate((panes) => {
+    window.__perf?.dispose();
+    const disposers = [];
+    const per = () => Object.fromEntries(panes.map((id) => [id, 0]));
+    const p = {
+      stale: Object.fromEntries(panes.map((id) => [id, []])),
+      written: per(),
+      parsed: per(),
+      maxPending: per(),
+      renders: per(),
+      lastWriteAt: per(),
+      // Synchronized output (DEC 2026) begin/end marks, per pane: rendering waits in between.
+      sync: Object.fromEntries(panes.map((id) => [id, { begin: 0, end: 0 }])),
+      longTasks: [],
+      lag: [],
+      frames: null,
+    };
+    for (const id of panes) {
+      const t = window.__paneTerminal(id);
+      disposers.push(t.parser.registerOscHandler(5379, (data) => (p.stale[id].push(Date.now() - Number(data)), true)));
+      disposers.push(t.onRender(() => p.renders[id]++));
+      const syncMark = (key) => (params) => {
+        if (params.includes(2026)) p.sync[id][key]++;
+        return false;
+      };
+      disposers.push(t.parser.registerCsiHandler({ prefix: '?', final: 'h' }, syncMark('begin')));
+      disposers.push(t.parser.registerCsiHandler({ prefix: '?', final: 'l' }, syncMark('end')));
+      const original = t.write;
+      t.write = function (data, callback) {
+        const n = data.length;
+        p.written[id] += n;
+        p.lastWriteAt[id] = performance.now();
+        p.maxPending[id] = Math.max(p.maxPending[id], p.written[id] - p.parsed[id]);
+        return original.call(this, data, () => {
+          p.parsed[id] += n;
+          callback?.();
+        });
+      };
+      disposers.push({ dispose: () => delete t.write });
+    }
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) p.longTasks.push(entry.duration);
+    });
+    observer.observe({ type: 'longtask' });
+    disposers.push({ dispose: () => observer.disconnect() });
+    let expected = performance.now() + 50;
+    let lagTimer;
+    const tick = () => {
+      const now = performance.now();
+      p.lag.push(now - expected);
+      expected = now + 50;
+      lagTimer = setTimeout(tick, 50);
+    };
+    lagTimer = setTimeout(tick, 50);
+    disposers.push({ dispose: () => clearTimeout(lagTimer) });
+    p.reset = () => {
+      for (const id of panes) p.stale[id] = [];
+      p.longTasks = [];
+      p.lag = [];
+      for (const id of panes) p.maxPending[id] = p.written[id] - p.parsed[id];
+    };
+    p.snapshot = () => ({
+      stale: p.stale,
+      maxPending: { ...p.maxPending },
+      pending: Object.fromEntries(panes.map((id) => [id, p.written[id] - p.parsed[id]])),
+      renders: { ...p.renders },
+      longTasks: p.longTasks,
+      lag: p.lag,
+    });
+    p.startFrames = () => {
+      p.frames = [];
+      const loop = (ts) => {
+        if (!p.frames) return;
+        p.frames.push(ts);
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    };
+    p.stopFrames = () => {
+      const frames = p.frames ?? [];
+      p.frames = null;
+      return frames;
+    };
+    /**
+     * Key echo: from the keydown (its timestamp is when the browser got it, so time waiting
+     * for a busy main thread counts) to the first render that shows the key: in the fake TUI's
+     * input line (two rows above the bottom, from column 3), or after the shell's prompt
+     * ('prompt'). The fake TUI also stamps when each key reached it (OSC 5380, wall clock),
+     * which splits the latency into "to the program" and "back to the screen".
+     */
+    p.startEcho = (id, seq, where) => {
+      const t = window.__paneTerminal(id);
+      const echo = { sent: [], seen: [], got: [], wrote: [], shown: '' };
+      const sync0 = { ...p.sync[id] };
+      const onKey = (event) => {
+        if (event.key.length === 1 && seq.includes(event.key)) echo.sent.push(event.timeStamp);
+      };
+      window.addEventListener('keydown', onKey, true);
+      const stamp = t.parser.registerOscHandler(5380, (data) => (echo.got.push(Number(data) - performance.timeOrigin), true));
+      const render = t.onRender(() => {
+        if (echo.seen.length >= echo.sent.length) return;
+        const b = t.buffer.active;
+        let shown;
+        if (where === 'prompt') {
+          // The logical line: in a narrow pane the prompt and the keys wrap over rows.
+          const end = b.baseY + b.cursorY;
+          let start = end;
+          while (start > 0 && b.getLine(start)?.isWrapped) start--;
+          let line = '';
+          for (let y = start; y <= end; y++) line += b.getLine(y)?.translateToString(y === end) ?? '';
+          shown = line.slice(line.lastIndexOf('> ') + 2);
+          echo.line = line;
+        } else {
+          // The fake TUI's input box ("> " and the keys), near the bottom: usually two rows above
+          // it, but a frame may leave its layout one row off.
+          shown = '';
+          for (let y = b.baseY + t.rows - 1; y >= b.baseY + t.rows - 5; y--) {
+            const row = b.getLine(y)?.translateToString(true) ?? '';
+            if (row.startsWith('> ')) {
+              shown = row.slice(2);
+              break;
+            }
+          }
+        }
+        echo.shown = shown.slice(0, seq.length + 4);
+        let n = 0;
+        while (n < shown.length && shown[n] === seq[n]) n++;
+        const now = performance.now();
+        while (echo.seen.length < Math.min(n, echo.sent.length)) {
+          echo.wrote.push(p.lastWriteAt[id] - echo.sent[echo.seen.length]);
+          echo.seen.push(now - echo.sent[echo.seen.length]);
+        }
+      });
+      p.stopEcho = () => {
+        window.removeEventListener('keydown', onKey, true);
+        render.dispose();
+        stamp.dispose();
+        echo.sync = { begin: p.sync[id].begin - sync0.begin, end: p.sync[id].end - sync0.end };
+        echo.timeOrigin = performance.timeOrigin;
+        return echo;
+      };
+    };
+    /**
+     * From the user's input (pointerdown or keydown) to the next paint after the UI changed
+     * (another tab active, the explorer shown or hidden).
+     */
+    p.measureUi = (kind) =>
+      new Promise((resolve) => {
+        let start = null;
+        const onInput = (event) => {
+          if (start === null) start = event.timeStamp;
+        };
+        const type = kind === 'key' ? 'keydown' : 'pointerdown';
+        window.addEventListener(type, onInput, true);
+        const tab0 = window.__workspace.getState().activeTabId;
+        const explorer0 = window.__explorer.getState().visible;
+        let done = false;
+        const finish = (value) => {
+          if (done) return;
+          done = true;
+          window.removeEventListener(type, onInput, true);
+          for (const unsubscribe of unsubscribes) unsubscribe();
+          resolve(value);
+        };
+        const changed = () => {
+          if (window.__workspace.getState().activeTabId === tab0 && window.__explorer.getState().visible === explorer0) return;
+          requestAnimationFrame(() => setTimeout(() => finish(start === null ? null : performance.now() - start)));
+        };
+        const unsubscribes = [window.__workspace.subscribe(changed), window.__explorer.subscribe(changed)];
+        setTimeout(() => finish(null), 5000);
+      });
+    p.dispose = () => {
+      for (const d of disposers) d.dispose();
+      delete window.__perf;
+    };
+    window.__perf = p;
+  }, panes);
+/** Input to next paint (ms) of switching tabs by click, there and back, and Ctrl+B twice. */
+async function uiLatency(tabs) {
+  const ui = [];
+  for (const target of tabs) {
+    await page.evaluate(() => {
+      window.__perfUi = window.__perf.measureUi('pointer');
+    });
+    await page.click(tabSel(target));
+    ui.push(await page.evaluate(() => window.__perfUi));
+    await sleep(300);
+  }
+  for (let i = 0; i < 2; i++) {
+    await page.evaluate(() => {
+      window.__perfUi = window.__perf.measureUi('key');
+    });
+    await page.keyboard.press('Control+B');
+    ui.push(await page.evaluate(() => window.__perfUi));
+    await sleep(300);
+  }
+  return { ...dist(ui.filter((v) => v !== null)), missed: ui.filter((v) => v === null).length };
+}
+/**
+ * A Chromium trace of the renderer's main thread for `ms`: self time by event (what the
+ * CPU profile calls "(program)": IPC, script compilation, paint...). PERF_TRACE=1 only.
+ */
+async function traceMainThread(ms) {
+  const categories = ['devtools.timeline', 'v8', 'v8.execute', 'blink', 'ipc', 'toplevel', 'disabled-by-default-devtools.timeline'].join(',');
+  await cdp.send('Tracing.start', { categories, transferMode: 'ReturnAsStream' });
+  await sleep(ms);
+  const complete = new Promise((resolve) => cdp.once('Tracing.tracingComplete', resolve));
+  await cdp.send('Tracing.end');
+  const { stream } = await complete;
+  let data = '';
+  for (;;) {
+    const chunk = await cdp.send('IO.read', { handle: stream, size: 1 << 20 });
+    data += chunk.base64Encoded ? Buffer.from(chunk.data, 'base64').toString('utf8') : chunk.data;
+    if (chunk.eof) break;
+  }
+  await cdp.send('IO.close', { handle: stream });
+  const parsed = JSON.parse(data);
+  const events = Array.isArray(parsed) ? parsed : parsed.traceEvents;
+  const main = events.find((e) => e.ph === 'M' && e.name === 'thread_name' && e.args?.name === 'CrRendererMain');
+  const onMain = events.filter((e) => main && e.pid === main.pid && e.tid === main.tid && e.ph === 'X' && typeof e.dur === 'number').sort((a, b) => a.ts - b.ts || b.dur - a.dur);
+  const self = new Map();
+  const stack = [];
+  for (const e of onMain) {
+    while (stack.length && stack.at(-1).ts + stack.at(-1).dur <= e.ts) stack.pop();
+    const parent = stack.at(-1);
+    if (parent) self.set(parent.name, (self.get(parent.name) ?? 0) - e.dur);
+    self.set(e.name, (self.get(e.name) ?? 0) + e.dur);
+    stack.push(e);
+  }
+  fs.writeFileSync(path.join(ARTIFACTS, `perf-${process.env.PERF_LABEL || 'run'}.trace.json`), data);
+  return [...self.entries()].sort((a, b) => b[1] - a[1]).slice(0, 18).map(([name, us]) => `${round1((100 * us) / (ms * 1000))}% ${name}`);
+}
+/** Main-thread time (CDP Performance domain) between two snapshots, as % of the wall clock. */
+async function mainThread() {
+  const { metrics } = await cdp.send('Performance.getMetrics');
+  return Object.fromEntries(metrics.map((m) => [m.name, m.value]));
+}
+function mainThreadBetween(a, b) {
+  const wall = b.Timestamp - a.Timestamp;
+  const pct = (name) => round1((100 * (b[name] - a[name])) / wall);
+  return { busy: pct('TaskDuration'), script: pct('ScriptDuration'), layout: pct('LayoutDuration'), style: pct('RecalcStyleDuration'), heapMB: round1(b.JSHeapUsedSize / 1048576) };
+}
+/** Self time of a CPU profile by function and by area (xterm, app, React, IPC, GC...). */
+function profileSummary(profile) {
+  const nodes = new Map(profile.nodes.map((n) => [n.id, n]));
+  const self = new Map();
+  const areas = new Map();
+  let total = 0;
+  const area = (frame) => {
+    const url = frame.url;
+    if (!url) return frame.functionName || '(sin nombre)';
+    if (/xterm/i.test(url)) return 'xterm';
+    if (/react|scheduler/.test(url)) return 'react';
+    if (/tauri/i.test(url)) return 'tauri-ipc';
+    if (/zustand/.test(url)) return 'zustand';
+    if (/\/src\//.test(url)) return 'app';
+    return 'otros';
+  };
+  for (let i = 0; i < profile.samples.length; i++) {
+    const node = nodes.get(profile.samples[i]);
+    const dt = profile.timeDeltas[i + 1] ?? 0;
+    const frame = node.callFrame;
+    const file = frame.url ? frame.url.split('/').pop().split('?')[0] : '';
+    const key = `${frame.functionName || '(anónima)'}${file ? ` ${file}:${frame.lineNumber + 1}` : ''}`;
+    self.set(key, (self.get(key) ?? 0) + dt);
+    areas.set(area(frame), (areas.get(area(frame)) ?? 0) + dt);
+    total += dt;
+  }
+  const idle = areas.get('(idle)') ?? 0;
+  const busy = total - idle;
+  const top = [...self.entries()]
+    .filter(([k]) => k !== '(idle)')
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 15)
+    .map(([k, us]) => `${round1((100 * us) / busy)}% ${k}`);
+  const byArea = Object.fromEntries(
+    [...areas.entries()]
+      .filter(([k]) => k !== '(idle)')
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, us]) => [k, round1((100 * us) / busy)]),
+  );
+  return { busyPct: round1((100 * busy) / total), byArea, top };
+}
+/** Wheel events over a pane every ~16 ms (CDP), with the frames the page drew meanwhile. */
+async function wheelScroll(id, ms, deltaY) {
+  const box = await paneBox(id);
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  const viewport = () => page.evaluate((id) => window.__paneTerminal(id).buffer.active.viewportY, id);
+  const before = await viewport();
+  await page.evaluate(() => window.__perf.startFrames());
+  const end = Date.now() + ms;
+  let sent = 0;
+  while (Date.now() < end) {
+    const t0 = Date.now();
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY });
+    sent++;
+    const wait = 16 - (Date.now() - t0);
+    if (wait > 0) await sleep(wait);
+  }
+  const frames = await page.evaluate(() => window.__perf.stopFrames());
+  return { ...frameStats(frames), wheelPerSecond: round1(sent / (ms / 1000)), movedLines: before - (await viewport()) };
+}
+/**
+ * Types `seq` into a pane's fake TUI (one key every `gap` ms) and returns the echo latencies.
+ * Enter clears the TUI's input box afterwards.
+ */
+async function echoLatency(id, seq, { gap = 120, where = 'tui' } = {}) {
+  await page.evaluate(([id, seq, where]) => window.__perf.startEcho(id, seq, where), [id, seq, where]);
+  // At an idle prompt each key is one exchange: the backend's stamps after each one say where
+  // the time went (see the split below).
+  const session = where === 'prompt' ? (await paneState(id)).sessionId : null;
+  const stamps = [];
+  for (const ch of seq) {
+    await page.keyboard.press(ch);
+    await sleep(gap);
+    if (session !== null) stamps.push(new Map(await page.evaluate(() => window.__ptyStats())).get(session));
+  }
+  await sleep(500);
+  const echo = await page.evaluate(() => window.__perf.stopEcho());
+  // The fake TUI clears its input box with Enter; PSReadLine clears the line with Escape.
+  await page.keyboard.press(where === 'prompt' ? 'Escape' : 'Enter');
+  const lost = echo.sent.length - echo.seen.length;
+  const split = echo.got.length
+    ? {
+        toProgram: dist(echo.got.slice(0, echo.sent.length).map((got, i) => got - echo.sent[i])),
+        toScreen: dist(echo.seen.slice(0, echo.got.length).map((seen, i) => seen - (echo.got[i] - echo.sent[i]))),
+      }
+    : {};
+  // Keydown → last bytes handed to xterm before the render that showed the key, and from
+  // there to that render.
+  const handed = { toXterm: dist(echo.wrote), xtermToScreen: dist(echo.seen.map((seen, i) => seen - echo.wrote[i])), sync2026: echo.sync };
+  const backend = {};
+  if (stamps.length) {
+    const parts = { toBackend: [], programAndConpty: [], flush: [], toPage: [], toScreen: [] };
+    echo.seen.forEach((seen, i) => {
+      const s = stamps[i];
+      if (!s) return;
+      const key = echo.timeOrigin + echo.sent[i];
+      const [input, read, sent] = [s.lastInputUs / 1000, s.lastReadUs / 1000, s.lastSentUs / 1000];
+      parts.toBackend.push(input - key);
+      parts.programAndConpty.push(read - input);
+      parts.flush.push(sent - read);
+      parts.toPage.push(key + echo.wrote[i] - sent);
+      parts.toScreen.push(seen - echo.wrote[i]);
+    });
+    backend.parts = Object.fromEntries(Object.entries(parts).map(([k, v]) => [k, dist(v).p50]));
+  }
+  return { ...dist(echo.seen), lost, ...split, ...handed, ...backend, ...(lost ? { shown: echo.shown, line: echo.line } : {}) };
+}
+/** Output counters of the Rust side for some panes, as deltas between two snapshots. */
+const ptyStats = async (panes) => {
+  const stats = new Map(await page.evaluate(() => window.__ptyStats()));
+  const out = {};
+  for (const id of panes) out[id] = stats.get((await paneState(id)).sessionId) ?? null;
+  return { at: Date.now(), out };
+};
+function ptyBetween(a, b) {
+  const seconds = (b.at - a.at) / 1000;
+  return Object.fromEntries(
+    Object.entries(b.out).map(([id, now]) => {
+      const before = a.out[id];
+      const batches = now.batches - before.batches;
+      const bytes = now.bytesRead - before.bytesRead;
+      return [id, { MBps: round1(bytes / 1048576 / seconds), batchesPerS: round1(batches / seconds), avgBatchKB: round1(batches ? bytes / batches / 1024 : 0), maxBatchKB: round1(now.maxBatch / 1024), maxBacklogKB: round1(now.maxBacklog / 1024), backlogKB: round1(now.backlog / 1024), pausesPerS: round1(((now.pauses ?? 0) - (before.pauses ?? 0)) / seconds) }];
+    }),
+  );
+}
+
 // ---------------------------------------------------------------- stages
 const stages = {
   async startup() {
@@ -4229,6 +4667,156 @@ const stages = {
     await freshTab();
   },
 
+  async perf() {
+    // Two fake agents side by side, like Claude Code and agy in long conversations (`/tui` in
+    // fake-agent.mjs): the left one with 12 000 lines of transcript redrawing its bottom region
+    // (Ink's eraseLines), the right one repainting its whole transcript every frame (Ink once
+    // the answer is taller than the screen). Measures what the user feels: scroll frames, key
+    // echo, how stale the screen is, the UI under load, main thread, CPU, memory and the Rust
+    // side. PERF_LABEL names the report (e2e/artifacts/perf-<label>.json + .cpuprofile).
+    const label = process.env.PERF_LABEL || 'run';
+    const report = { label, at: new Date().toISOString() };
+    await freshTab();
+    const otherTab = (await wsState()).active;
+    const agentsTab = await openTab();
+    await page.keyboard.press('Alt+Shift+D');
+    await waitPanes(2);
+    const right = await activePane();
+    const left = leaves((await activeTab()).layout).find((p) => p !== right);
+    if (!left) throw new Error(`Alt+Shift+D no dividió el panel a tiempo (${await focusReport()})`);
+    // The whole machine's CPU load: other programs compete with the app (the user's own agents,
+    // a build) and the numbers under load depend on it.
+    report.machineCpu = Number(powershell('(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average'));
+    await installPerfProbe([left, right]);
+    // The floor: echo at an idle PowerShell prompt, nothing else running.
+    await waitUntil(() => idle(right), 20000);
+    // PSReadLine's first key is slow (it loads its predictor): warm it up.
+    await page.keyboard.press('a');
+    await sleep(1500);
+    await page.keyboard.press('Escape');
+    await sleep(300);
+    report.echoIdle = await echoLatency(right, 'qzxjvkqzxjvkqzxjvkqz', { where: 'prompt' });
+    await waitUntil(atShellPrompt, 3000);
+    await run(`& '${agentExe('agy')}' '${FAKE_AGENT}'`, { waitPrompt: false });
+    await waitFor('FAKE-AGENT agy listo', { source: screen });
+    await clickPane(left);
+    await run(`& '${agentExe('claude')}' '${FAKE_AGENT}'`, { waitPrompt: false });
+    await waitFor('FAKE-AGENT claude listo', { source: screen });
+    await cdp.send('Performance.enable');
+    // xterm 6.0 syncs its scrollbar on every scrolled line; Brisa coalesces it per frame
+    // (lib/xtermViewport.ts, private API): an xterm upgrade that changes it shows up here.
+    const coalesced = await page.evaluate((ids) => ids.every((id) => window.__paneTerminal(id)._core?._viewport?.__brisaCoalesced === true), [left, right]);
+    check('perf: la sincronización del scrollbar de xterm va una vez por frame', coalesced);
+
+    // The long conversation: 12 000 lines into the left pane (its 10 000-line scrollback fills).
+    const dumpStart = Date.now();
+    await page.keyboard.type('/tui 120 12000 calm');
+    await page.keyboard.press('Enter');
+    const filled = await waitUntil(
+      () => page.evaluate((id) => window.__paneTerminal(id).buffer.active.length >= 10000, left),
+      30000,
+    );
+    report.dumpSeconds = round1((Date.now() - dumpStart) / 1000);
+    check('perf: el historial de 10 000 líneas se llena', filled, `${report.dumpSeconds} s`);
+    await sleep(1000);
+    // One agent drawing (the other one waits at its prompt).
+    report.echoSingle = await echoLatency(left, 'qzxjvkqzxjvkqzxjvkqzxjvkq');
+    await clickPane(right);
+    // PERF_REPAINT: lines of the right agent's transcript (repainted whole, every frame). With
+    // 10 000 the terminal used to fall seconds behind (the freeze reported with long sessions).
+    await page.keyboard.type(`/tui 120 ${Number(process.env.PERF_REPAINT) || 10000}`);
+    await page.keyboard.press('Enter');
+    await clickPane(left);
+    await sleep(2500);
+
+    // Under load: both agents drawing.
+    await page.evaluate(() => window.__perf.reset());
+    const cpu0 = appProcesses();
+    const main0 = await mainThread();
+    const pty0 = await ptyStats([left, right]);
+    await cdp.send('Profiler.enable');
+    await cdp.send('Profiler.setSamplingInterval', { interval: 250 });
+    await cdp.send('Profiler.start');
+    report.echoCalm = await echoLatency(left, 'qzxjvkqzxjvkqzxjvkqzxjvkq');
+    await clickPane(right);
+    report.echoRepaint = await echoLatency(right, 'qzxjvkqzxjvkqzxjvkqzxjvkq');
+    await clickPane(left);
+    report.scrollLoad = await wheelScroll(left, 3000, -100);
+    await page.evaluate((id) => window.__paneTerminal(id).scrollToBottom(), left);
+    // The UI under load: switch tabs by click and toggle the explorer.
+    report.uiLoad = await uiLatency([otherTab, agentsTab]);
+    const { profile } = await cdp.send('Profiler.stop');
+    const main1 = await mainThread();
+    const pty1 = await ptyStats([left, right]);
+    const cpu1 = appProcesses();
+    report.machineCpuLoad = Number(powershell('(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average'));
+    const probe = await page.evaluate(() => window.__perf.snapshot());
+    report.mainLoad = mainThreadBetween(main0, main1);
+    report.cpuLoad = cpuBetween(cpu0, cpu1);
+    report.pty = ptyBetween(pty0, pty1);
+    report.staleCalm = dist(probe.stale[left]);
+    report.staleRepaint = dist(probe.stale[right]);
+    report.xtermPendingKB = { calm: round1(probe.maxPending[left] / 1024), repaint: round1(probe.maxPending[right] / 1024) };
+    report.longTasks = { ...dist(probe.longTasks), totalMs: Math.round(probe.longTasks.reduce((a, b) => a + b, 0)) };
+    report.lag = dist(probe.lag);
+    report.profile = profileSummary(profile);
+    if (process.env.PERF_TRACE === '1') report.trace = await traceMainThread(2000);
+    fs.writeFileSync(path.join(ARTIFACTS, `perf-${label}.cpuprofile`), JSON.stringify(profile));
+
+    // The agents keep drawing in a tab that is not on screen.
+    await page.click(tabSel(otherTab));
+    await sleep(500);
+    await page.evaluate(() => window.__perf.reset());
+    const hiddenMain0 = await mainThread();
+    const hiddenCpu0 = appProcesses();
+    await sleep(3000);
+    const hiddenCpu1 = appProcesses();
+    report.mainHidden = mainThreadBetween(hiddenMain0, await mainThread());
+    report.cpuHidden = cpuBetween(hiddenCpu0, hiddenCpu1);
+    const hiddenProbe = await page.evaluate(() => window.__perf.snapshot());
+    report.staleHidden = dist([...hiddenProbe.stale[left], ...hiddenProbe.stale[right]]);
+    await page.click(tabSel(agentsTab));
+    await waitUntil(async () => (await wsState()).active === agentsTab, 3000);
+
+    // Stop both agents; then the same scroll with nothing running.
+    for (const id of [right, left]) {
+      await clickPane(id);
+      check(`perf: el agente del panel ${id === left ? 'izquierdo' : 'derecho'} sale`, await exitToPrompt(6));
+    }
+    await page.evaluate((id) => window.__paneTerminal(id).scrollToBottom(), left);
+    await sleep(500);
+    report.scrollIdle = await wheelScroll(left, 3000, -100);
+    report.uiIdle = await uiLatency([otherTab, agentsTab]);
+    report.memory = appMemory();
+    await page.evaluate(() => window.__perf.dispose());
+    await cdp.send('Profiler.disable');
+    await cdp.send('Performance.disable');
+    fs.writeFileSync(path.join(ARTIFACTS, `perf-${label}.json`), JSON.stringify(report, null, 2));
+
+    const line = (name, value) => console.log(`PERF ${name}: ${typeof value === 'string' ? value : JSON.stringify(value)}`);
+    for (const [key, value] of Object.entries(report)) if (key !== 'profile' && key !== 'trace') line(key, value);
+    for (const entry of report.trace ?? []) line('  traza', entry);
+    line('perfil (fuera de idle)', `${report.profile.busyPct}% ocupado; por área ${JSON.stringify(report.profile.byArea)}`);
+    for (const entry of report.profile.top) line('  self', entry);
+    check('perf: el scroll mueve el historial', report.scrollIdle.movedLines > 100 && report.scrollLoad.movedLines > 100, `${report.scrollIdle.movedLines} / ${report.scrollLoad.movedLines} líneas`);
+
+    // Thresholds (dev build, this machine; see "Rendimiento" in CLAUDE.md for the numbers
+    // before and after). Generous enough for a busy machine, tight enough for the old freeze.
+    const smooth = (s) => s.fps >= 50 && s.p95 <= 25;
+    const fmt = (s) => `${s.fps} FPS, p95 ${s.p95} ms`;
+    check('perf: scroll fluido con 10 000 líneas de historial', smooth(report.scrollIdle), fmt(report.scrollIdle));
+    check('perf: ... y con dos agentes dibujando', smooth(report.scrollLoad), fmt(report.scrollLoad));
+    const stale = [report.staleCalm, report.staleRepaint];
+    check('perf: la pantalla no se atrasa con dos agentes (salida → xterm p95 < 150 ms)', stale.every((s) => s.p95 !== null && s.p95 < 150), stale.map((s) => `p95 ${s.p95} ms`).join(' / '));
+    const pending = Math.max(report.xtermPendingKB.calm, report.xtermPendingKB.repaint);
+    check('perf: xterm no acumula salida (control de flujo: < 5 MB sin procesar)', pending < 5120, `${pending} KB`);
+    const ours = report.echoIdle.parts ? report.echoIdle.parts.toBackend + report.echoIdle.parts.flush + report.echoIdle.parts.toPage : null;
+    check('perf: eco en un prompt libre: la parte de Brisa (tecla → PTY, PTY → xterm) < 10 ms', ours !== null && ours < 10, `${round1(ours)} ms de ${report.echoIdle.p50} ms (ConPTY y el programa: ${report.echoIdle.parts?.programAndConpty} ms; hasta el frame: ${report.echoIdle.parts?.toScreen} ms)`);
+    check('perf: eco de teclas en un agente mientras el otro repinta (p50 < 60 ms, p95 < 150 ms, sin perder)', report.echoCalm.p50 < 60 && report.echoCalm.p95 < 150 && report.echoCalm.lost === 0, `p50 ${report.echoCalm.p50} ms, p95 ${report.echoCalm.p95} ms, perdidas ${report.echoCalm.lost}`);
+    check('perf: la interfaz responde con dos agentes (tabs y explorador, p95 < 150 ms)', report.uiLoad.missed === 0 && report.uiLoad.p95 < 150, `p50 ${report.uiLoad.p50} ms, p95 ${report.uiLoad.p95} ms`);
+    check('perf: hilo principal con dos agentes < 70 % (a la vista y ocultos)', report.mainLoad.busy < 70 && report.mainHidden.busy < 70, `${report.mainLoad.busy} % / ${report.mainHidden.busy} %`);
+    await closeOtherTabsNow();
+  },
   async passthrough() {
     // Ctrl+T / Ctrl+W are no longer app shortcuts: they must reach the program.
     await freshTab();

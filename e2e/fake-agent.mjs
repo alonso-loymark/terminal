@@ -13,6 +13,7 @@
 //   /osc9 text           an OSC 9 notification (iTerm2 / Windows Terminal style)
 //   /osc777 title|text   an OSC 777 notify (Ghostty / urxvt style)
 //   /after N <line>      runs one of the above N seconds later
+//   /tui S N [calm]      S seconds of a TUI like Claude Code in a long conversation (see startTui)
 //
 // Print mode (`claude -p`, what Brisa's AI layer runs): `node fake-agent.mjs print <args>`, usually
 // through a .cmd wrapper given to the app as its claude (BRISA_CLAUDE_PATH / ai.claudePath).
@@ -89,12 +90,124 @@ function work(seconds) {
   }, 100);
 }
 
+// ---------------------------------------------------------------- TUI load (performance)
+
+/**
+ * `/tui SECONDS LINES [calm]`: the output pattern of a TUI like Claude Code (Ink) in a long
+ * conversation. A transcript of LINES colored lines is printed first (scrollback); then every
+ * 50 ms the dynamic region at the bottom is erased line by line and drawn again (spinner,
+ * the answer being streamed, status, input box), and the title changes (OSC 0). When the answer
+ * grows taller than the screen, Ink can no longer erase it and repaints everything: clear the
+ * screen and the scrollback (ESC[2J ESC[3J ESC[H) and write the whole transcript again, every
+ * frame, until the answer ends and joins the transcript. "calm": never that full repaint.
+ * Frames are wrapped in synchronized output (DEC 2026) unless FAKE_TUI_SYNC=0. Keys typed
+ * meanwhile echo at once in the input box, Enter clears it; Ctrl+C stops it.
+ */
+let tui = null;
+const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const WORDS = 'const value await function return render buffer terminal output agent stream token cache index layout'.split(' ');
+const sgr = (n) => `\x1b[38;5;${n}m`;
+function coloredLine(i, width) {
+  let line = `${sgr(244)}${String(i).padStart(5)} ${sgr(39 + (i % 6) * 6)}`;
+  let len = 6;
+  for (let w = 0; len < width - 12; w++) {
+    const word = WORDS[(i * 7 + w * 3) % WORDS.length];
+    line += `${w % 4 === 0 ? '\x1b[1m' : ''}${word}\x1b[22m `;
+    len += word.length + 1;
+    if (w % 5 === 4) line += sgr(70 + ((i + w) % 9) * 12);
+  }
+  return `${line}\x1b[0m`;
+}
+
+function startTui(seconds, lines, calm) {
+  const sync = process.env.FAKE_TUI_SYNC !== '0';
+  const width = () => Math.max(40, (process.stdout.columns || 100) - 1);
+  const rows = () => process.stdout.rows || 30;
+  const transcript = [];
+  for (let i = 0; i < lines; i++) transcript.push(coloredLine(i, width()));
+  out(`\r\n${transcript.join('\r\n')}\r\n`);
+  let answer = [];
+  let drawn = 0;
+  let frame = 0;
+  let typed = '';
+  const dynamic = () => [
+    `${sgr(208)}${SPIN[frame % SPIN.length]} Pensando… ${sgr(244)}(${frame} frames · esc para interrumpir)\x1b[0m`,
+    ...answer,
+    `${sgr(240)}${'─'.repeat(width())}\x1b[0m`,
+    `${sgr(15)}> ${typed}\x1b[0m`,
+    `${sgr(240)}${'─'.repeat(width())}\x1b[0m`,
+    `${sgr(244)}  ? para atajos · ${transcript.length} líneas\x1b[0m`,
+  ];
+  const draw = () => {
+    frame++;
+    answer.push(coloredLine(transcript.length + answer.length, width()));
+    const next = dynamic();
+    let data = sync ? '\x1b[?2026h' : '';
+    data += `\x1b]0;${SPIN[frame % SPIN.length]} Tarea larga\x07`;
+    // When the frame was written (a private OSC no terminal handles): the perf e2e measures how
+    // stale the screen is (this time vs when xterm parses it).
+    data += `\x1b]5379;${Date.now()}\x07`;
+    if (!calm && next.length >= rows()) {
+      // Taller than the screen: what scrolled away cannot be erased, so everything again.
+      data += `\x1b[2J\x1b[3J\x1b[H${transcript.join('\r\n')}\r\n${next.join('\r\n')}`;
+    } else {
+      // Erase the previous frame line by line (Ink's eraseLines) and draw the new one.
+      data += drawn ? `${'\x1b[2K\x1b[1A'.repeat(drawn - 1)}\x1b[2K\r` : '';
+      data += next.join('\r\n');
+    }
+    drawn = next.length;
+    if (sync) data += '\x1b[?2026l';
+    out(data);
+    // The answer ends (taller than the screen for a while, or long enough when calm).
+    if (answer.length > rows() + 25 || (calm && answer.length > 12)) {
+      out(`${'\x1b[2K\x1b[1A'.repeat(drawn - 1)}\x1b[2K\r${answer.join('\r\n')}\r\n`);
+      transcript.push(...answer);
+      answer = [];
+      drawn = 0;
+    }
+  };
+  const timer = setInterval(draw, 50);
+  const stop = setTimeout(() => endTui(), seconds * 1000);
+  tui = {
+    timer,
+    stop,
+    key(ch) {
+      if (ch === '\x03') return endTui();
+      if (ch === '\r') {
+        // Enter clears the input box (the perf e2e types several rounds).
+        typed = '';
+        out(`\x1b7\x1b[${rows() - 2};3H\x1b[K\x1b8`);
+        return;
+      }
+      if (ch >= ' ') {
+        typed += ch;
+        // The echo right away, in the input box (two lines above the bottom), with when the key
+        // got here (OSC 5379-like private stamp: the perf e2e splits the echo latency in two).
+        out(`\x1b]5380;${Date.now()}\x07\x1b7\x1b[${rows() - 2};3H${typed}\x1b8`);
+      }
+    },
+  };
+}
+
+function endTui() {
+  if (!tui) return;
+  clearInterval(tui.timer);
+  clearTimeout(tui.stop);
+  tui = null;
+  out('\r\n\x1b]0;fake-agent\x07listo');
+  prompt();
+}
+
 /** A test command; true if it prints its own prompt later. */
 function act(line) {
   const [name, ...words] = line.split(' ');
   const rest = words.join(' ');
   if (name === '/work') {
     work(Number(words[0]) || 3);
+    return true;
+  }
+  if (name === '/tui') {
+    startTui(Number(words[0]) || 20, Number(words[1]) || 3000, words[2] === 'calm');
     return true;
   }
   if (name === '/after') {
@@ -132,6 +245,7 @@ function ctrlC() {
 }
 
 function key(ch) {
+  if (tui) return tui.key(ch);
   if (ch === '\r') submit();
   else if (ch === '\x03') ctrlC();
   else if (ch === '\x7f' || ch === '\b') {

@@ -122,6 +122,8 @@ pub fn run() -> tauri::Result<()> {
             commands::system_info,
             commands::pty_backend,
             commands::session_agents,
+            commands::debug_pty_stats,
+            commands::pause_output,
             notifications::notifications_listen,
             notifications::notify,
             notifications::debug_notification_click,

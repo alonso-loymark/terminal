@@ -32,6 +32,7 @@ declare global {
     __selectedBlock?: (paneId: string) => number | null;
     /** What clicking a native notification does (the backend's debug command). */
     __notificationClick?: (tag: string) => Promise<void>;
+    __ptyStats?: () => Promise<[number, import('./lib/pty').PtyOutputStats][]>;
     __worktrees?: () => Promise<import('./lib/fsApi').Worktree[]>;
     /** Whether a pane's terminal has the ligature joiner registered. */
     __paneLigatures?: (paneId: string) => boolean;

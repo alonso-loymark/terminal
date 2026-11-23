@@ -150,6 +150,16 @@ pub fn resize_session(
     manager.resize(session_id, cols, rows)
 }
 
+/// Flow control: the page's terminal is behind (pause) or caught up (resume).
+#[tauri::command]
+pub fn pause_output(
+    manager: State<'_, PtyManager>,
+    session_id: SessionId,
+    paused: bool,
+) -> Result<(), PtyError> {
+    manager.pause_output(session_id, paused)
+}
+
 #[tauri::command]
 pub fn close_session(
     manager: State<'_, PtyManager>,
@@ -214,4 +224,15 @@ pub async fn session_agents(
 #[tauri::command]
 pub fn pty_backend() -> Option<PtyBackend> {
     pty::backend()
+}
+
+/// Development only: the output counters of every session (the performance e2e reads them).
+#[tauri::command]
+pub fn debug_pty_stats(
+    manager: State<'_, PtyManager>,
+) -> Result<Vec<(SessionId, pty::OutputStatsSnapshot)>, String> {
+    if !cfg!(debug_assertions) {
+        return Err("solo en desarrollo".to_owned());
+    }
+    Ok(manager.output_stats())
 }

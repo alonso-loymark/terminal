@@ -46,6 +46,9 @@ TypeScript y xterm.js sobre ConPTY.
   `@opus` fuerza uno. Ofrece generar un `AGENTS.md` (y el `CLAUDE.md` que lo importa) mostrando
   el contenido antes de crear nada, sin commits. La conversación y el registro de decisiones se
   guardan en la configuración de Brisa, nunca en el repo.
+- Fluida con agentes trabajando: control de flujo entre la terminal y el proceso (un agente que
+  repinta una conversación larga no atrasa la pantalla ni traba la interfaz) y una etapa de
+  rendimiento en la e2e con dos agentes a la vez.
 - Renderizado con WebGL (fallback DOM), búsqueda, links clickeables, copiar/pegar estilo Windows
   Terminal (o menú contextual) y zoom.
 - Barra de título propia con las tabs, como Windows Terminal: arrastrar la ventana desde el espacio

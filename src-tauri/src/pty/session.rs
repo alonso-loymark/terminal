@@ -2,7 +2,9 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,7 +13,8 @@ use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, nativ
 use super::error::PtyError;
 use super::manager::SessionId;
 
-/// Output arriving within this window after the first chunk of a burst goes out as one message.
+/// While output keeps coming, what arrives within this window goes out as one message. The
+/// first chunk after a quiet spell (a key's echo, a prompt) goes out at once.
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(5);
 /// Soft cap for one output message, so a flood still streams in steady pieces.
 pub const MAX_BATCH_BYTES: usize = 256 * 1024;
@@ -39,8 +42,137 @@ pub struct SpawnOptions {
     pub rows: u16,
 }
 
+/// Counters of the output path (bytes read from the PTY, batches sent to the page, bytes
+/// waiting between the reader and the flusher, flow-control pauses). Cheap atomics; read by
+/// the dev-only `debug_pty_stats` command (performance e2e).
+#[derive(Debug, Default)]
+pub struct OutputStats {
+    bytes_read: AtomicU64,
+    reads: AtomicU64,
+    batches: AtomicU64,
+    max_batch: AtomicU64,
+    backlog: AtomicU64,
+    max_backlog: AtomicU64,
+    pauses: AtomicU64,
+    /// Wall clock (µs since the Unix epoch) of the last input written, PTY read and batch sent:
+    /// the perf e2e lines them up with the page's own clock to split the echo latency.
+    last_input_us: AtomicU64,
+    last_read_us: AtomicU64,
+    last_sent_us: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputStatsSnapshot {
+    pub bytes_read: u64,
+    pub reads: u64,
+    pub batches: u64,
+    pub max_batch: u64,
+    pub backlog: u64,
+    pub max_backlog: u64,
+    pub pauses: u64,
+    pub last_input_us: u64,
+    pub last_read_us: u64,
+    pub last_sent_us: u64,
+}
+
+/// Microseconds since the Unix epoch (0 if the clock is before it).
+fn wall_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
+impl OutputStats {
+    fn input(&self) {
+        self.last_input_us.store(wall_us(), Ordering::Relaxed);
+    }
+
+    fn read(&self, n: usize) {
+        self.last_read_us.store(wall_us(), Ordering::Relaxed);
+        let n = n as u64;
+        self.bytes_read.fetch_add(n, Ordering::Relaxed);
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let backlog = self.backlog.fetch_add(n, Ordering::Relaxed) + n;
+        self.max_backlog.fetch_max(backlog, Ordering::Relaxed);
+    }
+
+    fn sent(&self, n: usize) {
+        let n = n as u64;
+        self.last_sent_us.store(wall_us(), Ordering::Relaxed);
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        self.max_batch.fetch_max(n, Ordering::Relaxed);
+        // A batch is made of chunks the reader counted before sending them: no underflow.
+        self.backlog.fetch_sub(n, Ordering::Relaxed);
+    }
+
+    pub(crate) fn paused(&self) {
+        self.pauses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> OutputStatsSnapshot {
+        OutputStatsSnapshot {
+            bytes_read: self.bytes_read.load(Ordering::Relaxed),
+            reads: self.reads.load(Ordering::Relaxed),
+            batches: self.batches.load(Ordering::Relaxed),
+            max_batch: self.max_batch.load(Ordering::Relaxed),
+            backlog: self.backlog.load(Ordering::Relaxed),
+            max_backlog: self.max_backlog.load(Ordering::Relaxed),
+            pauses: self.pauses.load(Ordering::Relaxed),
+            last_input_us: self.last_input_us.load(Ordering::Relaxed),
+            last_read_us: self.last_read_us.load(Ordering::Relaxed),
+            last_sent_us: self.last_sent_us.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Flow control: the page asks to pause reading the PTY while its terminal has too much output
+/// still to parse, and to resume once it caught up. Not reading makes ConPTY wait, and when it
+/// can write again it draws the screen as it is then: a TUI repainting faster than the page can
+/// parse skips frames instead of piling them up (seconds of stale screen and slow echo before).
+#[derive(Debug, Default)]
+pub(crate) struct OutputGate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    paused: bool,
+    /// The session is going away: the reader must keep reading until EOF.
+    closed: bool,
+}
+
+impl OutputGate {
+    pub(crate) fn set_paused(&self, paused: bool) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.paused = paused;
+        self.changed.notify_all();
+    }
+
+    /// Opens the gate for good (teardown: ConPTY only closes once its output is drained).
+    pub(crate) fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.closed = true;
+        self.changed.notify_all();
+    }
+
+    /// Blocks while paused.
+    fn wait_open(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        while state.paused && !state.closed {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
 pub(crate) struct Session {
     pub(crate) owner: String,
+    pub(crate) stats: Arc<OutputStats>,
+    pub(crate) output_gate: Arc<OutputGate>,
     pub(crate) pid: Option<u32>,
     master: Box<dyn MasterPty + Send>,
     input: Sender<Vec<u8>>,
@@ -93,8 +225,12 @@ impl Session {
         drop(pair.slave);
 
         let (input_tx, input_rx) = mpsc::channel();
+        let stats = Arc::new(OutputStats::default());
+        let gate = Arc::new(OutputGate::default());
         let session = Session {
             owner,
+            stats: stats.clone(),
+            output_gate: gate.clone(),
             pid: child.process_id(),
             killer: child.clone_killer(),
             #[cfg(windows)]
@@ -117,15 +253,19 @@ impl Session {
         let (exit_tx, exit_rx) = mpsc::channel();
 
         spawn_thread(id, "writer", move || pump_input(writer, input_rx))?;
-        spawn_thread(id, "reader", move || pump_output(reader, output_tx))?;
+        let reader_stats = stats.clone();
+        spawn_thread(id, "reader", move || {
+            pump_output(reader, output_tx, &reader_stats, &gate)
+        })?;
         spawn_thread(id, "flusher", move || {
-            flush_output(output_rx, exit_rx, events)
+            flush_output(output_rx, exit_rx, events, &stats)
         })?;
 
         Ok((session, ExitWatcher { id, child, exit_tx }))
     }
 
     pub(crate) fn write(&self, id: SessionId, data: Vec<u8>) -> Result<(), PtyError> {
+        self.stats.input();
         self.input.send(data).map_err(|_| PtyError::Closed(id))
     }
 
@@ -150,6 +290,7 @@ impl Session {
         if std::mem::replace(&mut self.killed, true) {
             return;
         }
+        self.output_gate.close();
         #[cfg(windows)]
         if let Some(job) = &self.job {
             super::teardown::close_job(job, self.pid);
@@ -247,12 +388,19 @@ fn pump_input(mut writer: Box<dyn Write + Send>, input: Receiver<Vec<u8>>) {
     }
 }
 
-fn pump_output(mut reader: Box<dyn Read + Send>, output: Sender<Vec<u8>>) {
+fn pump_output(
+    mut reader: Box<dyn Read + Send>,
+    output: Sender<Vec<u8>>,
+    stats: &OutputStats,
+    gate: &OutputGate,
+) {
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
     loop {
+        gate.wait_open();
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                stats.read(n);
                 if output.send(buf[..n].to_vec()).is_err() {
                     break;
                 }
@@ -268,18 +416,29 @@ fn flush_output(
     output: Receiver<Vec<u8>>,
     exit: Receiver<Option<u32>>,
     events: impl SessionEvents,
+    stats: &OutputStats,
 ) {
+    let mut last_sent: Option<Instant> = None;
     while let Ok(first) = output.recv() {
-        events.output(collect_batch(
-            first,
-            &output,
-            FLUSH_INTERVAL,
-            MAX_BATCH_BYTES,
-        ));
+        let window = batch_window(last_sent.map(|at| at.elapsed()));
+        let batch = collect_batch(first, &output, window, MAX_BATCH_BYTES);
+        stats.sent(batch.len());
+        events.output(batch);
+        last_sent = Some(Instant::now());
     }
     // The reader is gone, so no output can follow: only now is it safe to report the exit.
     let exit_code = exit.recv_timeout(EXIT_CODE_TIMEOUT).ok().flatten();
     events.exit(exit_code);
+}
+
+/// How long to gather output after its first chunk, given the time since the last message.
+/// After a quiet spell, nothing: a key's echo should not wait for more output that is not
+/// coming (only what is already queued joins it). While output keeps coming, FLUSH_INTERVAL.
+fn batch_window(since_last: Option<Duration>) -> Duration {
+    match since_last {
+        Some(elapsed) if elapsed < FLUSH_INTERVAL => FLUSH_INTERVAL,
+        _ => Duration::ZERO,
+    }
 }
 
 /// Appends to `first` whatever else arrives within `window`, stopping early at `max_bytes`.
@@ -331,6 +490,64 @@ mod tests {
         let batch = collect_batch(b"x".to_vec(), &rx, Duration::from_millis(20), 1024);
         assert_eq!(batch, b"x");
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn output_after_a_quiet_spell_goes_out_at_once() {
+        assert_eq!(
+            batch_window(None),
+            Duration::ZERO,
+            "the first output of a session"
+        );
+        assert_eq!(
+            batch_window(Some(Duration::from_millis(40))),
+            Duration::ZERO
+        );
+        assert_eq!(batch_window(Some(Duration::from_millis(1))), FLUSH_INTERVAL);
+        // A zero window still takes what is already queued, without waiting for more.
+        let (tx, rx) = mpsc::channel();
+        tx.send(b"cho".to_vec()).unwrap();
+        let started = Instant::now();
+        let batch = collect_batch(b"e".to_vec(), &rx, Duration::ZERO, 1024);
+        assert_eq!(batch, b"echo");
+        assert!(started.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn a_paused_gate_holds_the_reader_until_resumed_or_closed() {
+        let gate = Arc::new(OutputGate::default());
+        gate.set_paused(true);
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiting = gate.clone();
+        thread::spawn(move || {
+            waiting.wait_open();
+            done_tx.send(()).unwrap();
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "paused: must wait"
+        );
+        gate.set_paused(false);
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "resumed"
+        );
+
+        // Closing (teardown) opens it for good, even if paused again.
+        gate.set_paused(true);
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiting = gate.clone();
+        thread::spawn(move || {
+            waiting.wait_open();
+            done_tx.send(()).unwrap();
+        });
+        gate.close();
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "closed"
+        );
+        gate.set_paused(true);
+        gate.wait_open();
     }
 
     #[test]

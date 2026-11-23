@@ -1,9 +1,11 @@
 import type { IDisposable, Terminal } from '@xterm/xterm';
 import type { SessionStatus } from '../store/workspaceModel';
 import { InputQueue, type InputItem } from './inputQueue';
+import { OutputFlow } from './outputFlow';
 import {
   closeSession,
   createSession,
+  pauseOutput,
   resizeSession,
   sendShiftEnter,
   writeToSession,
@@ -113,6 +115,8 @@ export class TerminalSession {
     this.#setStatus('starting');
     const { cols, rows } = this.#term;
     const { shell, cwd } = this.#callbacks.spawn?.() ?? { shell: null, cwd: null };
+    // Flow control for this session (a restart gets a new one): see OutputFlow.
+    const flow = new OutputFlow();
     try {
       const info = await createSession({
         cols,
@@ -121,16 +125,22 @@ export class TerminalSession {
         cwd,
         onData: (data) => {
           if (this.#disposed) return;
-          this.#term.write(data);
+          const bytes = data.length;
+          flow.received(bytes);
+          this.#term.write(data, () => flow.parsed(bytes));
           this.#callbacks.onOutput?.();
         },
-        onExit: ({ exitCode }) => this.#handleExit(generation, exitCode),
+        onExit: ({ exitCode }) => {
+          flow.close();
+          this.#handleExit(generation, exitCode);
+        },
       });
       const id = info.sessionId;
       if (this.#disposed) {
         closeSession(id).catch(ignore);
         return;
       }
+      flow.attach((paused) => pauseOutput(id, paused));
       this.#id = id;
       this.#callbacks.onStarted?.(info);
       this.#setStatus('running');

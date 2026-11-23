@@ -1,4 +1,3 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect } from 'react';
 import { AiContextDialog } from './components/AiContextDialog';
 import { OrchestratorDialog } from './components/OrchestratorDialog';
@@ -22,17 +21,11 @@ import { installAppShortcuts } from './lib/appShortcuts';
 import { installFileDrop } from './lib/dropTarget';
 import { installGitRefreshOnCommands } from './lib/explorerData';
 import { initSession } from './lib/sessionSync';
-import { installWindowChrome, startResizeTop } from './lib/windowChrome';
+import { installWindowChrome, installWindowTitle, startResizeTop } from './lib/windowChrome';
 import { useChrome } from './store/chrome';
 import { useSession } from './store/session';
-import { useWorkspace } from './store/workspace';
-import { tabTitle } from './store/workspaceModel';
-
-const APP_NAME = 'Brisa';
 
 export function App() {
-  // The window follows the active tab (custom name, or what the process sets via OSC 0/2).
-  const title = useWorkspace((s) => (s.activeTabId ? tabTitle(s, s.activeTabId, '') : ''));
   // Settings, the detected shells, the layouts and the last session take a few ms; waiting avoids
   // starting a shell with the wrong profile, or a tab that the restored session replaces.
   const ready = useSession((s) => s.ready);
@@ -40,11 +33,8 @@ export function App() {
   const maximized = useChrome((s) => s.maximized);
   const active = useChrome((s) => s.active);
 
-  useEffect(() => {
-    getCurrentWindow()
-      .setTitle(title.trim() || APP_NAME)
-      .catch(() => {});
-  }, [title]);
+  // The window's title follows the active tab (outside React: see installWindowTitle).
+  useEffect(() => installWindowTitle(), []);
 
   useEffect(() => void initSession(), []);
   useEffect(() => installAppearance(), []);

@@ -39,7 +39,9 @@ vive en el frontend.
                  (un envío a la vez, en orden, reintenta; nunca descarta)
  ResizeObserver+fit ─ invoke resize_session ──────► MasterPty::resize (ResizePseudoConsole)
  term.write(bytes) ◄─ Channel onData (bytes crudos) ◄─ hilo flusher ◄─ mpsc ◄─ hilo reader ◄─ salida PTY
-                         (lotes de ≤5 ms / ≤256 KB)
+   │                     (tras una pausa, al toque;            ▲ (OutputGate: no lee mientras
+   │                      con flujo, lotes de ≤5 ms / ≤256 KB)  │  la página está atrasada)
+   └► OutputFlow (callback de write: bytes sin parsear) ─ invoke pause_output ─┘
  mensaje de salida ◄─ Channel onExit (JSON) ◄────── flusher, después del EOF ◄─ hilo waiter (child.wait)
 ```
 
@@ -55,8 +57,19 @@ Reglas de la arquitectura:
   sesión exista (respuesta al `ESC[6n` de ConPTY) espera; Shift+Enter es un elemento más de la
   misma cola, así conserva su lugar. Solo se descarta lo que ya no tiene destino: si el proceso
   terminó, la cola se vacía (con la sesión terminada, solo `Enter` hace algo: reinicia).
-- **Batching**: el hilo flusher junta todo lo que llega en una ventana de 5 ms (o hasta 256 KB) y
-  manda un solo mensaje. Constantes en `src-tauri/src/pty/session.rs`.
+- **Batching**: la primera salida después de una pausa (≥ 5 ms sin mensajes: el eco de una tecla,
+  un prompt) sale al toque con lo que ya esté en la cola; mientras la salida sigue llegando, el
+  hilo flusher junta lo que llega en una ventana de 5 ms (o hasta 256 KB) y manda un solo mensaje.
+  Constantes en `src-tauri/src/pty/session.rs`. Una ventana de 16 ms bajo carga se probó (ver
+  "Rendimiento"): ~4 puntos menos de hilo principal pero eco peor y más pausas; descartada.
+- **Control de flujo** (`lib/outputFlow.ts` + `OutputGate` en `session.rs`): cada lote se
+  escribe en xterm con callback y se cuentan los bytes sin parsear. Por encima de 128 KB el
+  frontend pide `pause_output(true)` y el hilo reader deja de leer el PTY; por debajo de 16 KB,
+  `pause_output(false)`. ConPTY, sin poder escribir, espera y después dibuja el estado de su
+  pantalla en ese momento: un TUI que repinta más rápido de lo que la página parsea saltea frames
+  en vez de apilar segundos de salida (lo que trababa la terminal). Un pedido en vuelo a la vez y
+  solo el último deseo (un `resume` que adelantara a su `pause` congelaría la terminal). Cerrar
+  la sesión abre la compuerta para siempre (ConPTY solo cierra con su salida drenada).
 - **Hilos por sesión** (stack chico, nombrados `pty-<id>-*`): `reader` (lee el PTY), `flusher`
   (agrupa y envía), `writer` (escribe el input sin bloquear al IPC), `waiter` (espera al hijo).
 - **Ciclo de vida / nada de zombies**:
@@ -85,10 +98,12 @@ Reglas de la arquitectura:
 - **Ids de sesión**: `u32` incremental asignado por `PtyManager` (único dentro del proceso).
 - **Comandos Tauri**: `create_session` (`{ cols, rows, cwd, shell: ShellSpec | null }`;
   devuelve `{ sessionId, shell, integration: 'full' | 'cwd' | 'none' | 'missing' }`, ver
-  "Perfiles"), `write_to_session`, `resize_session`, `close_session`, `send_shift_enter` (ver
-  abajo), `session_busy`, `system_info` (`{ homeDir, shells }`: las shells detectadas, una vez al
-  arrancar) y `pty_backend` (devuelve `{ backend: "conpty", buildNumber }` para la opción
-  `windowsPty` de xterm, que con build ≥ 21376 activa el reflow compatible con ConPTY).
+  "Perfiles"), `write_to_session`, `resize_session`, `close_session`, `pause_output` (control de
+  flujo), `send_shift_enter` (ver abajo), `session_busy`, `debug_pty_stats` (solo desarrollo:
+  contadores de la salida por sesión, para la e2e de rendimiento), `system_info` (`{ homeDir,
+  shells }`: las shells detectadas, una vez al arrancar) y `pty_backend` (devuelve
+  `{ backend: "conpty", buildNumber }` para la opción `windowsPty` de xterm, que con build ≥ 21376
+  activa el reflow compatible con ConPTY).
   Explorador (`explorer_commands.rs`): `list_dir`, `watch_start` / `watch_set` / `watch_stop`,
   `git_status`, `create_entry`, `rename_entry`, `trash_entries`, `open_in_vscode`,
   `open_in_file_manager`. Archivos de configuración (`settings_commands.rs`): `settings_load`
@@ -1000,6 +1015,101 @@ el panel de IA).
   un proceso hijo, `FAKE_WORK_ERROR`, uso y costo). Solo mira la sección `## Tarea` del brief
   (el resumen de decisiones puede nombrar tareas anteriores).
 
+## Rendimiento
+
+Brisa existe para ser fluida con agentes: todo lo que toca el camino de la salida (PTY → Rust →
+IPC → xterm → pantalla) se mide antes y después con la etapa `perf` de la e2e.
+
+- **Escenario** (`npm run e2e -- perf`, ~60 s): dos agentes falsos lado a lado, `claude` y
+  `agy` (`/tui` de `e2e/fake-agent.mjs`: el patrón de salida de un TUI de Ink como Claude Code
+  en una conversación larga). El izquierdo vuelca 12 000 líneas de historial (llena las 10 000
+  del scrollback) y redibuja su región de abajo cada 50 ms (borra líneas y dibuja: spinner,
+  respuesta que crece, caja de entrada); el derecho **repinta su transcripción entera**
+  (`ESC[2J ESC[3J ESC[H` + 10 000 líneas, `PERF_REPAINT`) en cada frame mientras la respuesta no
+  entra en la pantalla, como Ink. Ambos cambian el título (spinner) en cada frame y envuelven
+  cada frame en salida sincronizada (DEC 2026). Cada frame lleva una marca privada (OSC 5379 con
+  la hora) y cada tecla recibida otra (OSC 5380).
+- **Qué mide**: FPS al hacer scroll (ruedas por CDP cada 16 ms; frames con rAF) sin agentes y con
+  los dos dibujando; eco de teclas (keydown → el render que la muestra) en un prompt libre de
+  PowerShell, con un agente, en el agente tranquilo y en el que repinta, partido en tramos con
+  las marcas del agente falso y los sellos de Rust (`debug_pty_stats`: hora de la última
+  entrada, lectura y lote); cuán atrasada está la pantalla (marca del frame → xterm la parsea);
+  bytes sin parsear en xterm; latencia de la interfaz (clic en otra tab y vuelta, Ctrl+B dos
+  veces: entrada → siguiente pintado); hilo principal (`Performance.getMetrics`), long tasks y
+  lag del event loop; CPU y memoria por proceso (app, renderer, GPU, browser, conhost, agentes);
+  lado de Rust (MB/s, lotes/s, tamaño, pausas del control de flujo); y un perfil de CPU de la
+  página (`e2e/artifacts/perf-<PERF_LABEL>.cpuprofile`, más el reporte `.json`). `PERF_TRACE=1`
+  agrega una traza de Chromium del hilo principal (lo que el perfil llama "(program)").
+- **Umbrales** (checks de la etapa; build de desarrollo, holgados para una máquina ocupada pero
+  muy por debajo del bloqueo de antes): scroll ≥ 50 FPS con p95 ≤ 25 ms por frame, sin agentes y
+  con los dos; pantalla atrasada p95 < 150 ms; < 5 MB sin parsear en xterm; la parte de Brisa en
+  el eco de un prompt libre (tecla → PTY + PTY → xterm) < 10 ms; eco en el agente tranquilo
+  mientras el otro repinta p50 < 60 ms y p95 < 150 ms sin perder teclas; interfaz p95 < 150 ms;
+  hilo principal < 70 % con los agentes a la vista y en otra tab; y el parche del scrollbar de
+  xterm activo.
+
+**Antes y después** (2026-11-23, `npm run e2e -- perf`, build de desarrollo; dos corridas de cada
+versión intercaladas —vieja, nueva, vieja, nueva— para que compartan la carga de la máquina, que
+tenía además Claude Code y agy reales del usuario abiertos; "antes" = el código de la ronda de
+íconos con solo las herramientas de medición agregadas, en un worktree):
+
+| Medida (corrida 1 / corrida 2) | Antes | Después |
+|---|---|---|
+| Checks de la etapa | 6/13 · 6/13 | 13/13 · 13/13 |
+| Scroll con 10 000 líneas, sin agentes y con los dos dibujando | 60 FPS, p95 16,8 ms | 60 FPS, p95 16,8 ms |
+| Pantalla atrasada p95: agente tranquilo · el que repinta | 475 · 3239 ms / 146 · 760 ms | 21 · 23 ms / 23 · 21 ms |
+| Salida sin parsear en xterm (máximo) | 18,2 MB / 9,3 MB | 2,7 MB / 1,3 MB |
+| Eco en un prompt libre (p50) · de eso, la parte de Brisa | 41,7 · 18,1 ms / 30,3 · 18,3 ms | 29,3 · 1,8 ms / 28,9 · 1,8 ms |
+| Eco con un agente dibujando (p50 · p95) | 50 · 72 ms / 33 · 67 ms | 34 · 55 ms / 32 · 52 ms |
+| Eco en el agente tranquilo mientras el otro repinta (p50 · p95) | 184 · 369 ms / 67 · 149 ms | 34 · 51 ms / 28 · 64 ms |
+| Eco en el agente que repinta (p50 · p95) | 1774 · 1900 ms (21 de 25 teclas no aparecieron) / 214 · 1634 ms | 171 · 1532 ms / 106 · 726 ms |
+| Interfaz con dos agentes: tabs y Ctrl+B (p50 · p95) | 395 · 615 ms / 46 · 72 ms | 47 · 63 ms / 41 · 63 ms |
+| Interfaz sin agentes (p50 · p95) | 38 · 57 ms / 50 · 78 ms | 35 · 48 ms / 33 · 54 ms |
+| Hilo principal con dos agentes: a la vista · en otra tab | 96 · 83 % / 77 · 73 % | 43 · 46 % / 45 · 39 % |
+| Lag del event loop (p95) | 67 ms / 44 ms | 5 ms / 8 ms |
+| CPU (% de un núcleo): renderer · app (Rust) · conhost | 112 · 31 · 61 / 95 · 29 · 46 | 63 · 20 · 43 / 61 · 26 · 43 |
+| Memoria del renderer al final | 641 MB / 668 MB | 540 MB / 415 MB |
+| Perfil, parte del tiempo ocupado: xterm · "(program)" · React · timers | 35 · 19 · 14 · 5 % | 41 · 33 · 4 · ~0 % |
+
+- El scroll ya iba a 60 FPS con 10 000 líneas: el problema era la salida, no el scroll. Lo que se
+  "trababa" era la pantalla atrasada segundos (y con ella el eco y la interfaz).
+- El eco por debajo de 16 ms no es alcanzable con el ConPTY del sistema: la parte de Brisa son
+  ~2 ms (ver Gotchas: "El eco de ConPTY tarda un frame"). El eco en el agente que repinta 10 000
+  líneas lo pone el agente (ver Gotchas): la tecla le llega tarde porque está escribiendo frames
+  de ~2 MB.
+- "(program)" (IPC de los Channels, compilación de los `eval`, GC) y xterm son ahora casi todo el
+  tiempo ocupado: es lo que queda por bajar (menos mensajes, empaquetar ConPTY).
+
+**Reglas para todo código que toque el camino de la salida** (salen de lo que mostró el perfil):
+
+- **Nada por lote que no sea O(1) fuera de xterm.** `onData` → `term.write` + contadores. Nada
+  de decodificar ni buscar texto en la salida en JS (para eso están los handlers de OSC/CSI de
+  xterm, que corren en su parser).
+- **Ningún `set` del store por lote salvo que el valor cambie**, y lo que cambia más rápido de
+  lo que alguien puede ver va con `throttleLatest` (`lib/throttle.ts`): el título OSC de un panel
+  (los agentes animan un spinner en el título en cada frame) como mucho cada 150 ms; el título de
+  la ventana cada 500 ms y solo si cambió. Cada `set` corre todos los selectores de la app.
+- **Ningún componente que envuelva a otros se suscribe a algo que cambia con la salida.** El
+  título de la ventana como selector en `App` re-renderizaba toda la app con cada frame de un
+  agente (el costo más grande que mostró el perfil); ahora es una suscripción fuera de React
+  (`installWindowTitle`). Seleccionar campos, no el objeto del panel (`StatusBar` con
+  `useShallow`): el panel cambia con cada título y cada marca de actividad.
+- **Nada de timers por línea ni por lote.** xterm 6.0 sincronizaba el scrollbar (DOM + timer)
+  por cada línea que scrolleaba: ~15 % del hilo principal con un agente repintando; ahora una vez
+  por frame (`lib/xtermViewport.ts`). Si se actualiza xterm, la etapa `perf` avisa si el parche
+  dejó de aplicarse.
+- **Toda la salida pasa por `OutputFlow`** (write con callback): nunca escribir en xterm sin
+  contar, o el control de flujo deja de saber cuánto falta parsear.
+- **Cada mensaje de un Channel cuesta un `eval` (hilo principal de Rust y de la página) y, si
+  pesa ≥ 1 KB, un `fetch`** (~16 % del hilo principal con dos agentes, en la traza): no agregar
+  mensajes por lote (acks por lote, eventos por lote). El control de flujo manda mensajes solo al
+  cruzar las marcas (~1 por segundo con el agente que repinta).
+- **Las terminales ocultas parsean todo** (tienen que: scrollback y estado correctos) **pero no
+  dibujan** (WebGL suelto, xterm pausa el render): no agregar trabajo por lote que no mire si se
+  ve.
+- **Medir antes y después** con `npm run e2e -- perf` (`PERF_LABEL=antes|despues`): los números
+  varían ±20 % entre corridas en esta máquina; comparar varias corridas, no una.
+
 ## Estructura
 
 ```
@@ -1078,7 +1188,10 @@ src/                        Frontend (solo render + input)
   lib/explorerData.ts       Listados perezosos con generación, watcher de lo visible, refresco de git
   lib/explorerActions.ts    cd con guardas, insertar rutas, acciones del menú contextual
   lib/dropTarget.ts         Panel bajo el puntero, resaltado, archivos soltados desde otras apps
-  lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (entrada en cola, restart)
+  lib/terminalSession.ts    Conecta un Terminal de xterm con una sesión PTY (entrada en cola, control de flujo, restart)
+  lib/outputFlow.ts         Control de flujo de la salida: bytes sin parsear, pausar/reanudar en orden (+ test)
+  lib/throttle.ts           throttleLatest: lo que cambia más rápido de lo que se ve (títulos de agentes) (+ test)
+  lib/xtermViewport.ts      Scrollbar de xterm sincronizado una vez por frame, no por línea (API privada)
   lib/inputQueue.ts         Cola de entrada por sesión: orden, un envío a la vez, reintentos (+ test)
   lib/shellIntegration.ts   Handlers OSC 7/9;9/133/633 → ShellEvent (parsers puros + shellIntegration.test.ts)
   lib/paths.ts              Nombre de carpeta y acortado de rutas (~, …) para la UI
@@ -1152,9 +1265,10 @@ src-tauri/
                             reporta costo, denegación → retomar, cancelar el árbol, plan, análisis, diff
 e2e/
   run.mjs                   E2E sobre la app real vía CDP de WebView2 (`npm run e2e`)
-  fake-agent.mjs            Agente de IA falso (claude/codex/gemini según el exe; /work, /bell, /osc9,
-                            /osc777, /after N; modo print = claude -p: texto, initialize, plan y trabajador;
-                            ver "Pruebas con agentes")
+  fake-agent.mjs            Agente de IA falso (claude/codex/gemini/agy según el exe; /work, /bell, /osc9,
+                            /osc777, /after N, /tui S N [calm] = un TUI como Claude Code en una
+                            conversación larga; modo print = claude -p: texto, initialize, plan y
+                            trabajador; ver "Pruebas con agentes" y "Rendimiento")
   sink.mjs                  Programa en modo raw que guarda byte a byte lo que recibe (estrés de entrada)
   win.ps1                   Resize/cierre de la ventana de la app por PID (Win32)
   caption.ps1               Botones de la barra propia por mensajes Win32: hit-test (Snap Layouts),
@@ -1173,8 +1287,9 @@ npm test                                # tests unitarios del frontend (node --t
 npm run tauri build -- --no-bundle      # exe release en src-tauri/target/release/
 cd src-tauri; cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test
 npm run e2e:smoke                       # lo esencial (~105 s): en cada cambio
-npm run e2e                             # todas las etapas (~5 min): para cerrar una fase
+npm run e2e                             # todas las etapas (~6 min): para cerrar una fase
 npm run e2e -- tabs,groups              # solo algunas etapas
+npm run e2e -- perf                     # rendimiento con dos agentes falsos (~60 s; ver "Rendimiento")
 E2E_ATTACH=1 npm run e2e -- tabs        # contra una app ya abierta con CDP en el puerto 9223
 ```
 
@@ -1292,7 +1407,7 @@ terminada solo si:
 Durante el trabajo, después de **cada cambio**: `npm run e2e:smoke` (arranque, Ctrl+C,
 Shift+Enter con agentes falsos, tabs, paneles, shell integration, estrés de entrada, explorador,
 settings.json en vivo, atajos configurables, sesión, bloques y cierre; ~105 s, tiene que quedar
-por debajo de 2 min). La suite completa (`npm run e2e`, ~5 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
+por debajo de 2 min). La suite completa (`npm run e2e`, ~6 min) se corre para cerrar la fase. Mientras corre cualquiera de las dos, no tocar `src/`
 ni `src-tauri/`: el HMR de Vite o el rebuild de `tauri dev` reinician la app a mitad de camino.
 Cada etapa imprime su duración (`== etapa: N s`).
 
@@ -1364,6 +1479,9 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   "Aprobar" lo ejecuta con actividad en vivo, diff y costo; `@opus …` fuerza el modelo; un
   comando fuera de la lista aparece como pregunta; "Cancelar" corta la tarea;
   `orchestrator.enabled: false` → nada.
+- [ ] Rendimiento (automatizado con dos agentes falsos: `npm run e2e -- perf`; **a mano y a criterio
+  del usuario** con Claude Code y agy reales): una sesión larga, scroll mientras el agente trabaja,
+  tipear en él y cambiar de tab sin trabas.
 - [ ] Íconos: en tema oscuro y claro, tabs (perfil, agente corriendo, cerrar, +, menú), explorador
   (tipos de archivo, carpetas, fijar, ocultos), barra de estado (rama, ✓/✗), menús, paleta,
   configuración; `explorer.fileIcons: "mono"` los deja en el color del texto.
@@ -1567,6 +1685,26 @@ entre tabs y paneles), y la tecla igual no llega al programa.
   la tarea siguiente también era lenta).
 - **`:last-of-type` es por etiqueta**, no por atributo: "la última tarjeta de plan" en la e2e es
   `[data-orch="plan"]:not(:has(~ [data-orch="plan"]))`.
+- **xterm 6.0 sincroniza el scrollbar por cada línea que scrollea** (`Viewport._sync` en cada
+  `onScroll` del buffer: `setScrollDimensions`, escribir la posición y un timer de `cancelAndSet`
+  para el fade): un agente que repinta 10 000 líneas son 10 000 sincronizaciones por frame (~15 %
+  del hilo principal). `lib/xtermViewport.ts` lo junta en una por frame con `addRefreshCallback`
+  (API privada, detectada; marca `__brisaCoalesced` que la etapa `perf` verifica). Sigue igual en
+  6.1.0-beta.339 (que solo lo difiere durante DEC 2026).
+- **El eco de ConPTY tarda un frame**: en un prompt libre de PowerShell, tecla → Rust escribe en
+  el PTY ~1,3 ms; PTY → el eco vuelve leído **~16,5 ms** (conhost pinta a 60 Hz como mucho, más
+  PSReadLine); lectura → lote 0 ms; lote → xterm ~0,5 ms; xterm → pintado ~10 ms (el próximo
+  frame). La parte de Brisa son ~2 ms; el resto es ConPTY y el refresco de pantalla: un eco por
+  debajo de 16 ms no es alcanzable con el ConPTY del sistema (la palanca que queda es empaquetar
+  `conpty.dll` + `OpenConsole.exe`). ConPTY no emite DEC 2026 (verificado contando las marcas).
+- **El eco en un agente que repinta una transcripción enorme lo pone el agente**: Node escribe en
+  la consola de forma sincrónica en Windows, así que mientras manda un frame de ~2 MB (y conhost lo
+  procesa, o espera porque Brisa pausó la lectura) no lee teclas; la tecla llega tarde al
+  programa (`toProgram` en el reporte) y su eco sale detrás del frame. Con el control de flujo la
+  pantalla está al día (p95 ~25 ms) pero ese eco puede tardar cientos de ms en picos; antes,
+  además, la pantalla iba segundos atrasada.
+- **Medir el eco en un panel angosto**: el prompt más lo tipeado se envuelve en otra fila; la sonda
+  de la etapa `perf` lee la línea lógica (como `atShellPrompt`).
 - **Líneas largas en la e2e**: `textPosition` busca el texto en una fila; un comando largo puede
   partirse en el medio de una palabra según el ancho (`exit` en una fila, `4` en la siguiente).
   Anclar en una línea corta de la salida.
@@ -1995,11 +2133,57 @@ entre tabs y paneles), y la tecla igual no llega al programa.
     1127 KB (lucide, importado ícono por ícono); CSS 46,4 → 48,5 KB.
   - **No verificado**: agy real (su Shift+Enter y que su proceso se llame `agy.exe` al correr
     desde una tab; la e2e usa el agente falso como claude).
+- **Rendimiento con agentes: completo y verificado (2026-11-23).** Problema reportado: con
+  sesiones largas de Claude Code el scroll se ponía lento y la terminal se trababa, peor con
+  Claude Code y agy a la vez. Reproducido con el agente falso (`/tui`: el patrón de un TUI de Ink
+  en una conversación larga, dos lado a lado) y medido **antes de cambiar nada** (perfil de CPU
+  y traza por CDP, sellos de tiempo en Rust); números y reglas en "Rendimiento". Lo que mostró el
+  perfil y lo que se cambió:
+  - Sin control de flujo, la página se atrasaba sin límite (hasta 18 MB sin parsear, pantalla
+    hasta 3 s atrasada, teclas que tardaban segundos en verse): control de flujo con marcas de
+    agua (`OutputFlow` en el frontend, `OutputGate` + `pause_output` en Rust: el reader deja de
+    leer y ConPTY saltea frames).
+  - El título OSC de cada agente (un spinner, en cada frame) re-renderizaba **toda la app** (el
+    título de la ventana era un selector en `App`) y mandaba un `setTitle` por IPC: el título de la
+    ventana pasó a una suscripción fuera de React (500 ms, solo si cambia), los títulos de los
+    paneles van con `throttleLatest` (150 ms) y `StatusBar` selecciona solo sus campos. React pasó
+    de ~14 % a ~4 % del tiempo ocupado.
+  - xterm 6.0 sincronizaba el scrollbar en cada línea scrolleada (timers y DOM): una vez por frame
+    (`lib/xtermViewport.ts`).
+  - El flusher esperaba 5 ms aunque no viniera nada más: la primera salida después de una pausa
+    sale al toque (la parte de Brisa en el eco: 18 → 2 ms).
+  - Probado y descartado: lotes de 16 ms bajo carga (menos mensajes pero eco peor y más pausas).
+  - Verificado sin cambios necesarios: scroll (60 FPS con 10 000 líneas antes y después), WebGL
+    solo en lo visible (ya estaba), DEC 2026 (xterm 6 lo maneja; ConPTY no lo emite: medido),
+    margen de bloques, detector de agentes, inactividad y cwd (O(1) por lote, fuera del perfil),
+    terminales ocultas (no dibujan; parsean, como deben).
+  - `npm test`: 139 (6 nuevos: `OutputFlow` —marcas, un pedido a la vez y solo el último deseo,
+    salida antes del id, sesión que ya no está— y `throttleLatest`).
+  - `cargo test`: 94 unitarios (2 nuevos: la primera salida tras una pausa sale sin esperar; la
+    compuerta retiene al reader hasta reanudar o cerrar) + 9 agentes + 6 IA + 3 explorador + 21
+    PTY + 2 worktrees.
+  - `npm run e2e`: 442/442 en 375 s, con la etapa nueva `perf` (13 checks, ~48 s: los umbrales de
+    "Rendimiento"; con el código anterior fallan 6). `npm run e2e:smoke`: 164/164 en 105 s (`perf`
+    no entra en el smoke: no cabe en los 2 min). Una vez en una corrida completa, `shiftenter`
+    vio un prompt de menos en el buffer ("prompts nuevos: -1"); no se repitió en dos corridas de las
+    mismas etapas ni en la completa siguiente.
+  - Medido a la par de los arreglos: la máquina tenía abiertos Claude Code y agy reales del
+    usuario (hasta 56 % de CPU); una corrida `perf` en ese momento falló umbrales que pasaban
+    minutos antes. La etapa anota la carga de la máquina (`machineCpu`) y antes / después se
+    midió intercalado.
+  - **Release** (`--no-bundle`, CSP de producción, carpeta de config descartable; compilado en
+    otra carpeta de target porque el Brisa del usuario corría desde `target/release`): un agente
+    falso repintando 10 000 líneas a 60 FPS (p95 16,8 ms), hilo principal 48 %, Ctrl+B 15–54 ms,
+    sin errores de consola (8/8, script por CDP). `brisa.exe` 9,90 → 9,91 MB; JS 1127 → 1129 KB.
+  - **No verificado**: Claude Code y agy reales (regla de pruebas; el patrón de Ink del agente
+    falso sale de cómo dibuja Ink, no de una captura de Claude Code), una máquina más lenta, y el
+    eco por debajo de 16 ms (no alcanzable con el ConPTY del sistema: ~16,5 ms son de conhost).
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".
 - Próximas fases (ideas): navegación por teclado en el árbol del explorador, arrastrar paneles a otra tab o a una tab nueva (modelo listo: `movePane`),
   integración para zsh/fish en WSL, saltar entre comandos y seleccionar la salida de uno (marcas
-  133 ya disponibles), notificaciones al terminar comandos largos (133;D), flow control con ACKs
-  para salidas gigantes, `conpty.dll` + `OpenConsole.exe` empaquetados (ConPTY más nuevo que el
+  133 ya disponibles), notificaciones al terminar comandos largos (133;D), control de flujo con
+  créditos (acks) si las marcas de agua no alcanzan (hoy el pico sin parsear depende de cuánto
+  tarda en llegar la pausa), `conpty.dll` + `OpenConsole.exe` empaquetados (ConPTY más nuevo que el
   del sistema), lista de agentes y sus secuencias configurable, imágenes como ícono de perfil.

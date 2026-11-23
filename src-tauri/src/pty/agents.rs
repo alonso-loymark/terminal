@@ -56,7 +56,7 @@ pub(crate) const AGENTS: &[AgentSpec] = &[
         packages: &["@openai/codex"],
         newline: None,
     },
-    // agy: a native binary (%LOCALAPPDATA%agyinagy.exe). Its newline sequence is not known
+    // agy: a native binary (%LOCALAPPDATA%\agy\bin\agy.exe). Its newline sequence is not known
     // (not verified, no real agent is ever driven by the tests): a real Shift+Enter, like Codex.
     AgentSpec {
         name: "agy",

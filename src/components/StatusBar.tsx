@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp, Check, Dot, GitBranch as GitBranchIcon, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { folderName, shortenPath } from '../lib/paths';
 import { refreshGit, selectGitFor, useGit } from '../store/git';
 import { useProfile } from '../store/profiles';
@@ -10,6 +11,12 @@ import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { Pane } from '../store/workspaceModel';
 
+/** What the bar shows of the active pane: not its title or activity, which agents change all the time. */
+type StatusPane = Pick<
+  Pane,
+  'id' | 'cwd' | 'profile' | 'status' | 'lastCommand' | 'lastExitCode' | 'commandRunning' | 'integration' | 'integrationError'
+>;
+
 const MAX_COMMAND = 60;
 /** Approximate width of a status bar character (11px UI font), to fit the path to the bar. */
 const CHAR_PX = 6.5;
@@ -18,7 +25,7 @@ const CWD_SHARE = 0.55;
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 /** Last command: running, or how it ended. Nothing before the first command. */
-function CommandStatus({ pane }: { pane: Pane }) {
+function CommandStatus({ pane }: { pane: StatusPane }) {
   const command = pane.lastCommand?.trim() ?? '';
   if (pane.commandRunning) {
     return (
@@ -43,7 +50,7 @@ function CommandStatus({ pane }: { pane: Pane }) {
 }
 
 /** Discreet notice when the shell integration is not working (the terminal still is). */
-function IntegrationNotice({ pane }: { pane: Pane }) {
+function IntegrationNotice({ pane }: { pane: StatusPane }) {
   if (pane.status !== 'running' || (pane.integration !== 'error' && pane.integration !== 'unavailable')) return null;
   const reason =
     pane.integration === 'unavailable'
@@ -149,10 +156,15 @@ ${git.root}`}
 
 /** Below the panes: the active pane's folder (shortened; full path in the tooltip), last command and shell. */
 export function StatusBar() {
-  const pane = useWorkspace((s) => {
-    const id = selectActivePaneId(s);
-    return id ? s.panes[id] : undefined;
-  });
+  const pane = useWorkspace(
+    useShallow((s): StatusPane | undefined => {
+      const id = selectActivePaneId(s);
+      const p = id ? s.panes[id] : undefined;
+      if (!p) return undefined;
+      const { cwd, profile, status, lastCommand, lastExitCode, commandRunning, integration, integrationError } = p;
+      return { id: p.id, cwd, profile, status, lastCommand, lastExitCode, commandRunning, integration, integrationError };
+    }),
+  );
   const home = useSystem((s) => s.homeDir);
   const profile = useProfile(pane?.profile);
   const shellName = pane ? (profile?.name ?? '') : '';

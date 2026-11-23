@@ -74,6 +74,18 @@ impl PtyManager {
         self.with_session(id, |session| session.resize(cols, rows))
     }
 
+    /// Flow control: stops reading the session's output while the page catches up (see
+    /// `OutputGate`), and resumes.
+    pub fn pause_output(&self, id: SessionId, paused: bool) -> Result<(), PtyError> {
+        self.with_session(id, |session| {
+            if paused {
+                session.stats.paused();
+            }
+            session.output_gate.set_paused(paused);
+            Ok(())
+        })
+    }
+
     /// Sends Shift+Enter as the program in front of the user expects it: an AI agent gets its
     /// own newline sequence, anything else a real Shift+Enter (see `agents.rs`).
     pub fn shift_enter(&self, id: SessionId) -> Result<ShiftEnterTarget, PtyError> {
@@ -108,6 +120,15 @@ impl PtyManager {
                     .map(|spec| spec.name);
                 (id, agent)
             })
+            .collect()
+    }
+
+    /// Output counters of every session (performance checks).
+    pub fn output_stats(&self) -> Vec<(SessionId, super::OutputStatsSnapshot)> {
+        self.registry
+            .sessions()
+            .iter()
+            .map(|(id, session)| (*id, session.stats.snapshot()))
             .collect()
     }
 

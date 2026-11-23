@@ -16,7 +16,7 @@ import { orchRun } from './agentsApi';
 import { blockText, paneBlocks, selectedBlock } from './blockActions';
 import { worktreeList } from './fsApi';
 import { pendingInitialCommands } from './initialCommands';
-import { debugNotificationClick } from './pty';
+import { debugNotificationClick, debugPtyStats } from './pty';
 import { hasLigatures } from './ligatures';
 import { getPane } from './terminalRegistry';
 
@@ -39,6 +39,7 @@ export function installDevHooks(): void {
   window.__blocks = (paneId) => paneBlocks(paneId).map((b) => blockText(paneId, b.id));
   window.__selectedBlock = selectedBlock;
   window.__notificationClick = debugNotificationClick;
+  window.__ptyStats = debugPtyStats;
   window.__worktrees = worktreeList;
   window.__ai = useAi;
   // Straight to the backend, past the UI: with ai.enabled false it must refuse.
