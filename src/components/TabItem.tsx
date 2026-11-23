@@ -10,6 +10,8 @@ import { useWorkspace } from '../store/workspace';
 import { AGENT_LABELS } from '../lib/agentMonitor';
 import { useSettings } from '../store/settings';
 import { panesOf, tabIndicator, tabTitle, type AgentName, type TabId, type TabIndicator } from '../store/workspaceModel';
+import { Workflow, X } from 'lucide-react';
+import { AgentIcon } from './AgentIcon';
 import { ProfileIcon } from './ProfileIcon';
 import { RenameInput } from './RenameInput';
 
@@ -46,6 +48,12 @@ export function TabItem({ tabId }: { tabId: TabId }) {
   const cwd = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.cwd ?? null);
   const profileId = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.profile ?? null);
   const profile = useProfile(profileId);
+  // An agent running in the active pane shows instead of the shell; the orchestrator, its own.
+  const runningAgent = useWorkspace((s): AgentName | null => {
+    const agent = s.panes[s.tabs[tabId]?.activePaneId ?? '']?.agent;
+    return agentsOn && agent && agent.state !== 'finished' ? agent.name : null;
+  });
+  const orchestrator = useWorkspace((s) => s.panes[s.tabs[tabId]?.activePaneId ?? '']?.kind === 'orchestrator');
   const renaming = useUi((s) => s.renamingTabId === tabId);
   // The active pane's folder under the title, unless the user named the tab (or the title
   // already says it).
@@ -112,7 +120,13 @@ export function TabItem({ tabId }: { tabId: TabId }) {
       onContextMenu={onContextMenu}
       onAuxClick={(event) => event.button === 1 && close(event)}
     >
-      <ProfileIcon profile={profile} />
+      {orchestrator ? (
+        <Workflow className="profile-icon" data-icon="orchestrator" aria-hidden="true" />
+      ) : runningAgent ? (
+        <AgentIcon agent={runningAgent} />
+      ) : (
+        <ProfileIcon profile={profile} />
+      )}
       {renaming ? (
         <RenameInput
           initial={customTitle ?? title}
@@ -136,7 +150,7 @@ export function TabItem({ tabId }: { tabId: TabId }) {
         onClick={close}
         onPointerDown={(event) => event.stopPropagation()}
       >
-        ×
+        <X aria-hidden="true" />
       </button>
     </div>
   );

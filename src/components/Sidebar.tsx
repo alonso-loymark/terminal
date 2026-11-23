@@ -10,6 +10,8 @@ import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { spawnOf } from '../store/workspaceModel';
+import { ChevronRight, Ellipsis, Eye, EyeOff, Pin, PinOff, X } from 'lucide-react';
+import { useSettings } from '../store/settings';
 import { FileTree } from './FileTree';
 
 /** At most this share of the window, so the terminals keep room. */
@@ -55,11 +57,12 @@ export function Sidebar() {
   useEffect(() => {
     if (visible && root) refreshGit(root);
   }, [visible, root]);
+  const fileIcons = useSettings((st) => st.settings.explorer.fileIcons);
 
   if (!visible) return null;
 
   return (
-    <aside className="sidebar" style={{ width }} aria-label="Explorador de archivos" data-root={root ?? undefined}>
+    <aside className="sidebar" style={{ width }} aria-label="Explorador de archivos" data-root={root ?? undefined} data-file-icons={fileIcons}>
       <ExplorerHeader root={root} />
       {root ? <FileTree rows={rows} root={root} /> : <div className="tree-message">Sin carpeta</div>}
       <ExplorerNotice />
@@ -105,15 +108,17 @@ function Breadcrumbs({ root }: { root: string }) {
       <div ref={measure} className="breadcrumbs-measure" aria-hidden="true">
         {crumbs.map((crumb, i) => (
           <span key={crumb.path} className="crumb-wrap" data-measure="crumb">
-            {i > 0 && <span className="crumb-sep">›</span>}
+            {i > 0 && <ChevronRight className="crumb-sep" aria-hidden="true" />}
             <span className="crumb" data-current={i === last || undefined}>
               {crumb.label}
             </span>
           </span>
         ))}
         <span className="crumb-wrap" data-measure="ellipsis">
-          <span className="crumb-sep">›</span>
-          <span className="crumb">…</span>
+          <ChevronRight className="crumb-sep" aria-hidden="true" />
+          <span className="crumb crumb-more">
+            <Ellipsis aria-hidden="true" />
+          </span>
         </span>
       </div>
       <nav ref={nav} className="breadcrumbs" aria-label="Ruta actual" title={root}>
@@ -124,24 +129,25 @@ function Breadcrumbs({ root }: { root: string }) {
             <Fragment key={crumb.path}>
               {k === 1 && hidden.length > 0 && (
                 <span className="crumb-wrap">
-                  <span className="crumb-sep">›</span>
+                  <ChevronRight className="crumb-sep" aria-hidden="true" />
                   <button
                     type="button"
                     className="crumb crumb-more"
                     data-action="crumbs-more"
                     aria-haspopup="menu"
+                    aria-label="Carpetas ocultas de la ruta"
                     title={hidden.map((c) => c.label).join(' › ')}
                     onClick={(event) => {
                       const box = event.currentTarget.getBoundingClientRect();
                       useUi.getState().openMenu({ kind: 'crumbs', crumbs: hidden, x: box.left, y: box.bottom });
                     }}
                   >
-                    …
+                    <Ellipsis aria-hidden="true" />
                   </button>
                 </span>
               )}
               <span className="crumb-wrap" data-last={index === last || undefined}>
-                {index > 0 && <span className="crumb-sep">›</span>}
+                {index > 0 && <ChevronRight className="crumb-sep" aria-hidden="true" />}
                 <button type="button" className="crumb" data-path={crumb.path} data-current={index === last || undefined} title={crumb.path} onClick={() => onCrumb(crumb.path)}>
                   {crumb.label}
                 </button>
@@ -172,9 +178,7 @@ function ExplorerHeader({ root }: { root: string | null }) {
           focusActiveTerminal();
         }}
       >
-        <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path d="M10 1.5 14.5 6l-1.3 1.3-1-.4L9.6 9.5l.3 2.6-1.3 1.3-2.4-2.4L2.5 15 1 13.5l4-3.7L2.6 7.4 3.9 6.1l2.6.3 2.6-2.6-.4-1z" />
-        </svg>
+        {pinned ? <PinOff aria-hidden="true" /> : <Pin aria-hidden="true" />}
       </button>
       <button
         type="button"
@@ -187,9 +191,7 @@ function ExplorerHeader({ root }: { root: string | null }) {
           focusActiveTerminal();
         }}
       >
-        <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path d="M8 3C4.5 3 1.8 5.3 1 8c.8 2.7 3.5 5 7 5s6.2-2.3 7-5c-.8-2.7-3.5-5-7-5zm0 8.2A3.2 3.2 0 1 1 8 4.8a3.2 3.2 0 0 1 0 6.4zM8 6.3a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4z" />
-        </svg>
+        {showHidden ? <Eye aria-hidden="true" /> : <EyeOff aria-hidden="true" />}
       </button>
     </div>
   );
@@ -216,7 +218,7 @@ function ExplorerNotice() {
         </button>
       )}
       <button type="button" className="explorer-notice-close" aria-label="Cerrar aviso" onClick={() => useExplorer.getState().setNotice(null)}>
-        ×
+        <X aria-hidden="true" />
       </button>
     </div>
   );

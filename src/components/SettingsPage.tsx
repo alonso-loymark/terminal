@@ -1,3 +1,4 @@
+import { Bot, FolderTree, Keyboard, LayoutTemplate, Palette, Sparkles, SquareTerminal, SwatchBook, Terminal, type LucideIcon } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import type { Issue } from '../config/schema';
 import { openSettingsJson } from '../lib/settingsSync';
@@ -12,16 +13,16 @@ import { ProfilesSection } from './settings/ProfilesSection';
 import { SessionSection } from './settings/SessionSection';
 import { ThemesSection } from './settings/ThemesSection';
 
-const SECTIONS: readonly (readonly [SettingsSection, string])[] = [
-  ['appearance', 'Apariencia'],
-  ['themes', 'Temas'],
-  ['profiles', 'Perfiles'],
-  ['terminal', 'Terminal'],
-  ['explorer', 'Explorador'],
-  ['agents', 'Agentes y orquestador'],
-  ['ai', 'IA'],
-  ['keybindings', 'Atajos'],
-  ['session', 'Sesión y layouts'],
+const SECTIONS: readonly (readonly [SettingsSection, string, LucideIcon])[] = [
+  ['appearance', 'Apariencia', Palette],
+  ['themes', 'Temas', SwatchBook],
+  ['profiles', 'Perfiles', SquareTerminal],
+  ['terminal', 'Terminal', Terminal],
+  ['explorer', 'Explorador', FolderTree],
+  ['agents', 'Agentes y orquestador', Bot],
+  ['ai', 'IA', Sparkles],
+  ['keybindings', 'Atajos', Keyboard],
+  ['session', 'Sesión y layouts', LayoutTemplate],
 ];
 
 const describe = (issue: Issue) =>
@@ -102,7 +103,7 @@ export function SettingsPage() {
       >
         <nav className="settings-nav" aria-label="Secciones">
           <h1>Configuración</h1>
-          {SECTIONS.map(([id, label]) => (
+          {SECTIONS.map(([id, label, Icon]) => (
             <button
               key={id}
               type="button"
@@ -110,6 +111,7 @@ export function SettingsPage() {
               aria-current={section === id ? 'page' : undefined}
               onClick={() => useUi.getState().openSettings(id)}
             >
+              <Icon aria-hidden="true" />
               {label}
             </button>
           ))}

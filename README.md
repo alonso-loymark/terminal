@@ -53,6 +53,9 @@ TypeScript y xterm.js sobre ConPTY.
   barra nativa, con `"appearance.titleBar": "native"`). Un radio de esquinas para toda la interfaz
   (`"appearance.cornerRadius"`: 0 = todo cuadrado; mayor, paneles y explorador como tarjetas) y
   colores de barras, explorador y terminal derivados del mismo tema.
+- Íconos minimalistas y coherentes en toda la interfaz (lucide): por tipo de archivo en el
+  explorador, con un acento sutil del tema (o `"explorer.fileIcons": "mono"`), y por shell o
+  agente en las tabs.
 
 La configuración vive en `%APPDATA%\dev.brisa.desktop\`. Si existe la de la versión anterior
 (`%APPDATA%\dev.terminal.desktop`, cuando la app se llamaba "Terminal"), se migra sola al primer

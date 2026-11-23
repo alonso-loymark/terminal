@@ -102,7 +102,7 @@ function CrumbsMenu({ crumbs, x, y }: { crumbs: { label: string; path: string }[
   return (
     <Menu x={x} y={y} label="Carpetas ocultas de la ruta" onClose={dismiss}>
       {crumbs.map((crumb) => (
-        <MenuItem key={crumb.path} action="crumb" onSelect={run(() => openFolder(crumb.path, true))}>
+        <MenuItem key={crumb.path} action="crumb" data-path={crumb.path} onSelect={run(() => openFolder(crumb.path, true))}>
           <span title={crumb.path}>{crumb.label}</span>
         </MenuItem>
       ))}

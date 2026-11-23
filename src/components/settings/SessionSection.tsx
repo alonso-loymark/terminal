@@ -52,7 +52,7 @@ export function SessionSection() {
       </Field>
       <h3>Layouts guardados</h3>
       <p className="settings-intro">
-        Se abren desde la paleta (Ctrl+Shift+P) o el menú «▾». Están en layouts.json, que se puede editar a mano: cada panel puede
+        Se abren desde la paleta (Ctrl+Shift+P) o el menú de la flecha junto al «+». Están en layouts.json, que se puede editar a mano: cada panel puede
         tener un comando inicial, que se escribe cuando la shell está lista.
       </p>
       {status === 'invalid' && (

@@ -1,3 +1,4 @@
+import { ArrowDown, ArrowUp, Check, Dot, GitBranch as GitBranchIcon, LoaderCircle, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { folderName, shortenPath } from '../lib/paths';
 import { refreshGit, selectGitFor, useGit } from '../store/git';
@@ -22,7 +23,7 @@ function CommandStatus({ pane }: { pane: Pane }) {
   if (pane.commandRunning) {
     return (
       <span className="status-command" data-state="running" title={`En ejecución: ${command}`}>
-        <span className="status-dot" />
+        <LoaderCircle className="status-spinner" aria-hidden="true" />
         <span className="status-command-text">{clip(command || 'comando en ejecución', MAX_COMMAND)}</span>
       </span>
     );
@@ -35,7 +36,8 @@ function CommandStatus({ pane }: { pane: Pane }) {
       data-state={ok ? 'ok' : 'error'}
       title={`Último comando: ${command}\nCódigo de salida: ${pane.lastExitCode}`}
     >
-      {ok ? '✓' : `✗ ${pane.lastExitCode}`}
+      {ok ? <Check aria-label="correcto" /> : <X aria-label="falló" />}
+      {!ok && <span className="status-exit-code">{pane.lastExitCode}</span>}
     </span>
   );
 }
@@ -53,7 +55,8 @@ function IntegrationNotice({ pane }: { pane: Pane }) {
       data-integration={pane.integration}
       title={`${reason}\nLa terminal funciona igual, pero sin carpeta actual ni estado de los comandos.`}
     >
-      ⚠ Sin integración de shell
+      <TriangleAlert aria-hidden="true" />
+      Sin integración de shell
     </span>
   );
 }
@@ -75,7 +78,8 @@ function SettingsNotice() {
       title={`settings.json tiene errores: se sigue usando la última configuración válida.\n${lines.join('\n')}`}
       onClick={() => useUi.getState().openSettings()}
     >
-      ⚠ settings.json
+      <TriangleAlert aria-hidden="true" />
+      settings.json
     </button>
   );
 }
@@ -101,7 +105,8 @@ function LayoutsNotice() {
       title={`${summary}\n${lines.join('\n')}`}
       onClick={() => useUi.getState().openSettings('session')}
     >
-      ⚠ layouts.json
+      <TriangleAlert aria-hidden="true" />
+      layouts.json
     </button>
   );
 }
@@ -112,6 +117,7 @@ function GitBranch({ cwd }: { cwd: string }) {
   useEffect(() => refreshGit(cwd), [cwd]);
   if (!git) return null;
   const name = git.branch ?? (git.commit ? `HEAD ${git.commit}` : 'sin commits');
+  // For the tooltip; the bar shows arrows.
   const sync = `${git.ahead ? ` ↑${git.ahead}` : ''}${git.behind ? ` ↓${git.behind}` : ''}`;
   const changes = git.changes.length;
   return (
@@ -122,12 +128,21 @@ function GitBranch({ cwd }: { cwd: string }) {
 ${changes ? `${changes} cambio${changes === 1 ? '' : 's'} sin confirmar` : 'Sin cambios'}
 ${git.root}`}
     >
-      <svg viewBox="0 0 16 16" aria-hidden="true">
-        <path d="M5 3.3a1.8 1.8 0 1 0-1.5 1.8v5.8a1.8 1.8 0 1 0 1.5 0V9.4c.6.4 1.4.6 2.3.6h1.4a1.3 1.3 0 0 1 1.3 1.1 1.8 1.8 0 1 0 1.5-.1A2.8 2.8 0 0 0 8.7 8.5H7.3C6 8.5 5 7.7 5 6.6V5.1a1.8 1.8 0 0 0 0-1.8z" />
-      </svg>
+      <GitBranchIcon aria-hidden="true" />
       {name}
-      {sync}
-      {changes > 0 && <span className="status-git-dirty">•</span>}
+      {git.ahead > 0 && (
+        <span className="status-git-sync">
+          <ArrowUp aria-label="adelante" />
+          {git.ahead}
+        </span>
+      )}
+      {git.behind > 0 && (
+        <span className="status-git-sync">
+          <ArrowDown aria-label="atrás" />
+          {git.behind}
+        </span>
+      )}
+      {changes > 0 && <Dot className="status-git-dirty" aria-label="con cambios" />}
     </span>
   );
 }

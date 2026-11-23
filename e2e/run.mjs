@@ -172,7 +172,11 @@ async function launch() {
     // Its own WebView2 data: a Brisa the user has open (same app id) keeps the default folder
     // locked with other browser arguments, and the suite never touches the user's WebView2 data.
     // A fixed folder (not the run's temp one): a new profile per run and deleting it cost ~1 min.
-    env.WEBVIEW2_USER_DATA_FOLDER = path.join(os.tmpdir(), 'brisa-e2e-webview2');
+    const webview = path.join(os.tmpdir(), 'brisa-e2e-webview2');
+    env.WEBVIEW2_USER_DATA_FOLDER = webview;
+    // But each run starts with no localStorage: a run that left the old explorer key (the
+    // migration test) made the next one start with "ver ocultos" on. Not on the "reopen" relaunch.
+    if (launches === 1) fs.rmSync(path.join(webview, 'EBWebView', 'Default', 'Local Storage'), { recursive: true, force: true });
     // A throwaway settings.json: the suite never touches the user's own configuration.
     env.BRISA_CONFIG_DIR = CONFIG_DIR;
     env.BRISA_NOTIFY_LOG = NOTIFY_LOG;
@@ -573,6 +577,7 @@ const statusBar = () =>
       cwdTitle: q('.status-cwd')?.getAttribute('title') ?? null,
       command: q('.status-command')?.textContent ?? null,
       commandState: q('.status-command')?.getAttribute('data-state') ?? null,
+      commandIcon: [...(q('.status-command svg')?.classList ?? [])].find((c) => c.startsWith('lucide-')) ?? null,
       notice: q('.status-notice')?.textContent ?? null,
       noticeTitle: q('.status-notice')?.getAttribute('title') ?? null,
       shell: q('.status-shell')?.textContent ?? null,
@@ -625,6 +630,13 @@ const rowSel = (p) => `.tree-row[data-path="${attrValue(p)}"]`;
 const hasRow = async (p) => (await page.locator(rowSel(p)).count()) > 0;
 const rowAttr = (p, name) => page.locator(rowSel(p)).getAttribute(name, { timeout: 1000 }).catch(() => null);
 const waitRow = (p, present = true, timeout = 8000) => waitUntil(async () => (await hasRow(p)) === present, timeout);
+/** A breadcrumb: on the bar, or in the "…" menu when the path does not fit (a few px decide). */
+async function clickCrumb(dir) {
+  const sel = `.breadcrumbs .crumb[data-path="${attrValue(dir)}"]`;
+  if (await page.$(sel)) return page.click(sel);
+  await page.click('[data-action="crumbs-more"]');
+  await page.click(`[role="menu"] [data-action="crumb"][data-path="${attrValue(dir)}"]`);
+}
 const waitRoot = (dir, timeout = 8000) =>
   waitUntil(async () => (await explorerState()).root?.toLowerCase() === dir.toLowerCase(), timeout);
 const rowCount = async () => Number(await page.getAttribute('.file-tree', 'data-row-count'));
@@ -1575,7 +1587,7 @@ const stages = {
     st = await runIdle('cmd /c exit 3');
     check('programa nativo que falla: su código (3)', st.lastExitCode === 3, String(st.lastExitCode));
     bar = await statusBar();
-    check('status bar: ✗ con el código', bar.commandState === 'error' && bar.command === '✗ 3', JSON.stringify(bar));
+    check('status bar: ✗ con el código', bar.commandState === 'error' && bar.command === '3' && bar.commandIcon === 'lucide-x', JSON.stringify(bar));
     st = await runIdle('Get-Item C:\\no-existe-terminal-e2e');
     check('cmdlet que falla: código 1', st.lastExitCode === 1, String(st.lastExitCode));
     st = await runIdle("throw 'boom'");
@@ -2036,7 +2048,7 @@ const stages = {
     const moved = await waitUntil(async () => (await paneState(id)).cwd === sub, 8000);
     check('clic en una carpeta: cd en el panel activo', moved && (await waitRoot(sub)), (await paneState(id)).cwd);
     check('... con la ruta entre comillas', (await text()).includes(`Set-Location -LiteralPath '${sub}'`));
-    await page.click(`.breadcrumbs .crumb[data-path="${attrValue(dir)}"]`);
+    await clickCrumb(dir);
     check('clic en un breadcrumb: cd ahí', await waitUntil(async () => (await paneState(id)).cwd === dir, 8000));
     await waitRow(file);
     await waitUntil(() => idle(id), 5000);
@@ -2630,7 +2642,8 @@ const stages = {
     }, deep);
     await waitRoot(deep);
     await sleep(300);
-    const crumbs = await page.$$eval('.breadcrumbs .crumb', (els) => els.map((e) => e.textContent));
+    // The collapsed middle is a button with an ellipsis icon: "…" here.
+    const crumbs = await page.$$eval('.breadcrumbs .crumb', (els) => els.map((e) => (e.matches('[data-action="crumbs-more"]') ? '…' : e.textContent)));
     check('breadcrumbs largos: el primero, "…" y el último (sin cortar el texto)', crumbs[0] === deep.slice(0, 2) && crumbs[1] === '…' && crumbs.at(-1) === 'destino final' && crumbs.length < 8, JSON.stringify(crumbs));
     await page.click('[data-action="crumbs-more"]');
     await page.waitForSelector('[role="menu"] [data-action="crumb"]', { timeout: 3000 });
@@ -4072,6 +4085,147 @@ const stages = {
     );
     check('la sesión recuerda la tab del orquestador', JSON.stringify(sessionOnDisk() ?? {}).includes('"orchestrator":true'));
     await resetSettings();
+    await freshTab();
+  },
+
+  async icons() {
+    if (!(await ownSettings())) return skip('icons', 'la app no usa la carpeta de config de la prueba (E2E_ATTACH)');
+    await freshTab();
+    // One file of each kind, the common folders, and git (branch and changes in the status bar).
+    const dir = trickyDir('iconos');
+    const files = [
+      'foto.png', 'app.ts', 'index.js', 'estilos.css', 'pagina.html', 'datos.json', 'config.yaml', 'Program.cs', 'script.py', 'main.rs',
+      'Main.java', 'main.go', 'consulta.sql', 'notas.md', 'manual.pdf', 'informe.docx', 'cuentas.xlsx', 'paquete.zip', 'video.mp4',
+      'audio.mp3', 'fuente.woff2', 'setup.exe', 'Brisa.sln', 'Api.csproj', 'package.json', 'package-lock.json', 'Dockerfile',
+      '.gitignore', 'README.md', 'AGENTS.md', 'CLAUDE.md', '.env', 'sin-extension', 'archivo.raro',
+    ];
+    if (!fs.existsSync(path.join(dir, '.git'))) {
+      for (const sub of ['src', 'tests', 'node_modules']) fs.mkdirSync(path.join(dir, sub), { recursive: true });
+      for (const name of files) fs.writeFileSync(path.join(dir, name), 'x');
+      execFileSync('git', ['-C', dir, 'init', '-q', '-b', 'main']);
+    }
+    await writeSettings({ explorer: { visible: true, showHidden: true, width: 300 } });
+    await runIdle(`Set-Location -LiteralPath ${psQuote(dir)}`);
+    await runIdle('cmd /c exit 3');
+    await waitRoot(dir);
+    // The tree is virtualized (only what is on screen is rendered): scroll through it.
+    const rows = async () => {
+      const seen = new Map();
+      for (let step = 0; step < 20; step++) {
+        const batch = await page.evaluate(
+          (step) =>
+            new Promise((resolve) => {
+              const tree = document.querySelector('.sidebar .file-tree');
+              tree.scrollTop = step * Math.max(100, tree.clientHeight - 44);
+              requestAnimationFrame(() =>
+                requestAnimationFrame(() =>
+                  resolve({
+                    end: tree.scrollTop + tree.clientHeight >= tree.scrollHeight - 1,
+                    rows: [...tree.querySelectorAll('.tree-row')].map((el) => {
+                      const icon = el.querySelectorAll('svg.file-icon');
+                      return { name: el.querySelector('.tree-name')?.textContent ?? '', icons: icon.length, icon: icon[0]?.dataset.icon, tone: icon[0]?.dataset.tone, color: icon[0] ? getComputedStyle(icon[0]).color : null, text: getComputedStyle(el).color };
+                    }),
+                  }),
+                ),
+              );
+            }),
+          step,
+        );
+        for (const r of batch.rows) seen.set(r.name, r);
+        if (batch.end) break;
+      }
+      await page.evaluate(() => {
+        document.querySelector('.sidebar .file-tree').scrollTop = 0;
+      });
+      return [...seen.values()];
+    };
+    await waitUntil(async () => (await rows()).length >= files.length + 4, 8000);
+    const tree = await rows();
+    const by = Object.fromEntries(tree.map((r) => [r.name, r]));
+    const expected = {
+      'foto.png': 'file-image', 'app.ts': 'file-code', 'pagina.html': 'file-markup', 'datos.json': 'file-braces', 'paquete.zip': 'file-archive',
+      'video.mp4': 'file-video', 'Brisa.sln': 'file-project', 'package.json': 'package', 'package-lock.json': 'file-lock', Dockerfile: 'container',
+      '.gitignore': 'git', 'README.md': 'readme', 'AGENTS.md': 'agents', 'CLAUDE.md': 'agents', '.env': 'file-key', 'sin-extension': 'file',
+      'archivo.raro': 'file', src: 'folder-code', tests: 'folder-tests', node_modules: 'folder-modules', '.git': 'folder-git',
+    };
+    const wrong = Object.entries(expected).filter(([name, icon]) => by[name]?.icon !== icon);
+    check(
+      'explorador: cada archivo y carpeta con un ícono de lucide según su tipo (nunca un cuadro vacío)',
+      tree.length >= files.length + 4 && tree.every((r) => r.icons === 1) && wrong.length === 0,
+      JSON.stringify(wrong.map(([n, i]) => `${n}: ${by[n]?.icon} ≠ ${i}`)),
+    );
+    check(
+      '... con un acento por tipo que sale del tema (ts y js distintos; los genéricos, atenuados)',
+      by['app.ts']?.color !== by['index.js']?.color && by['app.ts']?.tone === 'blue' && by['sin-extension']?.tone === 'muted',
+      `${by['app.ts']?.color} / ${by['index.js']?.color}`,
+    );
+    // Every icon on screen: the same size and stroke; no emoji or character used as an icon.
+    const look = await page.evaluate(() => {
+      const icons = [...document.querySelectorAll('.tab-bar svg.lucide, .sidebar svg.lucide, .status-bar svg.lucide')];
+      const sizes = new Set(icons.map((i) => `${Math.round(i.getBoundingClientRect().width)}`));
+      const strokes = new Set(icons.map((i) => getComputedStyle(i).strokeWidth));
+      const chrome = [...document.querySelectorAll('.tab-bar, .sidebar, .status-bar')].map((e) => e.innerText).join('\n');
+      return { count: icons.length, sizes: [...sizes], strokes: [...strokes], chrome };
+    });
+    const GLYPHS = /\p{Extended_Pictographic}|[✕✓✗×▾▸⚠↺✦•›]/u;
+    check(
+      'todos los íconos del mismo tamaño y trazo; ningún emoji ni carácter como ícono en tabs, explorador y barra de estado',
+      look.count > 20 && look.sizes.length === 1 && look.strokes.length === 1 && !GLYPHS.test(look.chrome),
+      JSON.stringify({ count: look.count, sizes: look.sizes, strokes: look.strokes, glyph: look.chrome.match(GLYPHS)?.[0] }),
+    );
+    const bar = await statusBar();
+    check('barra de estado: rama de git, ✗ y el código como íconos', bar.git?.includes('main') && bar.commandIcon === 'lucide-x' && bar.command === '3' && !!(await page.$('.status-git svg.lucide-git-branch')), JSON.stringify(bar));
+    // Menus and the palette too.
+    await page.click('.tab-new-menu');
+    await page.waitForSelector('[role="menu"] [data-profile]', { timeout: 3000 });
+    const menu = await page.evaluate(() => {
+      const m = document.querySelector('[role="menu"]');
+      return { text: m.innerText, profiles: [...m.querySelectorAll('[data-profile]')].map((i) => !!i.querySelector('svg.profile-icon')), items: m.querySelectorAll('.menu-item svg.lucide').length };
+    });
+    await page.screenshot({ path: path.join(ARTIFACTS, 'icons-menu-dark.png') });
+    await page.keyboard.press('Escape');
+    check('menú de perfiles: íconos de lucide para cada shell (sin "PS") y para cada acción', menu.profiles.length > 0 && menu.profiles.every(Boolean) && !/\bPS\b/.test(menu.text.replace(/PowerShell/g, '')) && !GLYPHS.test(menu.text), JSON.stringify(menu.profiles));
+    await page.screenshot({ path: path.join(ARTIFACTS, 'icons-dark.png') });
+    const surfaces = async (theme) => {
+      await openSettings('explorer');
+      await page.screenshot({ path: path.join(ARTIFACTS, `icons-settings-${theme}.png`) });
+      await closeSettings();
+      await openPalette();
+      await page.fill('.palette-input', 'dividir');
+      await sleep(200);
+      await page.screenshot({ path: path.join(ARTIFACTS, `icons-palette-${theme}.png`) });
+      await page.keyboard.press('Escape');
+      await waitUntil(async () => !(await page.$('.palette')), 3000);
+    };
+    await surfaces('dark');
+    // A light theme, then "mono".
+    await writeSettings({ theme: 'light', explorer: { visible: true, showHidden: true, width: 300 } });
+    await waitUntil(async () => (await cssVar('--bg')) !== '' && (await page.evaluate(() => document.documentElement.style.colorScheme)) === 'light', 3000);
+    await sleep(300);
+    await page.screenshot({ path: path.join(ARTIFACTS, 'icons-light.png') });
+    await surfaces('light');
+    const light = await rows();
+    check('tema claro: los acentos cambian con el tema', light.find((r) => r.name === 'app.ts')?.color !== by['app.ts']?.color);
+    await writeSettings({ theme: 'light', explorer: { visible: true, showHidden: true, width: 300, fileIcons: 'mono' } });
+    await waitUntil(async () => (await page.getAttribute('.sidebar', 'data-file-icons')) === 'mono', 3000);
+    const mono = await rows();
+    await page.screenshot({ path: path.join(ARTIFACTS, 'icons-mono-light.png') });
+    check('explorer.fileIcons: "mono" → todos los íconos en el color del texto', mono.every((r) => r.color === r.text), JSON.stringify(mono.filter((r) => r.color !== r.text).slice(0, 3)));
+    // An agent running in the pane: its icon in the tab, instead of the shell's.
+    await writeSettings(NEW_SETTINGS);
+    await freshTab();
+    const tab = (await wsState()).active;
+    const id = await activePane();
+    await run(`& '${agentExe('claude')}' '${FAKE_AGENT}'`, { waitPrompt: false });
+    await waitFor('FAKE-AGENT claude listo', { source: screen });
+    const shown = await waitUntil(async () => !!(await page.$(`${tabSel(tab)} .agent-icon[data-agent="claude"]`)), 8000);
+    const badgeIcon = !!(await page.$(`${paneSel(id)} .agent-badge .agent-icon`));
+    await page.keyboard.press('Control+c');
+    await sleep(200);
+    await page.keyboard.press('Control+c');
+    const back = await waitUntil(async () => !(await page.$(`${tabSel(tab)} .agent-icon`)) && !!(await page.$(`${tabSel(tab)} svg.profile-icon`)), 10000);
+    check('un agente corriendo en el panel: su ícono en la tab y en el panel; al salir, el de la shell', shown && badgeIcon && back, `${shown} ${badgeIcon} ${back}`);
+    await waitUntil(atShellPrompt, 10000);
     await freshTab();
   },
 

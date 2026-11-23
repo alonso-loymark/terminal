@@ -1,3 +1,4 @@
+import { Info, TriangleAlert } from 'lucide-react';
 import { useEffect } from 'react';
 import { useUi } from '../store/ui';
 
@@ -16,7 +17,8 @@ export function Toast() {
   if (!toast) return null;
   return (
     <div className="toast" role="status" data-kind={toast.kind} onClick={() => useUi.getState().dismissToast()}>
-      {toast.message}
+      {toast.kind === 'warning' ? <TriangleAlert className="toast-icon" aria-hidden="true" /> : <Info className="toast-icon" aria-hidden="true" />}
+      <span>{toast.message}</span>
     </div>
   );
 }

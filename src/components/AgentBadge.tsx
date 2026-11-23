@@ -2,6 +2,7 @@ import { AGENT_LABELS } from '../lib/agentMonitor';
 import { useSettings } from '../store/settings';
 import { useWorkspace } from '../store/workspace';
 import type { AgentState, PaneId } from '../store/workspaceModel';
+import { AgentIcon } from './AgentIcon';
 
 export const AGENT_STATE_LABELS: Record<AgentState, string> = {
   working: 'trabajando',
@@ -16,6 +17,7 @@ export function AgentBadge({ paneId }: { paneId: PaneId }) {
   if (!agent || !enabled) return null;
   return (
     <div className="agent-badge" data-agent={agent.name} data-state={agent.state} role="status">
+      <AgentIcon agent={agent.name} />
       <span className="agent-dot" aria-hidden="true" />
       {AGENT_LABELS[agent.name]} · {AGENT_STATE_LABELS[agent.state]}
     </div>

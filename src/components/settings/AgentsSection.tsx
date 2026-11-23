@@ -65,7 +65,7 @@ function OrchestratorSettings({ locked }: { locked: boolean }) {
       <Field
         label="Modo orquestador"
         setting="orchestrator.enabled"
-        hint="Tabs «Orquestador» (paleta o ▾ → Abrir orquestador aquí): un chat por proyecto que decide agente, modelo y esfuerzo y ejecuta cada tarea con Claude Code en la carpeta del proyecto. Apagado, no se lanza nada."
+        hint="Tabs «Orquestador» (paleta, o la flecha junto al «+» → Abrir orquestador aquí): un chat por proyecto que decide agente, modelo y esfuerzo y ejecuta cada tarea con Claude Code en la carpeta del proyecto. Apagado, no se lanza nada."
       >
         {(id) => <Toggle id={id} value={orchestrator.enabled} disabled={locked} onCommit={(v) => setSetting(['orchestrator', 'enabled'], v)} />}
       </Field>
@@ -131,7 +131,7 @@ export function AgentsSection() {
       <Field label="Espera tu respuesta tras" setting="agents.idleSeconds" hint="Segundos sin salida (si el agente no lo avisó antes con una campana o una notificación).">
         {(id) => <NumberInput id={id} value={agents.idleSeconds} min={2} max={600} disabled={locked} onCommit={(v) => setSetting(['agents', 'idleSeconds'], v)} />}
       </Field>
-      {(Object.keys(AGENT_LABELS) as AgentName[]).map((name) => (
+      {(Object.keys(agents.commands) as (keyof typeof agents.commands & AgentName)[]).map((name) => (
         <Field key={name} label={`Comando de ${AGENT_LABELS[name]}`} setting={`agents.commands.${name}`} hint={name === 'claude' ? 'Lo que el preset multi-agente escribe en cada panel (con argumentos, si querés).' : undefined}>
           {(id) => (
             <TextInput

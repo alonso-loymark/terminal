@@ -1,4 +1,5 @@
 import type { ISearchDecorationOptions, ISearchOptions } from '@xterm/addon-search';
+import { ChevronDown, ChevronUp, Search, X } from 'lucide-react';
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { getPane } from '../lib/terminalRegistry';
 import { useUi } from '../store/ui';
@@ -76,6 +77,7 @@ export function SearchBar({ paneId, onClose }: SearchBarProps) {
 
   return (
     <div className="search-bar" role="search">
+      <Search className="search-icon" aria-hidden="true" />
       <input
         ref={inputRef}
         value={query}
@@ -91,14 +93,14 @@ export function SearchBar({ paneId, onClose }: SearchBarProps) {
       <span className="search-summary" aria-live="polite">
         {summary}
       </span>
-      <button type="button" title="Anterior (Shift+Enter)" onClick={() => find(query, 'previous')}>
-        ↑
+      <button type="button" title="Anterior (Shift+Enter)" aria-label="Anterior" onClick={() => find(query, 'previous')}>
+        <ChevronUp aria-hidden="true" />
       </button>
-      <button type="button" title="Siguiente (Enter)" onClick={() => find(query, 'next')}>
-        ↓
+      <button type="button" title="Siguiente (Enter)" aria-label="Siguiente" onClick={() => find(query, 'next')}>
+        <ChevronDown aria-hidden="true" />
       </button>
-      <button type="button" title="Cerrar (Esc)" onClick={onClose}>
-        ✕
+      <button type="button" title="Cerrar (Esc)" aria-label="Cerrar la búsqueda" onClick={onClose}>
+        <X aria-hidden="true" />
       </button>
     </div>
   );

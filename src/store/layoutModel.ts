@@ -495,7 +495,7 @@ export function layoutsJsonSchema(profiles: readonly string[] = []): JsonSchema 
       $schema: { type: 'string' },
       layouts: {
         type: 'array',
-        description: 'Layouts guardados (se abren desde la paleta o el menú "▾").',
+        description: 'Layouts guardados (se abren desde la paleta o el menú de la flecha junto al +).',
         items: {
           type: 'object',
           required: ['name', 'tabs'],

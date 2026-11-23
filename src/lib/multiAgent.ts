@@ -12,7 +12,8 @@ import { queueInitialCommand } from './initialCommands';
 import { focusActiveTerminal } from './tabActions';
 
 /** What runs in each pane: an agent, or just the shell. */
-export type PaneChoice = AgentName | 'shell';
+/** The preset runs the agents with a command in `agents.commands` (not agy: it has none yet). */
+export type PaneChoice = Exclude<AgentName, 'agy'> | 'shell';
 
 export interface MultiAgentPlan {
   cwd: string | null;
@@ -108,12 +109,12 @@ export async function releaseWorktrees(worktrees: PaneWorktree[]): Promise<void>
     if (!(await removeSoon(worktree.path, false))) failed.push(worktree.path);
   }
   if (failed.length) {
-    useUi.getState().showToast(`No se pudo borrar ${failed.length === 1 ? 'un worktree' : `${failed.length} worktrees`} (¿archivos en uso?). Quedan en Configuración → Bloques y agentes.`, 'warning');
+    useUi.getState().showToast(`No se pudo borrar ${failed.length === 1 ? 'un worktree' : `${failed.length} worktrees`} (¿archivos en uso?). Quedan en Configuración → Agentes y orquestador.`, 'warning');
   }
   if (dirty.length) {
     useUi.getState().openConfirm({
       title: dirty.length === 1 ? '¿Borrar el worktree con cambios?' : `¿Borrar ${dirty.length} worktrees con cambios?`,
-      message: 'Tienen cambios sin commitear: si se borran, esos cambios se pierden. Conservados, quedan en Configuración → Bloques y agentes.',
+      message: 'Tienen cambios sin commitear: si se borran, esos cambios se pierden. Conservados, quedan en Configuración → Agentes y orquestador.',
       details: dirty.map(({ worktree, changes }) => `${worktree.path} (${changes === 1 ? '1 cambio' : `${changes} cambios`})`),
       confirmLabel: 'Borrar igual',
       cancelLabel: 'Conservar',

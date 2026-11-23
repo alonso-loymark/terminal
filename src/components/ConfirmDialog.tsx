@@ -1,3 +1,4 @@
+import { TriangleAlert } from 'lucide-react';
 import { useEffect, useRef, type KeyboardEvent } from 'react';
 import { trashNow } from '../lib/explorerActions';
 import { forceRemoveWorktrees } from '../lib/multiAgent';
@@ -53,7 +54,10 @@ export function ConfirmDialog() {
         className="dialog"
         onKeyDown={onKeyDown}
       >
-        <h2 id="confirm-title">{confirm.title}</h2>
+        <h2 id="confirm-title" className="with-icon">
+          <TriangleAlert className="dialog-icon" aria-hidden="true" />
+          {confirm.title}
+        </h2>
         <p id="confirm-message">{confirm.message}</p>
         <ul className="dialog-details">
           {confirm.details.map((line) => (

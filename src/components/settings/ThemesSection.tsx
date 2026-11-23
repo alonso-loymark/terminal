@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { allThemes, findTheme, type Theme } from '../../config/themes';
 import { registerDropZone } from '../../lib/dropTarget';
@@ -36,7 +37,7 @@ function ThemeCard({ theme, selected, locked }: { theme: Theme; selected: boolea
       </button>
       {!theme.builtin && (
         <button type="button" className="theme-delete" title="Eliminar el tema" aria-label={`Eliminar ${theme.label}`} disabled={locked} onClick={() => deleteTheme(theme.id)}>
-          ×
+          <X aria-hidden="true" />
         </button>
       )}
     </div>

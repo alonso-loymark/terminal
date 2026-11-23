@@ -1,3 +1,4 @@
+import { Sparkles, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { cancelTurn, closePanel, detachBlock, openPreview, previewChat, sendChat } from '../lib/aiActions';
@@ -188,12 +189,15 @@ export function AiPanel() {
       }}
     >
       <header className="ai-header">
-        <span className="ai-title">IA</span>
+        <span className="ai-title with-icon">
+          <Sparkles aria-hidden="true" />
+          IA
+        </span>
         <span className="ai-subtitle" title={cwd ?? undefined}>
           {cwd ? `${folderName(cwd)} · ${shortenPath(cwd, home, 40)}` : 'Terminal'}
         </span>
         <button type="button" className="ai-close" aria-label="Cerrar el panel de IA" title={panelKey ? `Cerrar (${panelKey})` : 'Cerrar'} onClick={closePanel}>
-          ×
+          <X aria-hidden="true" />
         </button>
       </header>
       <div ref={scroller} className="ai-turns">
@@ -212,9 +216,14 @@ export function AiPanel() {
           {conversation.attachments.map((a) => (
             <li key={a.id} className="ai-chip" data-block-id={a.blockId} data-error={a.block.exitCode ? '' : undefined} title={a.block.command}>
               <span className="ai-chip-text">{a.block.command}</span>
-              {a.block.exitCode ? <span className="ai-chip-code">✗ {a.block.exitCode}</span> : null}
+              {a.block.exitCode ? (
+                <span className="ai-chip-code">
+                  <X aria-label="falló" />
+                  {a.block.exitCode}
+                </span>
+              ) : null}
               <button type="button" aria-label="Quitar del contexto" onClick={() => detachBlock(paneId, a.id)}>
-                ×
+                <X aria-hidden="true" />
               </button>
             </li>
           ))}

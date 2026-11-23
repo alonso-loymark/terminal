@@ -1,5 +1,6 @@
 // The shortcuts of the settings screen: every action with its keys, which can be removed, added
 // (recording a key press) or reset; conflicts between actions and with keys programs need.
+import { Plus, RotateCcw, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
   ACTIONS,
@@ -138,7 +139,7 @@ function ActionRow({ action, conflicts, locked }: { action: ActionDef; conflicts
           const problem = severity(key);
           return (
             <span key={key} className="key-chip" data-key={key} data-conflict={problem?.kind} title={problem?.title}>
-              {problem && <span aria-hidden="true">⚠ </span>}
+              {problem && <TriangleAlert className="key-problem" aria-hidden="true" />}
               {formatKey(key)}
               <button
                 type="button"
@@ -148,7 +149,7 @@ function ActionRow({ action, conflicts, locked }: { action: ActionDef; conflicts
                 disabled={locked}
                 onClick={() => setKeybindings(action.id, keys.filter((k) => k !== key))}
               >
-                ×
+                <X aria-hidden="true" />
               </button>
             </span>
           );
@@ -156,8 +157,8 @@ function ActionRow({ action, conflicts, locked }: { action: ActionDef; conflicts
         {recording ? (
           <Recorder action={action} onDone={() => setRecording(false)} />
         ) : (
-          <button type="button" className="key-add" data-action="add-key" disabled={locked} title="Agregar un atajo" onClick={() => setRecording(true)}>
-            +
+          <button type="button" className="key-add" data-action="add-key" disabled={locked} title="Agregar un atajo" aria-label="Agregar un atajo" onClick={() => setRecording(true)}>
+            <Plus aria-hidden="true" />
           </button>
         )}
         {customized && (
@@ -168,8 +169,9 @@ function ActionRow({ action, conflicts, locked }: { action: ActionDef; conflicts
             disabled={locked}
             title={`Volver al de por defecto: ${defaultKeys(action.id).map(formatKey).join(', ') || 'sin atajo'}`}
             onClick={() => setKeybindings(action.id, defaultKeys(action.id))}
+            aria-label="Volver al de por defecto"
           >
-            ↺
+            <RotateCcw aria-hidden="true" />
           </button>
         )}
       </span>

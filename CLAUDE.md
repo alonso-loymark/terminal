@@ -15,6 +15,7 @@ ejecutable `brisa.exe`, identificador `dev.brisa.desktop`.)
 | Emulador | **@xterm/xterm** + `@xterm/addon-fit`, `@xterm/addon-webgl` (con fallback al renderer DOM), `@xterm/addon-web-links`, `@xterm/addon-search` |
 | PTY | **portable-pty** (ConPTY en Windows) |
 | Estado frontend | **zustand** |
+| Íconos | **lucide-react** (pedido explícito: un solo set minimalista para toda la UI; cada ícono se importa por nombre y Vite deja solo los usados: ~+42 KB de JS) |
 | Drag & drop de tabs | **@dnd-kit** (`core` 6, `sortable` 10, `utilities` 3; la API estable, no `@dnd-kit/react` 0.x) |
 | Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
 | Configuración | `settings.json` y `layouts.json` (JSONC) leídos con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`); `session.json` (JSON que escribe la app) |
@@ -128,7 +129,8 @@ Reglas de la arquitectura:
   secuencia propia: usa crossterm, que lee eventos de teclado nativos, así que recibe el
   Shift+Enter nativo como en Windows Terminal (no verificado: no hay codex instalado y no se
   prueban agentes reales). El pedido viaja por la misma cola que las teclas (`InputQueue`), así
-  no se reordena con ellas.
+  no se reordena con ellas. agy (`agy.exe`) se detecta igual, sin secuencia propia (Shift+Enter
+  nativo; no verificado).
 - Antes de lanzar cada shell se limpia el flag heredable "ignorar Ctrl+C" del proceso
   (`SetConsoleCtrlHandler(NULL, FALSE)`, ver Gotchas).
 - `session_busy` devuelve lo que cerrar una sesión **mataría** además de la shell (misma lógica que
@@ -322,6 +324,37 @@ que VS Code y Windows Terminal). ConPTY las deja pasar tal cual (verificado).
   las decoraciones de Windows, quita la sombra propia y la ventana hija; la barra de tabs queda
   debajo, sin botones. La ventana se crea con el modo que diga settings.json (`settings::window_look`).
 
+## Íconos
+
+- **Un solo set**: lucide-react para todos los íconos de la interfaz (tabs, barra de título,
+  explorador, barra de estado, búsqueda, menús, paleta, configuración, panel de IA, orquestador,
+  toasts y diálogos). Ningún emoji ni carácter usado como ícono (la etapa `icons` de la e2e lo
+  busca en el texto de tabs, explorador, barra de estado y menús). Quedan como texto la prosa
+  ("Configuración → IA"), las viñetas de los tooltips y los nombres de teclas (`Ctrl+↑`). La e2e corre `icons` en la suite completa (no en el smoke).
+- **Mismo tamaño y trazo en todos lados**: `.lucide` en `styles.css` usa `--icon-size` (15 px) y
+  `--icon-stroke` (1.75: el CSS gana sobre el atributo `stroke-width` del SVG). Nada de tamaños
+  sueltos por componente. El color es el del texto (`stroke: currentColor`), del tema.
+- **Archivos** (`lib/fileIcons.ts`, puro y con tests; `FileIcon.tsx` mapea ids → lucide): por
+  extensión (imágenes, código con un acento por lenguaje, web, datos y config, documentos,
+  comprimidos, video, audio, fuentes, ejecutables, binarios, .NET) y por nombre (package.json,
+  lockfiles, Dockerfile/compose, .gitignore, README, LICENSE, `.env*`, configs de herramientas, y
+  AGENTS.md / CLAUDE.md / GEMINI.md con el ícono de bot: instrucciones para agentes). Cualquier
+  otro: el archivo genérico. Carpetas abierta / cerrada, y `src`, `tests`, `node_modules`,
+  `.git`, `.vscode`/`.claude`, `docs`, `dist`/`build`/`bin`… con su ícono (el mismo abierta o
+  cerrada; el chevron dice cuál).
+- **Acentos** (`explorer.fileIcons: "color"`, por defecto): `--tone-<color>` mezcla el color ANSI
+  del tema (`--ansi-*`, que publica `lib/appearance.ts`) con `--muted` al 75 %: sutil y siempre del
+  tema (naranja y violeta son mezclas: ANSI no los tiene). `"mono"`: todos en el color del texto.
+- **Perfiles y agentes** (`ProfileIcon.tsx`, `AgentIcon.tsx`): PowerShell (chevron en un
+  cuadro), cmd (`>_`), Git Bash (rama), WSL (servidor), perfil propio (terminal en un cuadro); el
+  `icon` de un perfil del usuario puede seguir siendo su propio texto o emoji (es su elección). Un
+  agente corriendo en el panel activo reemplaza al de la shell en la tab y aparece en su badge:
+  Claude Code (asterisco), Codex (código), Gemini (destello), agy (órbita); glifos genéricos, sin
+  logos. La tab del orquestador tiene el suyo. agy se detecta por `agy.exe` (Shift+Enter nativo:
+  su secuencia no está verificada).
+- **Menús**: `MenuItem` toma su ícono de una tabla por `action` (`Menu.tsx`): agregar una acción
+  nueva a un menú = darle su ícono ahí.
+
 ## Colores
 
 - Todo sale del tema: `background` (terminales), `sidebar` (explorador y panel de IA: apenas más
@@ -432,7 +465,7 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
   definición da los tipos de TS (inferidos), los defaults, la validación y el JSON Schema.
   Secciones: `appearance` (fuente, tamaño, line-height, ligaduras, cursor, padding, opacidad,
   efecto, `cornerRadius`, `titleBar`; ver "Diseño y barra de título"), `theme` + `themes`, `terminal` (scrollback, copiar al seleccionar, clic derecho),
-  `explorer` (arranque, ancho, ocultos, clic en carpeta), `profiles` (`default`, `list`),
+  `explorer` (arranque, ancho, ocultos, clic en carpeta, `fileIcons`), `profiles` (`default`, `list`),
   `session` (`restore`), `blocks` (`enabled`), `agents` (`enabled`, `idleSeconds`, `commands`),
   `notifications` (`enabled`, `bell`, `agents`), `ai` (`enabled`, `provider`, `model`,
   `claudePath`, `redact`; ver "IA"), `orchestrator` (`enabled`, `mainModel`, `autoApprove`,
@@ -984,7 +1017,9 @@ src/                        Frontend (solo render + input)
   components/StatusBar.tsx  cwd del panel activo, rama de git, último comando, avisos (integración, settings.json, layouts.json)
   components/Sidebar.tsx    Explorador: breadcrumbs, fijar, ver ocultos, aviso, ancho redimensionable
   components/FileTree.tsx   Árbol virtualizado: clic (cd / navegar / insertar), arrastrar a un panel, renombrar
-  components/ProfileIcon.tsx   Ícono de un perfil (monogramas incluidos o emoji del usuario)
+  components/ProfileIcon.tsx   Ícono de un perfil (lucide por shell, o el texto/emoji del usuario)
+  components/AgentIcon.tsx  Ícono del agente que corre en un panel (tab y badge)
+  components/FileIcon.tsx   Ícono de un archivo o carpeta del explorador (lucide + tono del tema)
   components/SettingsPage.tsx  Ctrl+,: navegación, avisos del archivo, abrir settings.json
   components/settings/      Secciones (GeneralSections, ThemesSection, ProfilesSection, AgentsSection,
                             AiSection, KeybindingsSection, SessionSection) y Controls
@@ -1038,6 +1073,7 @@ src/                        Frontend (solo render + input)
   lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
   lib/ligatures.ts          Ligaduras con un character joiner (+ test)
   lib/explorerModel.ts      Lógica pura del explorador, breadcrumbs que entran (+ explorerModel.test.ts)
+  lib/fileIcons.ts          Archivo / carpeta → ícono y tono por tipo o nombre (puro, + test)
   lib/windowChrome.ts       Barra propia: minimizar/maximizar/cerrar, maximizada, foco, resize de arriba, titleBar en vivo
   lib/explorerData.ts       Listados perezosos con generación, watcher de lo visible, refresco de git
   lib/explorerActions.ts    cd con guardas, insertar rutas, acciones del menú contextual
@@ -1158,7 +1194,9 @@ a la pantalla del usuario; las etapas `multiagent` y `orchestrator` crean repos 
 descartables. WebView2 usa su propia carpeta de datos, fija (`%TEMP%\brisa-e2e-webview2`, por
 `WEBVIEW2_USER_DATA_FOLDER`): un Brisa abierto por el usuario (mismo id de app) bloquea la carpeta
 por defecto con otros argumentos del navegador y la app de la e2e no arrancaba; una carpeta nueva
-por corrida (y borrarla) costaba ~1 min.
+por corrida (y borrarla) costaba ~1 min. Cada corrida borra solo su `localStorage` al arrancar: una
+corrida que dejó la clave vieja del explorador (la prueba de migración) hacía que la siguiente
+empezara con "ver ocultos" activado.
 
 `npm run e2e` necesita los puertos 1420 (Vite) y 9223 (CDP) libres. Abre una ventana real de la
 app, abre y cierra ventanas de `charmap.exe` (prueba de apps con ventana) y usa el portapapeles
@@ -1326,6 +1364,9 @@ Si algo queda pendiente, se anota en "Estado" antes de seguir. No se apilan fase
   "Aprobar" lo ejecuta con actividad en vivo, diff y costo; `@opus …` fuerza el modelo; un
   comando fuera de la lista aparece como pregunta; "Cancelar" corta la tarea;
   `orchestrator.enabled: false` → nada.
+- [ ] Íconos: en tema oscuro y claro, tabs (perfil, agente corriendo, cerrar, +, menú), explorador
+  (tipos de archivo, carpetas, fijar, ocultos), barra de estado (rama, ✓/✗), menús, paleta,
+  configuración; `explorer.fileIcons: "mono"` los deja en el color del texto.
 - [ ] Primer arranque tras el renombre: la configuración de `%APPDATA%\dev.terminal.desktop`
   aparece en `%APPDATA%\dev.brisa.desktop` (temas importados incluidos).
 
@@ -1916,6 +1957,44 @@ entre tabs y paneles), y la tecla igual no llega al programa.
     `--restricted` carga el CLAUDE.md del proyecto (el brief y las reglas igual le dicen que lea
     AGENTS.md), la forma exacta del evento `permission_denied` (se aceptan las variantes de
     nombres), Codex, Gemini y agy. Queda en el smoke manual, a criterio del usuario.
+- **Ronda visual — íconos: completa y verificada (2026-11-23).** lucide-react para todos los
+  íconos de la interfaz, un solo tamaño (15 px) y trazo (1.75) y el color del tema: tabs (perfil o
+  agente corriendo, cerrar, nueva, menú), barra de título, explorador (fijar, ocultos, chevrons,
+  breadcrumbs), barra de estado (rama, ↑/↓, cambios, ✓/✗, avisos, comando en ejecución), búsqueda,
+  menús contextuales (un ícono por acción), paleta, configuración, panel y barra de IA,
+  orquestador, toasts y diálogos. Sin emojis ni caracteres como íconos. Explorador con ícono por
+  tipo de archivo y por nombre (AGENTS.md / CLAUDE.md con el de bot), carpetas abierta / cerrada y
+  las comunes distinguibles, acento sutil derivado de los colores ANSI del tema y
+  `explorer.fileIcons: "mono"`. Perfiles con íconos (adiós "PS") y agentes (claude, codex,
+  gemini y agy, que ahora se detecta) en la tab y en su badge.
+  - `npm test`: 133 (5 nuevos de `fileIcons`: por extensión y mayúsculas, código con un acento por
+    lenguaje, nombres especiales, genérico nunca vacío, carpetas).
+  - `cargo test`: 92 unitarios (agy detectado por su exe) + 9 agentes + 6 IA + 3 explorador + 21 PTY
+    + 2 worktrees.
+  - `npm run e2e`: 429/429 en 436 s. Etapa nueva `icons` (8 checks: el ícono de cada tipo en el
+    árbol virtualizado, acentos del tema, mismo tamaño y trazo en todos los íconos de tabs /
+    explorador / barra de estado y ningún emoji ni carácter-ícono en su texto, barra de estado,
+    menú de perfiles, tema claro, "mono", agente corriendo en la tab y en el badge; capturas de la
+    página en `e2e/artifacts/icons-*.png`: oscuro, claro, mono, menú, configuración y paleta).
+    `npm run e2e:smoke`: 164/164.
+  - Revisado a ojo (capturas de la página por CDP, regla de capturas): explorador, tabs, barra de
+    estado, menú de perfiles, configuración y paleta en tema oscuro y claro, y "mono".
+  - Encontrado por la e2e y corregido: los chevrons de 15 px de los breadcrumbs hacían colapsar
+    antes la ruta (margen negativo para el aire del glifo; la prueba elige desde "…" si no entra);
+    el árbol virtualizado no renderiza lo que no se ve (la prueba recorre con scroll); y la carpeta
+    fija de WebView2 de la e2e dejaba pasar `localStorage` de una corrida a la siguiente ("ver
+    ocultos" activado por la clave vieja de la migración): cada corrida la borra al arrancar.
+  - Hoy la máquina corrió todo más lento que la semana pasada (smoke 131–155 s con 121–129 s de
+    etapas; cada `Add-Type` de `caption.ps1` ~1 s): medido igual con y sin la única animación
+    nueva (el spinner de la barra de estado), así que no es la app. Corridas del día con fallas
+    ajenas a los íconos y no repetidas: el portapapeles (sesión bloqueada), "duplicar no creó la
+    tab" (visto en la Fase 4), el arrastre del divisor (visto en la 6A), un agente falso que no
+    salió en `tabs`, y una ruta de la carpeta del usuario pegada en el prompt de `passthrough`.
+  - **Release** (CSP de producción): íconos por tipo en el explorador, tabs y barra de título con
+    lucide del mismo tamaño, sin errores de consola (3/3). `brisa.exe` 9,89 → 9,90 MB; JS 1085 →
+    1127 KB (lucide, importado ícono por ícono); CSS 46,4 → 48,5 KB.
+  - **No verificado**: agy real (su Shift+Enter y que su proceso se llame `agy.exe` al correr
+    desde una tab; la e2e usa el agente falso como claude).
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".

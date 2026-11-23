@@ -181,6 +181,20 @@ export function ExplorerSection() {
       <Field label="Ver ocultos" setting="explorer.showHidden" hint="node_modules, .git, lo ignorado por .gitignore y los archivos ocultos.">
         {(id) => <Toggle id={id} value={e.showHidden} disabled={locked} onCommit={(v) => setSetting(['explorer', 'showHidden'], v)} />}
       </Field>
+      <Field label="Íconos de archivos" setting="explorer.fileIcons" hint="Con color: un acento sutil por tipo, con los colores del tema. Monocromo: todos en el color del texto.">
+        {(id) => (
+          <Select
+            id={id}
+            value={e.fileIcons}
+            disabled={locked}
+            options={[
+              ['color', 'Con color'],
+              ['mono', 'Monocromo'],
+            ]}
+            onCommit={(v) => setSetting(['explorer', 'fileIcons'], v)}
+          />
+        )}
+      </Field>
     </section>
   );
 }

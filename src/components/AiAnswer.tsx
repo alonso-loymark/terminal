@@ -1,3 +1,4 @@
+import { TriangleAlert } from 'lucide-react';
 import { useMemo } from 'react';
 import { insertCommand } from '../lib/aiActions';
 import { inlineParts, segments } from '../lib/aiPrompts';
@@ -27,7 +28,8 @@ function CommandCard({ code, lang, closed, paneId }: { code: string; lang: strin
       </pre>
       {reasons.length > 0 && (
         <div className="ai-warning" role="alert" data-part="destructive-warning">
-          ⚠ Comando destructivo: {reasons.join('; ')}. Revisalo antes de ejecutarlo.
+          <TriangleAlert aria-hidden="true" />
+          <span>Comando destructivo: {reasons.join('; ')}. Revisalo antes de ejecutarlo.</span>
         </div>
       )}
       {closed && command && (

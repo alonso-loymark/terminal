@@ -1,3 +1,4 @@
+import { FilePlus, FileText, Pencil, Search, SquareTerminal, Workflow, Wrench, X, type LucideIcon } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AiErrorCode } from '../lib/aiApi';
 import type { FileDiff, ToolAction } from '../lib/agentsApi';
@@ -28,8 +29,13 @@ import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { PaneId, Rect } from '../store/workspaceModel';
 import { AiErrorBox } from './AiErrorBox';
 
-const ACTION_ICON: Record<ToolAction, string> = { read: '📖', edit: '✏️', write: '🆕', command: '▶', search: '🔎', other: '•' };
+const ACTION_ICON: Record<ToolAction, LucideIcon> = { read: FileText, edit: Pencil, write: FilePlus, command: SquareTerminal, search: Search, other: Wrench };
 const ACTION_LABEL: Record<ToolAction, string> = { read: 'Leyó', edit: 'Editó', write: 'Creó', command: 'Ejecutó', search: 'Buscó', other: 'Usó' };
+
+function ActivityIcon({ action }: { action: ToolAction }) {
+  const Icon = ACTION_ICON[action];
+  return <Icon className="orch-activity-icon" aria-hidden="true" />;
+}
 
 /** Text with `code` and **bold**, one paragraph per blank line. */
 function RichText({ text, className = 'orch-text' }: { text: string; className?: string }) {
@@ -214,12 +220,10 @@ function RunCard({ dir, message, busy }: { dir: string; message: Extract<OrchMes
         <ul className="orch-activity" data-orch="activity">
           {message.activity.map((a) => (
             <li key={a.id} data-action={a.action} data-ok={a.ok === null ? 'running' : String(a.ok)} title={a.tool}>
-              <span className="orch-activity-icon" aria-hidden="true">
-                {ACTION_ICON[a.action]}
-              </span>
+              <ActivityIcon action={a.action} />
               <span className="orch-activity-verb">{ACTION_LABEL[a.action]}</span>
               <code className="orch-activity-target">{a.target || a.tool}</code>
-              {a.ok === false && <span className="orch-activity-fail">✗</span>}
+              {a.ok === false && <X className="orch-activity-fail" aria-label="falló" />}
             </li>
           ))}
         </ul>
@@ -429,7 +433,10 @@ export const OrchestratorPane = memo(
       >
         <header className="orch-header">
           <div className="orch-title">
-            <strong>Orquestador</strong>
+            <strong className="with-icon">
+              <Workflow aria-hidden="true" />
+              Orquestador
+            </strong>
             <span className="orch-muted" title={project?.info?.dir ?? dir ?? ''}>
               {project?.info?.name ?? dir}
             </span>

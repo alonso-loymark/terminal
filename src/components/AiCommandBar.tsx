@@ -1,3 +1,4 @@
+import { Sparkles, TriangleAlert } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { askCommand, cancelTurn, closeCommandBar, insertCommand, openPreview, previewCommand } from '../lib/aiActions';
 import { commandAnswer } from '../lib/aiPrompts';
@@ -66,9 +67,7 @@ export function AiCommandBar({ rect }: { rect: Rect }) {
     >
       <div className="ai-bar" role="dialog" aria-label="Lenguaje natural a comando" data-state={turn?.status ?? 'idle'}>
         <div className="ai-bar-row">
-          <span className="ai-bar-icon" aria-hidden="true">
-            ✦
-          </span>
+          <Sparkles className="ai-bar-icon" aria-hidden="true" />
           <input
             ref={input}
             value={text}
@@ -106,7 +105,8 @@ export function AiCommandBar({ rect }: { rect: Rect }) {
             {answer.explanation && <p className="ai-paragraph" data-part="explanation">{answer.explanation}</p>}
             {reasons.length > 0 && (
               <div className="ai-warning" role="alert" data-part="destructive-warning">
-                ⚠ Comando destructivo: {reasons.join('; ')}. Revisalo antes de ejecutarlo.
+                <TriangleAlert aria-hidden="true" />
+              <span>Comando destructivo: {reasons.join('; ')}. Revisalo antes de ejecutarlo.</span>
               </div>
             )}
             <div className="ai-command-actions">

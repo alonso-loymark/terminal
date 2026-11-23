@@ -1,3 +1,4 @@
+import { Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { fuzzyMatch, highlightRuns } from '../lib/fuzzy';
 import { paletteItems, type PaletteItem } from '../lib/paletteItems';
@@ -87,19 +88,22 @@ function PaletteBox() {
   return (
     <div className="palette-backdrop" onPointerDown={(event) => event.target === event.currentTarget && close()}>
       <div className="palette" role="dialog" aria-modal="true" aria-label="Paleta de comandos" onKeyDown={onKeyDown}>
-        <input
-          ref={inputRef}
-          className="palette-input"
-          type="text"
-          role="combobox"
-          aria-expanded="true"
-          aria-controls="palette-list"
-          aria-activedescendant={rows[selected] ? `palette-${selected}` : undefined}
-          placeholder="Escribí un comando, una tab, un tema, un layout…"
-          spellCheck={false}
-          value={query}
-          onChange={(event) => setQuery(event.currentTarget.value)}
-        />
+        <div className="palette-search">
+          <Search aria-hidden="true" />
+          <input
+            ref={inputRef}
+            className="palette-input"
+            type="text"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="palette-list"
+            aria-activedescendant={rows[selected] ? `palette-${selected}` : undefined}
+            placeholder="Escribí un comando, una tab, un tema, un layout…"
+            spellCheck={false}
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+          />
+        </div>
         <div ref={listRef} id="palette-list" className="palette-list" role="listbox" aria-label="Comandos" data-count={rows.length}>
           {rows.length === 0 && <div className="palette-empty">Nada coincide con «{query}».</div>}
           {rows.map((row, i) => (

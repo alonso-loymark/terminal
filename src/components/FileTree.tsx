@@ -13,6 +13,8 @@ import { useExplorer } from '../store/explorer';
 import { eventMatches } from '../store/keymap';
 import { selectGitFor, useGit } from '../store/git';
 import { useUi } from '../store/ui';
+import { ChevronRight } from 'lucide-react';
+import { FileIcon } from './FileIcon';
 import { RenameInput } from './RenameInput';
 
 export const ROW_HEIGHT = 22;
@@ -126,7 +128,7 @@ const Row = memo(function Row({ row, top, selected, renaming, decorations, onDra
     const cancel = () => useExplorer.getState().setEditing(null);
     return (
       <div className="tree-row" data-editing="" style={{ top, paddingLeft: indent + 18 }}>
-        <span className="tree-icon" data-kind={row.kind} />
+        <FileIcon name="" dir={row.kind === 'dir'} />
         <RenameInput
           initial=""
           label={row.kind === 'dir' ? 'Nombre de la carpeta nueva' : 'Nombre del archivo nuevo'}
@@ -226,11 +228,13 @@ const Row = memo(function Row({ row, top, selected, renaming, decorations, onDra
             event.stopPropagation();
             toggle();
           }}
-        />
+        >
+          <ChevronRight aria-hidden="true" />
+        </span>
       ) : (
         <span className="tree-twisty-space" />
       )}
-      <span className="tree-icon" data-kind={row.kind} data-link={row.link || undefined} />
+      <FileIcon name={row.name} dir={isDir} open={row.expanded} link={row.link} />
       {renaming ? (
         <RenameInput
           initial={row.name}

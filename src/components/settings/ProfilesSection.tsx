@@ -86,7 +86,7 @@ export function ProfilesSection() {
   return (
     <section className="settings-section" aria-label="Perfiles">
       <h2>Perfiles</h2>
-      <p className="settings-intro">Las shells detectadas en esta máquina más las tuyas. El menú «▾» junto al «+» las lista todas.</p>
+      <p className="settings-intro">Las shells detectadas en esta máquina más las tuyas. El menú de la flecha junto al «+» de las tabs las lista todas.</p>
       <Field label="Perfil por defecto" setting="profiles.default" hint="El de Ctrl+Shift+T y el botón +.">
         {(id) => (
           <Select

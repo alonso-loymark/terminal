@@ -18,6 +18,8 @@ const TAB_PALETTES = {
   light: { blue: '#0969da', red: '#cf222e', yellow: '#bf8700', green: '#1a7f37', pink: '#bf3989', purple: '#8250df', cyan: '#1b7c83', orange: '#bc4c00', grey: '#6e7781' },
 };
 
+const ANSI = ['red', 'green', 'yellow', 'blue', 'magenta', 'cyan'] as const;
+
 type State = ReturnType<typeof useSettings.getState>;
 
 /** The window shows what is behind it: it was created transparent and the settings ask for it. */
@@ -53,6 +55,8 @@ function uiVariables(theme: Theme, settings: Settings, translucent: boolean): Re
     '--gap': settings.appearance.cornerRadius > 0 ? '6px' : '0px',
     '--shadow-alpha': theme.dark ? '42%' : '16%',
     ...Object.fromEntries(Object.entries(tabs).map(([name, color]) => [`--tab-${name}`, color])),
+    // The theme's own palette, for the accents of icons (file types: styles.css tones them down).
+    ...Object.fromEntries(ANSI.map((name) => [`--ansi-${name}`, theme.terminal[name]])),
   };
 }
 

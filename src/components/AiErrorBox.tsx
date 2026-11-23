@@ -1,3 +1,4 @@
+import { CircleAlert } from 'lucide-react';
 import type { AiErrorCode } from '../lib/aiApi';
 import { aiErrorInfo } from '../lib/aiErrors';
 import { useUi } from '../store/ui';
@@ -8,7 +9,10 @@ export function AiErrorBox({ code, message }: { code: AiErrorCode; message: stri
   const toSettings = ['disabled', 'not-installed', 'no-key', 'api-key', 'invalid'].includes(code);
   return (
     <div className="ai-error" role="alert" data-code={code}>
-      <strong className="ai-error-title">{info.title}</strong>
+      <strong className="ai-error-title with-icon">
+        <CircleAlert aria-hidden="true" />
+        {info.title}
+      </strong>
       {info.hint && <p className="ai-error-hint">{info.hint}</p>}
       {message && message !== info.title && <p className="ai-error-detail">{message}</p>}
       {toSettings && (

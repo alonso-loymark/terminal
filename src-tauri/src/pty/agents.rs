@@ -56,6 +56,15 @@ pub(crate) const AGENTS: &[AgentSpec] = &[
         packages: &["@openai/codex"],
         newline: None,
     },
+    // agy: a native binary (%LOCALAPPDATA%agyinagy.exe). Its newline sequence is not known
+    // (not verified, no real agent is ever driven by the tests): a real Shift+Enter, like Codex.
+    AgentSpec {
+        name: "agy",
+        executables: &["agy.exe"],
+        executable_prefixes: &[],
+        packages: &[],
+        newline: None,
+    },
 ];
 
 const SCRIPT_HOSTS: &[&str] = &["node.exe", "bun.exe"];
@@ -181,6 +190,13 @@ mod tests {
             })
         };
         assert_eq!(find_agent(SHELL, &procs, cmd).unwrap().name, "claude");
+    }
+
+    #[test]
+    fn agy_is_detected_by_its_executable() {
+        let procs = [(2, SHELL, "agy.exe")];
+        assert_eq!(find_agent(SHELL, &procs, |_| None).unwrap().name, "agy");
+        assert!(find_agent(SHELL, &[(2, SHELL, "agyx.exe")], |_| None).is_none());
     }
 
     #[test]

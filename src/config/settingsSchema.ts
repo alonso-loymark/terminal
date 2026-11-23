@@ -28,14 +28,14 @@ const hints = { themes: [] as string[], profiles: [] as string[] };
 const profileEntry: Schema<ProfileEntry> = object(
   {
     id: optional(string({ default: '', description: 'Id del perfil. El de uno detectado (pwsh, powershell, cmd, gitbash, wsl-<distro>) lo personaliza; otro id crea un perfil propio.', examples: () => hints.profiles })),
-    name: optional(string({ default: '', description: 'Nombre en el menú "▾" y en la barra de estado.' })),
+    name: optional(string({ default: '', description: 'Nombre en el menú de perfiles (la flecha junto al +) y en la barra de estado.' })),
     icon: optional(string({ default: '', description: 'Un emoji o texto corto, o uno de: powershell, pwsh, cmd, git, linux, terminal.', examples: () => ['powershell', 'pwsh', 'cmd', 'git', 'linux', 'terminal'] })),
     command: optional(string({ default: '', description: 'Programa a ejecutar (ruta o nombre en el PATH; admite %VARIABLES%). Obligatorio en un perfil propio.' })),
     args: optional(array(string({ default: '' }), { description: 'Argumentos. Sin "args" se usan los de siempre, con integración de shell (en PowerShell también con los tuyos si no usan -Command/-File/-NoExit).' })),
     cwd: optional(string({ default: '', description: 'Carpeta inicial de las tabs nuevas con este perfil (admite %VARIABLES% y ~). Sin esto, la del panel activo.' })),
     env: optional(record(string({ default: '' }), { description: 'Variables de entorno extra (admiten %VARIABLES%).' })),
     theme: optional(string({ default: '', description: 'Tema para las terminales de este perfil (sin esto, el global).', examples: () => hints.themes })),
-    hidden: optional(boolean({ default: false, description: 'Ocultarlo del menú "▾".' })),
+    hidden: optional(boolean({ default: false, description: 'Ocultarlo del menú de perfiles.' })),
   },
   { description: 'Un perfil: personaliza uno detectado (por id) o define uno propio.' },
 ) as Schema<ProfileEntry>;
@@ -160,6 +160,11 @@ export const settingsSchema = object(
           default: 'cd',
           description: 'Clic en una carpeta: "cd" en el panel activo (si la shell está libre) o solo navegar el explorador.',
           labels: { cd: 'Hacer cd', navigate: 'Solo navegar' },
+        }),
+        fileIcons: oneOf(['color', 'mono'], {
+          default: 'color',
+          description: 'Íconos de archivos y carpetas: "color" (un acento sutil por tipo, con los colores del tema) o "mono" (todos en el color del texto).',
+          labels: { color: 'Con color', mono: 'Monocromo' },
         }),
       },
       { description: 'El explorador de archivos (Ctrl+B).' },

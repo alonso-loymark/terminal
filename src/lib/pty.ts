@@ -104,7 +104,7 @@ export function getPtyBackend(): Promise<PtyBackend | null> {
 
 // ---------------------------------------------------------------- agents and notifications
 
-export type AgentName = 'claude' | 'codex' | 'gemini';
+export type AgentName = 'claude' | 'codex' | 'gemini' | 'agy';
 
 /** The AI agent running in each session, with one look at the process table. */
 export function sessionAgents(sessionIds: SessionId[]): Promise<{ sessionId: SessionId; agent: AgentName | null }[]> {

@@ -12,7 +12,7 @@ import { listenNotifications, notify, sessionAgents } from './pty';
 import type { TerminalNotification } from './shellIntegration';
 import { focusActiveTerminal } from './tabActions';
 
-export const AGENT_LABELS: Record<AgentName, string> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini' };
+export const AGENT_LABELS: Record<AgentName, string> = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini', agy: 'agy' };
 
 /** How often the backend is asked which agents run (only for panes running something). */
 const POLL_MS = 2000;

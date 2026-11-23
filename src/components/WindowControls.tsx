@@ -1,3 +1,4 @@
+import { Copy, Minus, Square, X } from 'lucide-react';
 import { useLayoutEffect, useRef } from 'react';
 import { titlebarButtons, type CaptionButton } from '../lib/settingsApi';
 import { closeWindow, minimizeWindow, toggleMaximizeWindow } from '../lib/windowChrome';
@@ -47,9 +48,7 @@ export function WindowControls() {
   return (
     <div ref={ref} className="window-controls" data-native={caption.native || undefined}>
       <button type="button" className="caption-button" data-button="minimize" tabIndex={-1} aria-label="Minimizar" title="Minimizar" onClick={minimizeWindow} {...state('minimize')}>
-        <svg viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0 5.5h10" />
-        </svg>
+        <Minus aria-hidden="true" />
       </button>
       <button
         type="button"
@@ -61,14 +60,10 @@ export function WindowControls() {
         onClick={toggleMaximizeWindow}
         {...state('maximize')}
       >
-        <svg viewBox="0 0 10 10" aria-hidden="true">
-          {maximized ? <path d="M2.5 2.5V.5h7v7h-2M.5 2.5h7v7h-7z" /> : <path d="M.5.5h9v9h-9z" />}
-        </svg>
+        {maximized ? <Copy aria-hidden="true" /> : <Square aria-hidden="true" />}
       </button>
       <button type="button" className="caption-button" data-button="close" tabIndex={-1} aria-label="Cerrar" title="Cerrar" onClick={closeWindow} {...state('close')}>
-        <svg viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M.5.5l9 9M9.5.5l-9 9" />
-        </svg>
+        <X aria-hidden="true" />
       </button>
     </div>
   );

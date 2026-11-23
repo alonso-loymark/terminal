@@ -34,6 +34,9 @@
   --radius-sm: calc(var(--radius) * 0.75);
   --radius-lg: calc(var(--radius) * 1.25);
   --gap: 6px;
+  /* Icons (lucide): one size and one stroke everywhere; their color is the text's. */
+  --icon-size: 15px;
+  --icon-stroke: 1.75;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -240,8 +243,9 @@ body,
   border: 0;
   border-radius: var(--radius-xs);
   background: transparent;
+  display: inline-grid;
+  place-items: center;
   color: inherit;
-  font: 14px/1 system-ui, sans-serif;
   visibility: hidden;
   cursor: pointer;
 }
@@ -258,6 +262,8 @@ body,
 .tab-new,
 .tab-new-menu {
   flex: none;
+  display: inline-grid;
+  place-items: center;
   height: 28px;
   padding: 0;
   border: 0;
@@ -269,13 +275,11 @@ body,
 
 .tab-new {
   width: 28px;
-  font: 18px/1 system-ui, sans-serif;
 }
 
 .tab-new-menu {
-  width: 18px;
+  width: 20px;
   margin-left: -2px;
-  font: 11px/1 system-ui, sans-serif;
 }
 
 .tab-new:hover,
@@ -358,14 +362,6 @@ body,
   border: 0;
   background: transparent;
   color: var(--text);
-}
-
-.caption-button svg {
-  width: 10px;
-  height: 10px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1;
 }
 
 .window-controls:not([data-native]) .caption-button:hover,
@@ -540,10 +536,21 @@ body,
   font-weight: 600;
 }
 
-.crumb-sep {
-  padding: 0 1px;
+/* The chevron is drawn in the middle of its box: its empty sides overlap the crumbs. */
+.crumb-sep.lucide {
+  margin: 0 -5px;
   color: var(--muted);
   opacity: 0.6;
+}
+
+.crumb-more {
+  display: inline-grid;
+  place-items: center;
+  padding: 2px 1px;
+}
+
+.crumb > .lucide {
+  margin: 0 -2px;
 }
 
 .explorer-button {
@@ -558,12 +565,6 @@ body,
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-}
-
-.explorer-button svg {
-  width: 14px;
-  height: 14px;
-  fill: currentColor;
 }
 
 .explorer-button:hover {
@@ -629,56 +630,28 @@ body,
 
 .tree-twisty,
 .tree-twisty-space {
-  position: relative;
   flex: none;
-  width: 14px;
-  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  color: var(--muted);
 }
 
 .tree-twisty {
   cursor: pointer;
 }
 
-.tree-twisty::before {
-  content: '';
-  position: absolute;
-  top: 4px;
-  left: 3px;
-  width: 5px;
-  height: 5px;
-  border-right: 1.5px solid var(--muted);
-  border-bottom: 1.5px solid var(--muted);
-  transform: rotate(-45deg);
+.tree-twisty > .lucide {
+  transition: transform 0.12s ease;
 }
 
-.tree-twisty[data-open]::before {
-  top: 2px;
-  left: 4px;
-  transform: rotate(45deg);
+.tree-twisty[data-open] > .lucide {
+  transform: rotate(90deg);
 }
 
-.tree-icon {
-  flex: none;
-  width: 12px;
-  height: 12px;
-  border-radius: min(2px, var(--radius));
-}
-
-.tree-icon[data-kind='dir'] {
-  height: 9px;
-  background: #c69c45;
-  box-shadow: inset 0 2px 0 #e0b95e;
-}
-
-.tree-icon[data-kind='file'] {
-  width: 9px;
-  border: 1.5px solid var(--muted);
-  border-radius: min(1px, var(--radius));
-}
-
-.tree-icon[data-link] {
-  outline: 1px dashed var(--muted);
-  outline-offset: 1px;
+.tree-row > .file-icon {
+  margin-right: 2px;
 }
 
 .tree-row .rename-input {
@@ -916,7 +889,7 @@ body,
   flex: none;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   max-width: 40%;
   min-width: 0;
 }
@@ -934,12 +907,16 @@ body,
   color: var(--danger);
 }
 
-.status-dot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
+/* A command running: the accent, turning. */
+.status-spinner {
+  color: var(--accent);
+  animation: status-spin 1.2s linear infinite;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .status-spacer {
@@ -948,7 +925,15 @@ body,
 
 .status-notice {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: var(--warning);
+}
+
+.status-git-sync {
+  display: inline-flex;
+  align-items: center;
 }
 
 /* settings.json has errors: a button that opens the settings screen. */
@@ -975,12 +960,6 @@ body,
   display: flex;
   align-items: center;
   gap: 4px;
-}
-
-.status-git svg {
-  width: 12px;
-  height: 12px;
-  fill: currentColor;
 }
 
 .status-git-dirty {
@@ -1027,7 +1006,14 @@ body,
   text-align: center;
 }
 
+.search-icon {
+  margin: 0 2px;
+  color: var(--muted);
+}
+
 .search-bar button {
+  display: inline-grid;
+  place-items: center;
   width: 24px;
   height: 24px;
   padding: 0;
@@ -1078,6 +1064,15 @@ body,
   text-align: left;
   cursor: default;
   outline: none;
+}
+
+.menu-item-icon {
+  color: var(--muted);
+}
+
+.menu-item:hover .menu-item-icon,
+.menu-item:focus-visible .menu-item-icon {
+  color: inherit;
 }
 
 .menu-item:hover:not(:disabled),
@@ -1215,25 +1210,27 @@ body,
 /* A profile's icon: a built-in monogram badge, or the user's emoji / short text. */
 .profile-icon {
   flex: none;
-  display: inline-grid;
-  place-items: center;
-  min-width: 16px;
-  height: 14px;
-  padding: 0 2px;
-  border-radius: var(--radius-xs);
-  font: 600 9px/1 'Cascadia Mono', Consolas, monospace;
-  letter-spacing: -0.3px;
+  color: var(--muted);
 }
 
-.profile-icon[data-icon='linux'],
-.profile-icon[data-icon='custom'] {
+.profile-icon-text {
+  display: inline-grid;
+  place-items: center;
+  min-width: var(--icon-size);
+  height: var(--icon-size);
   font: 12px/1 'Segoe UI Emoji', system-ui, sans-serif;
-  letter-spacing: 0;
+}
+
+.agent-icon {
+  color: var(--accent);
 }
 
 .tab .profile-icon {
   margin-left: -4px;
-  opacity: 0.9;
+}
+
+.tab[data-active] .profile-icon:not(.agent-icon) {
+  color: var(--text);
 }
 
 .menu-item .profile-icon {
@@ -1283,6 +1280,9 @@ body,
 }
 
 .settings-nav button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 7px 10px;
   border: 0;
   border-radius: var(--radius-sm);
@@ -1569,8 +1569,9 @@ body,
   border: 0;
   border-radius: var(--radius-xs);
   background: var(--panel);
+  display: grid;
+  place-items: center;
   color: var(--muted);
-  font: 14px/1 system-ui, sans-serif;
   cursor: pointer;
 }
 
@@ -1752,6 +1753,8 @@ body,
 
 .key-remove,
 .key-add {
+  display: inline-grid;
+  place-items: center;
   padding: 0 5px;
   border: 0;
   border-radius: var(--radius-xs);
@@ -1911,12 +1914,24 @@ body,
   color: var(--text);
 }
 
-.palette-input {
+.palette-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 8px;
-  padding: 8px 10px;
+  padding: 0 10px;
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
   background: var(--bg);
+  color: var(--muted);
+}
+
+.palette-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
   color: var(--text);
   font: inherit;
   outline: none;
@@ -2004,6 +2019,18 @@ body,
   box-shadow: var(--shadow-md);
   font: var(--ui-font);
   color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toast-icon {
+  color: var(--accent);
+}
+
+.toast[data-kind='warning'] .toast-icon,
+.dialog-icon {
+  color: var(--warning);
 }
 
 .toast[data-kind='warning'] {
@@ -2223,6 +2250,8 @@ body,
 }
 
 .ai-close {
+  display: inline-grid;
+  place-items: center;
   width: 22px;
   height: 22px;
   padding: 0;
@@ -2307,6 +2336,9 @@ body,
 }
 
 .ai-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   padding: 6px 10px;
   background: color-mix(in srgb, var(--danger) 18%, transparent);
   color: var(--text);
@@ -2481,10 +2513,14 @@ body,
 }
 
 .ai-chip-code {
+  display: inline-flex;
+  align-items: center;
   color: var(--danger);
 }
 
 .ai-chip button {
+  display: inline-grid;
+  place-items: center;
   width: 18px;
   height: 18px;
   padding: 0;
@@ -2924,7 +2960,7 @@ body,
 
 .orch-activity li {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   min-width: 0;
   padding: 1px 0;
@@ -2939,9 +2975,11 @@ body,
 }
 
 .orch-activity-icon {
-  flex: none;
-  width: 16px;
-  text-align: center;
+  color: var(--muted);
+}
+
+.orch-activity li[data-ok='running'] .orch-activity-icon {
+  color: var(--accent);
 }
 
 .orch-activity-verb {
@@ -3110,4 +3148,56 @@ body,
   color: var(--text);
   font: 12px 'Cascadia Mono', Consolas, monospace;
   resize: vertical;
+}
+
+/* ------------------------------------------------------------------ icons */
+
+/* Every lucide icon: the same size and stroke (CSS beats the SVG's presentation attributes),
+   colored by the text around it (stroke = currentColor). */
+.lucide {
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  stroke-width: var(--icon-stroke);
+  vertical-align: middle;
+}
+
+/* File-type accents: the theme's ANSI colors, toned down toward the muted text so the tree
+   stays calm. Orange and purple are mixes (ANSI has neither). */
+:root {
+  --tone-muted: var(--muted);
+  --tone-folder: color-mix(in srgb, var(--accent) 50%, var(--muted));
+  --tone-accent: var(--accent);
+  --tone-blue: color-mix(in srgb, var(--ansi-blue, var(--accent)) 75%, var(--muted));
+  --tone-cyan: color-mix(in srgb, var(--ansi-cyan, var(--accent)) 75%, var(--muted));
+  --tone-green: color-mix(in srgb, var(--ansi-green, var(--success)) 75%, var(--muted));
+  --tone-yellow: color-mix(in srgb, var(--ansi-yellow, var(--warning)) 75%, var(--muted));
+  --tone-red: color-mix(in srgb, var(--ansi-red, var(--danger)) 75%, var(--muted));
+  --tone-magenta: color-mix(in srgb, var(--ansi-magenta, var(--accent)) 75%, var(--muted));
+  --tone-orange: color-mix(in srgb, color-mix(in srgb, var(--ansi-red, var(--danger)) 50%, var(--ansi-yellow, var(--warning))) 75%, var(--muted));
+  --tone-purple: color-mix(in srgb, color-mix(in srgb, var(--ansi-magenta, var(--accent)) 60%, var(--ansi-blue, var(--accent))) 75%, var(--muted));
+}
+
+.file-icon[data-tone='muted'] { color: var(--tone-muted); }
+.file-icon[data-tone='folder'] { color: var(--tone-folder); }
+.file-icon[data-tone='accent'] { color: var(--tone-accent); }
+.file-icon[data-tone='blue'] { color: var(--tone-blue); }
+.file-icon[data-tone='cyan'] { color: var(--tone-cyan); }
+.file-icon[data-tone='green'] { color: var(--tone-green); }
+.file-icon[data-tone='yellow'] { color: var(--tone-yellow); }
+.file-icon[data-tone='red'] { color: var(--tone-red); }
+.file-icon[data-tone='magenta'] { color: var(--tone-magenta); }
+.file-icon[data-tone='orange'] { color: var(--tone-orange); }
+.file-icon[data-tone='purple'] { color: var(--tone-purple); }
+
+/* explorer.fileIcons: "mono": every icon in the text's color. */
+[data-file-icons='mono'] .file-icon {
+  color: inherit;
+}
+
+/* An icon next to a label (buttons, menu items, notices). */
+.with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }

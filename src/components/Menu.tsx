@@ -1,7 +1,93 @@
 // Context menu primitives (one small widget, so they share a file).
 import { useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode } from 'react';
+import {
+  ChevronsDownUp,
+  ClipboardPaste,
+  Code,
+  Columns2,
+  Copy,
+  CopyPlus,
+  Equal,
+  Eraser,
+  FileBraces,
+  FilePlus,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  Layers,
+  LayersMinus,
+  LayersPlus,
+  LayoutTemplate,
+  Maximize2,
+  MessageSquarePlus,
+  Pencil,
+  Plus,
+  RotateCw,
+  Rows2,
+  Save,
+  Search,
+  Settings,
+  Sparkles,
+  SquareX,
+  TextSearch,
+  TextSelect,
+  Trash2,
+  Ungroup,
+  Workflow,
+  X,
+  type LucideIcon,
+} from 'lucide-react';
 import { COLOR_NAMES, TAB_COLORS } from '../config/colors';
 import { COLORS, type TabColor } from '../store/workspaceModel';
+
+/** Every menu action's icon, by its `action` (items that bring their own, like profiles, have none). */
+const ICONS: Record<string, LucideIcon> = {
+  rename: Pencil,
+  'rename-group': Pencil,
+  'rename-entry': Pencil,
+  duplicate: CopyPlus,
+  'new-group': LayersPlus,
+  'move-to-group': Layers,
+  'remove-from-group': LayersMinus,
+  ungroup: Ungroup,
+  'toggle-group': ChevronsDownUp,
+  close: X,
+  'close-others': SquareX,
+  'close-group': X,
+  'close-pane': X,
+  'split-right': Columns2,
+  'split-down': Rows2,
+  'split-here': Columns2,
+  'tab-here': Plus,
+  zoom: Maximize2,
+  equalize: Equal,
+  copy: Copy,
+  'copy-path': Copy,
+  'copy-relative-path': Copy,
+  'copy-command': Copy,
+  'copy-output': Copy,
+  'copy-both': Copy,
+  paste: ClipboardPaste,
+  'select-all': TextSelect,
+  find: Search,
+  clear: Eraser,
+  rerun: RotateCw,
+  'explain-block': Sparkles,
+  'ai-attach': MessageSquarePlus,
+  trash: Trash2,
+  'new-file': FilePlus,
+  'new-folder': FolderPlus,
+  'open-vscode': Code,
+  'open-file-manager': FolderOpen,
+  'open-layout': LayoutTemplate,
+  'save-tab-layout': Save,
+  'save-window-layout': Save,
+  'open-layouts-json': FileBraces,
+  'open-palette': TextSearch,
+  'open-settings': Settings,
+  'open-orchestrator': Workflow,
+  crumb: Folder,
+};
 
 interface MenuProps {
   x: number;
@@ -79,8 +165,10 @@ interface MenuItemProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 export function MenuItem({ action, shortcut, onSelect, children, ...rest }: MenuItemProps) {
+  const Icon = ICONS[action];
   return (
     <button type="button" role="menuitem" className="menu-item" data-action={action} onClick={onSelect} {...rest}>
+      {Icon && <Icon className="menu-item-icon" aria-hidden="true" />}
       <span className="menu-item-label">{children}</span>
       {shortcut && <kbd>{shortcut}</kbd>}
     </button>

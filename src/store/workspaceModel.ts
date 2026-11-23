@@ -48,7 +48,7 @@ export type ShellEvent =
   | { type: 'integration'; ok: false; error: string };
 
 /** AI agents the backend recognizes in a session's process tree. */
-export type AgentName = 'claude' | 'codex' | 'gemini';
+export type AgentName = 'claude' | 'codex' | 'gemini' | 'agy';
 /**
  * working: producing output; waiting: asked for the user (BEL / OSC 9 / OSC 777) or went quiet
  * for a while; finished: the agent exited (until the pane is used again).

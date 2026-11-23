@@ -9,6 +9,7 @@ import {
   type DragEndEvent,
 } from '@dnd-kit/core';
 import { horizontalListSortingStrategy, SortableContext } from '@dnd-kit/sortable';
+import { ChevronDown, Plus } from 'lucide-react';
 import { Fragment } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { focusActiveTerminal } from '../lib/tabActions';
@@ -99,7 +100,7 @@ export function TabBar() {
           focusActiveTerminal();
         }}
       >
-        +
+        <Plus aria-hidden="true" />
       </button>
       <button
         type="button"
@@ -112,7 +113,7 @@ export function TabBar() {
           useUi.getState().openMenu({ kind: 'shells', x: box.left, y: box.bottom });
         }}
       >
-        ▾
+        <ChevronDown aria-hidden="true" />
       </button>
       <div className="tab-bar-space" {...drag} />
       {custom && <WindowControls />}
