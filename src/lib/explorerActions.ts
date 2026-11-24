@@ -1,6 +1,7 @@
 // What the explorer does to terminals and files. Typing into a terminal is guarded: only an idle
 // shell (OSC 133) with an empty prompt gets a `cd`; otherwise nothing is typed.
 import { useExplorer } from '../store/explorer';
+import { useOrchestrator } from '../store/orchestrator';
 import { useSettings } from '../store/settings';
 import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
@@ -8,8 +9,8 @@ import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { spawnOf, type PaneId } from '../store/workspaceModel';
 import { copyText } from './clipboard';
 import { loadDir } from './explorerData';
-import { cdCommand, parentDir, quotePath, relativePath } from './explorerModel';
-import { createEntry, openInFileManager, openInVscode, renameEntry, trashEntries } from './fsApi';
+import { baseName, cdCommand, isInside, normalizePath, parentDir, pathKey, quotePath, relativePath } from './explorerModel';
+import { createEntry, listDir, openInFileManager, openInVscode, renameEntry, trashEntries } from './fsApi';
 import { focusActiveTerminal } from './tabActions';
 import { getPane } from './terminalRegistry';
 
@@ -74,6 +75,36 @@ export function openFolder(dir: string, breadcrumb = false): void {
     return;
   }
   cdInActivePane(dir);
+}
+
+/**
+ * Shows a file in the explorer (a path clicked in an answer of the orchestrator): the sidebar on
+ * the files, the folders down to it expanded, the row selected and scrolled into view. Outside
+ * the explorer's folder, the explorer is pinned to the file's folder.
+ */
+export async function revealInExplorer(path: string): Promise<void> {
+  const target = normalizePath(path);
+  const parent = parentDir(target);
+  const name = baseName(target).toLowerCase();
+  const entry = parent ? await listDir(parent).then((entries) => entries.find((e) => e.name.toLowerCase() === name), () => undefined) : undefined;
+  if (!parent || !entry) {
+    useUi.getState().showToast(`No se encontró ${clip(path, 80)}.`, 'warning');
+    return;
+  }
+  const explorer = useExplorer.getState();
+  if (!explorer.visible) explorer.toggleVisible();
+  if (useOrchestrator.getState().sidebarView !== 'files') useOrchestrator.setState({ sidebarView: 'files' });
+  let root = currentExplorerRoot();
+  if (!root || !isInside(target, root) || pathKey(target) === pathKey(root)) {
+    explorer.setPinned(parent);
+    root = parent;
+  }
+  // Every folder between the root and the file, open.
+  for (let dir: string | null = parent; dir && isInside(dir, root) && pathKey(dir) !== pathKey(root); dir = parentDir(dir)) explorer.setExpanded(dir, true);
+  if (entry.kind === 'dir') explorer.setExpanded(entry.path, true);
+  explorer.select(entry.path);
+  explorer.setRevealing(entry.path);
+  if (entry.hidden && !explorer.showHidden) notify(`${entry.name} está oculto en el explorador: activá "ver ocultos" para verlo.`);
 }
 
 /**

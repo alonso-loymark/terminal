@@ -22,9 +22,17 @@ pub enum ImageError {
     NotPng,
     #[error("la imagen pesa más de {} MB", MAX_IMAGE_BYTES / 1024 / 1024)]
     TooLarge,
+    #[error("la imagen adjunta pesa más de {} MB", MAX_ATTACHMENT_BYTES / 1024 / 1024)]
+    AttachmentTooLarge,
+    #[error("la imagen adjunta no es una de las que guardó Brisa")]
+    NotOurs,
     #[error("no se pudo guardar la imagen: {0}")]
     Io(#[from] io::Error),
 }
+
+/// An image attached to a message for an agent (the orchestrator): the Messages API takes up to
+/// 5 MB per image (the page already scales screenshots down to 1568 px).
+pub const MAX_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
 
 /// Where the images go: `%TEMP%\brisa-images`.
 pub fn images_dir() -> PathBuf {
@@ -92,6 +100,51 @@ pub fn remove_old(dir: &Path, keep: Duration, now: SystemTime) -> io::Result<usi
         }
     }
     Ok(removed)
+}
+
+/// Reads an image attached to a message: only a PNG that Brisa saved in `dir` (a pasted
+/// image), never any other file the page could name.
+pub fn read_attachment(dir: &Path, path: &Path) -> Result<Vec<u8>, ImageError> {
+    let file = fs::canonicalize(path)?;
+    let ours = fs::canonicalize(dir)?;
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if file.parent() != Some(ours.as_path()) || !name.starts_with(PREFIX) || !name.ends_with(".png")
+    {
+        return Err(ImageError::NotOurs);
+    }
+    if fs::metadata(&file)?.len() > MAX_ATTACHMENT_BYTES as u64 {
+        return Err(ImageError::AttachmentTooLarge);
+    }
+    let bytes = fs::read(&file)?;
+    if !bytes.starts_with(PNG_MAGIC) {
+        return Err(ImageError::NotPng);
+    }
+    Ok(bytes)
+}
+
+/// Standard base64 with padding (an image inside a JSON message). No crate for 20 lines.
+pub fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// The image format of `bytes` by its signature (what a drop is checked against).
@@ -170,6 +223,57 @@ mod tests {
             std::env::temp_dir().join(format!("brisa-images-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64(&[0xff, 0xfe, 0xfd, 0x00]), "//79AA==");
+        assert_eq!(base64(PNG), "iVBORw0KGgoAAAANSUhEUg==");
+    }
+
+    #[test]
+    fn only_our_saved_pngs_can_be_attached() {
+        let dir = temp("attach");
+        let saved = save_png(&dir, PNG).unwrap();
+        assert_eq!(read_attachment(&dir, &saved).unwrap(), PNG);
+        // Another file of the same folder, a PNG elsewhere, a file that is not there.
+        let other = dir.join("notas.png");
+        fs::write(&other, PNG).unwrap();
+        assert!(matches!(
+            read_attachment(&dir, &other),
+            Err(ImageError::NotOurs)
+        ));
+        let outside = temp("attach-outside");
+        fs::create_dir_all(&outside).unwrap();
+        let elsewhere = outside.join("brisa-1.png");
+        fs::write(&elsewhere, PNG).unwrap();
+        assert!(matches!(
+            read_attachment(&dir, &elsewhere),
+            Err(ImageError::NotOurs)
+        ));
+        assert!(read_attachment(&dir, &dir.join("brisa-0.png")).is_err());
+        // Renamed to look like ours but not a PNG.
+        let fake = dir.join("brisa-9.png");
+        fs::write(&fake, b"GIF89a").unwrap();
+        assert!(matches!(
+            read_attachment(&dir, &fake),
+            Err(ImageError::NotPng)
+        ));
+        let big = dir.join("brisa-big.png");
+        let mut bytes = PNG.to_vec();
+        bytes.resize(MAX_ATTACHMENT_BYTES + 1, 0);
+        fs::write(&big, bytes).unwrap();
+        assert!(matches!(
+            read_attachment(&dir, &big),
+            Err(ImageError::AttachmentTooLarge)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]

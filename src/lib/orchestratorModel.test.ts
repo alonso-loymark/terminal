@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AgentInfo, ModelInfo } from './agentsApi.ts';
 import {
+  activityNow,
+  activitySummary,
+  agentsUpdatePrompt,
   allowedCommands,
   buildBrief,
   decisionOf,
@@ -10,6 +13,12 @@ import {
   formatCost,
   markdownAnswer,
   MINIMAL_CLAUDE_MD,
+  lineDiff,
+  modelMention,
+  parseWorkerResult,
+  usageDetail,
+  usageShort,
+  type ActivityItem,
   parseConversation,
   parseForcedModel,
   parsePrefs,
@@ -75,7 +84,7 @@ test('a plan is read from a json block and validated against the detected models
   const answer = 'Listo:\n```json\n{"task":"Renombrar x a total en src/a.ts","agent":"claude","model":"haiku","effort":"low","why":"Trivial.","files":["src/a.ts"]}\n```';
   const result = validatePlan(extractJson(answer), AGENTS);
   assert.ok('plan' in result);
-  assert.deepEqual(result.plan, { task: 'Renombrar x a total en src/a.ts', agent: 'claude', model: 'haiku', effort: 'low', why: 'Trivial.', files: ['src/a.ts'] });
+  assert.deepEqual(result.plan, { task: 'Renombrar x a total en src/a.ts', agent: 'claude', model: 'haiku', effort: 'low', why: 'Trivial.', files: ['src/a.ts'], title: null });
   // Bare JSON works too; the forced model wins; an effort the model lacks becomes the nearest.
   const forced = validatePlan(extractJson('{"task":"t","agent":"claude","model":"sonnet","effort":"max","why":"w"}'), AGENTS, 'haiku');
   assert.ok('plan' in forced);
@@ -182,4 +191,75 @@ test('small helpers', () => {
   assert.equal(formatCost(0.123), 'US$0.123');
   assert.equal(formatCost(2.5), 'US$2.50');
   assert.deepEqual(allowedCommands([{ pattern: 'npm test *', source: 'package.json' }], [' npm run e2e * ', ''], ['curl x', 'npm test *']), ['npm test *', 'npm run e2e *', 'curl x']);
+});
+
+test('the chat title comes in the first plan, in the same answer (no other call)', () => {
+  const base = { message: 'renombrá total', forced: null, projectName: 'cliente', agents: AGENTS, commands: [], hasAgentsMd: false, decisions: [], recent: [] };
+  assert.ok(plannerPrompt({ ...base, needsTitle: true }).text.includes('## Título del chat'));
+  assert.ok(!plannerPrompt(base).text.includes('## Título del chat'));
+  const plan = validatePlan(extractJson('{"task":"t","agent":"claude","model":"haiku","effort":"low","why":"w","title":" Renombrar total "}'), AGENTS);
+  assert.ok('plan' in plan && plan.plan.title === 'Renombrar total');
+  // Images: the planner is told they exist (the worker gets them).
+  const withImages = plannerPrompt({ ...base, images: 2 }).text;
+  assert.ok(withImages.includes('2 imágenes') && withImages.includes('el trabajador las recibe'), withImages);
+});
+
+const item = (action: ActivityItem['action'], target: string, ok: boolean | null = true): ActivityItem => ({ id: `${action}-${target}`, action, tool: 'X', target, ok });
+
+test('activity in one line, and what is happening now', () => {
+  assert.equal(activitySummary([]), '');
+  assert.equal(
+    activitySummary([item('read', 'package.json'), item('read', 'src/app.js'), item('read', 'src/app.js'), item('write', 'NOTAS.md'), item('edit', 'src/app.js'), item('command', 'npm run build')]),
+    'Leyó 2 archivos, creó 1, editó 1 y ejecutó 1 comando',
+  );
+  assert.equal(activitySummary([item('edit', 'a.ts'), item('edit', 'b.ts')]), 'Editó 2 archivos');
+  assert.equal(activitySummary([item('command', 'npm test', false), item('command', 'npm test')]), 'Ejecutó 2 comandos (1 con error)');
+  assert.equal(activitySummary([item('search', '*.ts')]), 'Buscó 1 vez');
+  // Live: the tool still running, else the last line written, else thinking.
+  assert.equal(activityNow([item('read', 'a.ts'), item('command', 'npm test', null)], 'texto'), 'Ejecutando npm test…');
+  assert.equal(activityNow([item('read', 'a.ts')], 'Voy a revisar.\n**Ahora** el build'), 'Ahora el build');
+  assert.equal(activityNow([], ''), 'Pensando…');
+});
+
+test("the worker's summary, and the line that says AGENTS.md is out of date", () => {
+  const plain = parseWorkerResult('**Qué cambió:** x.\n**Cómo probarlo:** y.\n**Pendiente:** Nada.');
+  assert.equal(plain.agentsStale, null);
+  assert.ok(plain.body.startsWith('**Qué cambió:**'));
+  const stale = parseWorkerResult('**Qué cambió:** x.\n**Pendiente:** Nada.\n\nAGENTS.md desactualizado: el comando de tests ahora es `npm run test:unit`.');
+  assert.equal(stale.agentsStale, 'el comando de tests ahora es `npm run test:unit`.');
+  assert.ok(!stale.body.includes('desactualizado'));
+  assert.equal(parseWorkerResult('- **AGENTS.md desactualizado:** falta la carpeta api/**').agentsStale, 'falta la carpeta api/');
+  // A mention inside a sentence is not the marker.
+  assert.equal(parseWorkerResult('No creo que AGENTS.md desactualizado: sea un problema.').agentsStale, null);
+  assert.ok(agentsUpdatePrompt('falta api/').includes('falta api/'));
+});
+
+test('usage: a short footer and the detail on hover', () => {
+  const usage = { inputTokens: 1200, outputTokens: 340, cacheReadTokens: 5000, cacheCreationTokens: 800, costUsd: 0.0042, durationMs: 2100, turns: 3, models: ['claude-haiku-5-5'] };
+  assert.equal(usageShort(usage), 'US$0.0042 · 7.3 k tokens');
+  const detail = usageDetail(usage, 'Tarea');
+  for (const part of ['Tarea', 'Entrada: 1.2 k', 'Caché leída: 5.0 k', 'Salida: 340', 'US$0.0042', 'Turnos: 3', '2.1 s', 'claude-haiku-5-5']) assert.ok(detail.includes(part), part);
+});
+
+test('@ at the start suggests the models the CLI offers', () => {
+  const ranked = rankModels(MODELS);
+  assert.deepEqual(modelMention('@', ranked), { query: '', start: 0, items: ['haiku', 'sonnet', 'opus', 'fable'] });
+  assert.deepEqual(modelMention('  @op', ranked), { query: 'op', start: 2, items: ['opus'] });
+  assert.equal(modelMention('@opus', ranked), null, 'already complete');
+  assert.equal(modelMention('@zz', ranked), null);
+  assert.equal(modelMention('hola @op', ranked), null, 'only at the start');
+  assert.equal(modelMention('@opus arreglá', ranked), null);
+});
+
+test('a line diff shows what an update of AGENTS.md changes', () => {
+  const diff = lineDiff('# A\n- uno\n- dos\n', '# A\n- uno\n- tres\n- dos\n');
+  assert.deepEqual(
+    diff.map((d) => `${d.type[0]}${d.text}`),
+    ['s# A', 's- uno', 'a- tres', 's- dos'],
+  );
+  assert.deepEqual(
+    lineDiff('x\r\ny', 'x\nz').map((d) => d.type),
+    ['same', 'del', 'add'],
+  );
+  assert.deepEqual(lineDiff('', 'nuevo').map((d) => d.type).sort(), ['add', 'del']);
 });

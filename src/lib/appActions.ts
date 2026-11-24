@@ -8,7 +8,7 @@ import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import type { Layout, PaneId, SplitId } from '../store/workspaceModel';
 import { aiEnabled, cancelPaneQuery, explainLastFailed, toggleCommandBar, togglePanel } from './aiActions';
 import { navigateBlocks } from './blockActions';
-import { openOrchestrator } from './orchestratorActions';
+import { activeOrchestratorDir, focusChatSearch, newChat, openOrchestrator, requestDeleteChat, showChatList, startRenameChat } from './orchestratorActions';
 import { pasteClipboard, pasteClipboardImageAsFile } from './imagePaste';
 import { copySelection } from './keybindings';
 import { openLayoutsJson } from './layoutsSync';
@@ -147,6 +147,30 @@ const RUNNERS: Record<ActionId, Runner> = {
     useUi.getState().openMultiAgent(pane?.cwd ?? pane?.startCwd ?? null);
   },
   'orchestrator.open': () => openOrchestrator(),
+  // These act on the active orchestrator tab; elsewhere the key goes on to the program.
+  'orchestrator.newChat': () => {
+    const dir = activeOrchestratorDir();
+    if (!dir) return 'pass';
+    newChat(dir);
+  },
+  'orchestrator.searchChats': () => {
+    if (!activeOrchestratorDir()) return 'pass';
+    focusChatSearch();
+  },
+  'orchestrator.showChats': () => {
+    if (!activeOrchestratorDir()) return 'pass';
+    showChatList();
+  },
+  'chats.rename': () => {
+    const dir = activeOrchestratorDir();
+    if (!dir) return 'pass';
+    startRenameChat(dir);
+  },
+  'chats.delete': () => {
+    const dir = activeOrchestratorDir();
+    if (!dir) return 'pass';
+    requestDeleteChat(dir);
+  },
   // With AI off the keys go on to the program (Ctrl+I is Tab there).
   'ai.command': (ctx) => {
     if (!aiEnabled()) return 'pass';

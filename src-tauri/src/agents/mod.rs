@@ -94,6 +94,10 @@ pub struct TaskSpec {
     pub max_turns: Option<u32>,
     /// `ai.claudePath` (or the agent's own path setting): empty = look for it.
     pub agent_path: Option<String>,
+    /// Images pasted in the message (PNGs Brisa saved, see `images::read_attachment`): they go
+    /// to the worker with the brief.
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 /// A text-only question (the orchestrator's plan): no tools, no project.

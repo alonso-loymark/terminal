@@ -125,6 +125,15 @@ pub fn models_of(line: &Value) -> Option<Vec<ModelInfo>> {
     )
 }
 
+/// The fixed shape of a worker's final answer (the orchestrator shows it as markdown).
+pub const SUMMARY_FORMAT: &str = "**Qué cambió:** los archivos y el cambio, en una o dos líneas.\n\
+     **Cómo probarlo:** el comando o los pasos para verificarlo.\n\
+     **Pendiente:** lo que quedó sin hacer o sin verificar (o «Nada.»).";
+
+/// The line a worker adds when the task left AGENTS.md out of date (the orchestrator offers to
+/// update it, with the user's confirmation).
+pub const AGENTS_STALE_MARKER: &str = "AGENTS.md desactualizado:";
+
 /// Brisa's rules for a worker, appended to Claude Code's own system prompt.
 pub fn worker_rules(mode: TaskMode, commands: &[String]) -> String {
     match mode {
@@ -157,9 +166,14 @@ pub fn worker_rules(mode: TaskMode, commands: &[String]) -> String {
                  - No leas archivos de secretos (.env, claves). No hagas commits ni cambies de \
                  rama.\n\
                  - Las instrucciones del proyecto están en AGENTS.md (y CLAUDE.md), si existen: \
-                 seguilas.\n\
-                 - Al terminar, respondé con un resumen breve: qué cambiaste (archivos), qué \
-                 verificaste y qué queda pendiente."
+                 seguilas. No edites AGENTS.md ni CLAUDE.md.\n\
+                 - Tu respuesta final es un resumen corto en español con exactamente estas tres \
+                 secciones, en este orden, sin nada antes ni después, sin repetir información \
+                 entre ellas ni copiar el diff (Brisa ya lo muestra):\n\
+                 {SUMMARY_FORMAT}\n\
+                 - Si la tarea dejó AGENTS.md desactualizado (comandos, estructura o \
+                 convenciones que cambiaron), agregá al final una sola línea: \
+                 `{AGENTS_STALE_MARKER} <qué hay que cambiar>`. Si no, no la agregues."
             )
         }
     }
@@ -192,6 +206,11 @@ pub fn work_args(
     .map(OsString::from)
     .collect();
     args.push(spec.model.clone().into());
+    if spec.mode == TaskMode::Work && !spec.images.is_empty() {
+        // The brief and the images go as one stream-json message (see `stream_json_prompt`).
+        args.push("--input-format".into());
+        args.push("stream-json".into());
+    }
     args.push("--tools".into());
     match spec.mode {
         TaskMode::Work => {
@@ -224,6 +243,42 @@ pub fn work_args(
     args.push("--append-system-prompt-file".into());
     args.push(rules_file.as_os_str().to_owned());
     Ok(args)
+}
+
+/// The brief with the pasted images as one stream-json user message (`--input-format
+/// stream-json`, the same shape the SDKs send): an image cannot go in plain stdin text, and the
+/// worker's file tools cannot read Brisa's temporary folder (they are confined to the project).
+/// Images first, as the Messages API recommends.
+pub fn stream_json_prompt(text: &str, images: &[Vec<u8>]) -> String {
+    let mut content: Vec<Value> = images
+        .iter()
+        .map(|png| {
+            serde_json::json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": "image/png", "data": crate::images::base64(png) },
+            })
+        })
+        .collect();
+    content.push(serde_json::json!({ "type": "text", "text": text }));
+    let message =
+        serde_json::json!({ "type": "user", "message": { "role": "user", "content": content } });
+    format!("{message}\n")
+}
+
+/// The images of a task, read and checked (only PNGs Brisa saved).
+fn attachments(spec: &TaskSpec) -> Result<Vec<Vec<u8>>, Failure> {
+    let dir = crate::images::images_dir();
+    spec.images
+        .iter()
+        .map(|path| {
+            crate::images::read_attachment(&dir, Path::new(path)).map_err(|e| {
+                Failure::new(
+                    ErrorCode::Invalid,
+                    format!("No se pudo adjuntar la imagen: {e}."),
+                )
+            })
+        })
+        .collect()
 }
 
 fn find(config: &AgentsConfig, custom: Option<&str>) -> Result<PathBuf, Failure> {
@@ -555,15 +610,12 @@ impl AgentAdapter for ClaudeCode {
         )
         .map_err(|e| Failure::new(ErrorCode::Failed, format!("no se pudo preparar: {e}")))?;
         let args = work_args(spec, &commands, &rules.0)?;
-        stream_run(
-            &exe,
-            &args,
-            &dir,
-            spec.prompt.clone(),
-            WORK_TIMEOUT,
-            cancel,
-            emit,
-        )
+        let prompt = if spec.mode == TaskMode::Work && !spec.images.is_empty() {
+            stream_json_prompt(&spec.prompt, &attachments(spec)?)
+        } else {
+            spec.prompt.clone()
+        };
+        stream_run(&exe, &args, &dir, prompt, WORK_TIMEOUT, cancel, emit)
     }
 }
 
@@ -583,6 +635,7 @@ mod tests {
             allowed_commands: Vec::new(),
             max_turns: Some(40),
             agent_path: None,
+            images: Vec::new(),
         }
     }
 
@@ -631,6 +684,27 @@ mod tests {
             || a.contains("bypassPermissions")
             || a == "--permission-mode=acceptEdits"
             || a == "default"));
+    }
+
+    #[test]
+    fn images_go_with_the_brief_as_one_stream_json_message() {
+        let mut with_images = spec(TaskMode::Work);
+        with_images.images = vec![r"C:\t\brisa-1.png".into()];
+        let args = strings(work_args(&with_images, &[], Path::new("r.txt")).unwrap());
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--input-format" && w[1] == "stream-json")
+        );
+        let plain = strings(work_args(&spec(TaskMode::Work), &[], Path::new("r.txt")).unwrap());
+        assert!(!plain.contains(&"--input-format".to_owned()));
+        let line = stream_json_prompt("## Tarea\nx", &[b"\x89PNG".to_vec()]);
+        assert!(line.ends_with('\n') && !line.trim_end().contains('\n'));
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"], "user");
+        let content = value["message"]["content"].as_array().unwrap();
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "iVBORw==");
+        assert_eq!(content[1]["text"], "## Tarea\nx");
     }
 
     #[test]
@@ -684,5 +758,15 @@ mod tests {
         assert!(rules.contains("`npm test *`"));
         assert!(rules.contains("AGENTS.md"));
         assert!(worker_rules(TaskMode::Work, &[]).contains("ninguno"));
+        // The fixed summary, and the line that says AGENTS.md is out of date.
+        for part in [
+            "**Qué cambió:**",
+            "**Cómo probarlo:**",
+            "**Pendiente:**",
+            "en español",
+            AGENTS_STALE_MARKER,
+        ] {
+            assert!(rules.contains(part), "{part}");
+        }
     }
 }

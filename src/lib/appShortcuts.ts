@@ -18,6 +18,8 @@ import { focusActiveTerminal } from './tabActions';
 type KeyContext =
   | { kind: 'terminal'; paneId: string }
   | { kind: 'explorer' }
+  /** The orchestrator's chat list. */
+  | { kind: 'chats' }
   /** A text field of the app (renaming, search, settings, palette). */
   | { kind: 'input' }
   | { kind: 'other' };
@@ -35,12 +37,14 @@ function contextOf(target: EventTarget | null): KeyContext {
     return { kind: 'input' };
   }
   if (target.closest('.file-tree')) return { kind: 'explorer' };
+  if (target.closest('.chat-list')) return { kind: 'chats' };
   return { kind: 'other' };
 }
 
 function applies(action: ActionDef, ctx: KeyContext, event: KeyboardEvent): boolean {
   if (action.scope === 'terminal') return ctx.kind === 'terminal';
   if (action.scope === 'explorer') return ctx.kind === 'explorer';
+  if (action.scope === 'chats') return ctx.kind === 'chats';
   // In a text field, keys without Ctrl/Alt (F2, Supr) belong to the field.
   return ctx.kind !== 'input' || event.ctrlKey || event.altKey || event.metaKey;
 }

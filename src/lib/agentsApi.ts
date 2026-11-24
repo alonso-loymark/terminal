@@ -68,6 +68,8 @@ export interface TaskSpec {
   allowedCommands: string[];
   maxTurns: number | null;
   agentPath: string | null;
+  /** Pasted images (PNGs Brisa saved): they go with the brief. */
+  images?: string[];
 }
 
 export interface AskSpec {
@@ -105,12 +107,14 @@ export interface ProjectInfo {
 }
 
 export interface ProjectFiles {
+  /** The single chat of before (Fase 8A), migrated when there is no `chats`. */
   conversation: string | null;
+  chats: string | null;
   decisions: string | null;
   project: string | null;
 }
 
-export type ProjectFile = 'conversation' | 'decisions' | 'project';
+export type ProjectFile = 'chats' | 'decisions' | 'project';
 
 export interface FileDiff {
   path: string;
@@ -152,6 +156,13 @@ export const orchCancel = (id: number) => invoke<void>('orch_cancel', { id });
 export const orchLoad = (dir: string) => invoke<ProjectFiles>('orch_load', { dir });
 
 export const orchSave = (dir: string, file: ProjectFile, text: string) => invoke<void>('orch_save', { dir, file, text });
+
+/** One chat's messages (null: no file yet). */
+export const orchChatLoad = (dir: string, id: string) => invoke<string | null>('orch_chat_load', { dir, id });
+
+export const orchChatSave = (dir: string, id: string, text: string) => invoke<void>('orch_chat_save', { dir, id, text });
+
+export const orchChatDelete = (dir: string, id: string) => invoke<void>('orch_chat_delete', { dir, id });
 
 /** Notes the repository's state before a task. */
 export const orchSnapshot = (dir: string) => invoke<number>('orch_snapshot', { dir });

@@ -49,8 +49,15 @@
 //   `<FAKE_CLAUDE_STATE>.sessions.json` (`--resume` of an unknown one fails like the real CLI).
 //   Words in the brief: FAKE_DENIED (tries `curl -s https://example.com`: denied unless
 //   allowed), FAKE_SECRET (tries to read .env), FAKE_SLOW (~60 s, with a child process, to test
-//   that cancelling kills the tree), FAKE_WORK_ERROR (usage limit after spending a little).
-//   Analysis (`--tools Read,Glob,Grep`): reads and answers an AGENTS.md draft.
+//   that cancelling kills the tree; `npm test` stays running meanwhile), FAKE_WORK_ERROR (usage
+//   limit after spending a little), FAKE_AGENTS_STALE (the answer ends with the line that says
+//   AGENTS.md is out of date), FAKE_MARKDOWN (an answer with lists, a table, code, file paths
+//   and HTML a model could write: the page must render it safely). The answer follows the fixed
+//   summary of Brisa's rules (Qué cambió / Cómo probarlo / Pendiente). With `--input-format
+//   stream-json` the brief comes as one user message with the pasted images (logged: count,
+//   size, whether each is a PNG).
+//   Analysis (`--tools Read,Glob,Grep`): reads and answers an AGENTS.md draft (or, when asked
+//   to update it, the current AGENTS.md with the change).
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -386,6 +393,8 @@ function fakePlan(prompt) {
   else if (/arquitectura|bug dif[ií]cil|muchos archivos/.test(lower)) [model, effort, why] = ['opus', 'high', 'Arquitectura o un bug difícil: el modelo más potente con esfuerzo alto.'];
   if (forced) [model, why] = [forced, `El usuario eligió ${forced}.`];
   const plan = { task: `Tarea: ${message}`, agent: 'claude', model, effort, why, files: ['src/app.js'] };
+  // The chat's first message: a short title, in the same answer (no other call).
+  if (prompt.includes('## Título del chat')) plan.title = `Plan: ${message.replace(/^@\S+\s*/, '').split(/\s+/).slice(0, 3).join(' ')}`;
   return `${FENCE}json\n${JSON.stringify(plan, null, 2)}\n${FENCE}`;
 }
 
@@ -532,7 +541,34 @@ async function workMode(args, state) {
     const i = args.indexOf(flag);
     return i >= 0 ? args[i + 1] : undefined;
   };
-  const prompt = await readStdin();
+  const raw = await readStdin();
+  // `--input-format stream-json`: one user message with the brief and the pasted images.
+  let prompt = raw;
+  let images = [];
+  let badInput = null;
+  if (value('--input-format') === 'stream-json') {
+    try {
+      const message = raw
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => JSON.parse(l))
+        .find((m) => m.type === 'user');
+      const content = Array.isArray(message?.message?.content) ? message.message.content : [];
+      prompt = content
+        .filter((c) => c.type === 'text')
+        .map((c) => c.text)
+        .join('\n');
+      images = content
+        .filter((c) => c.type === 'image')
+        .map((c) => {
+          const bytes = Buffer.from(c.source?.data ?? '', 'base64');
+          return { mediaType: c.source?.media_type, bytes: bytes.length, png: bytes.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])) };
+        });
+      if (!message) badInput = 'sin mensaje de usuario';
+    } catch (error) {
+      badInput = String(error);
+    }
+  }
   // Behaviors come from the task itself (a brief also summarizes past tasks, which may name them).
   const asked = /## Tarea\n([\s\S]*?)(?:\n## |$)/.exec(prompt)?.[1] ?? prompt;
   const allowed = listAfter(args, '--allowedTools');
@@ -547,8 +583,9 @@ async function workMode(args, state) {
   const resume = value('--resume');
   const model = value('--model') ?? 'default';
   const env = Object.fromEntries(['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY'].map((k) => [k, process.env[k] ?? null]));
-  logRun({ kind: 'work', args, allowed, denied, rules, prompt, model, effort: value('--effort') ?? null, resume: resume ?? null, tools, env });
+  logRun({ kind: 'work', args, allowed, denied, rules, prompt, model, effort: value('--effort') ?? null, resume: resume ?? null, tools, env, images });
   const problems = [
+    ...(badInput ? [`entrada stream-json inválida: ${badInput}`] : []),
     ...['-p', '--verbose', '--restricted', '--strict-mcp-config', '--disable-slash-commands', '--include-partial-messages'].filter((f) => !args.includes(f)),
     ...(value('--output-format') === 'stream-json' ? [] : ['--output-format stream-json']),
     ...(value('--permission-mode') === 'dontAsk' ? [] : ['--permission-mode dontAsk']),
@@ -624,11 +661,19 @@ async function workMode(args, state) {
   if (firstFile) await call('Read', { file_path: path.join(process.cwd(), firstFile) }, () => fs.readFileSync(firstFile, 'utf8').slice(0, 200));
   if (tools === ANALYZE_TOOLS) {
     await call('Glob', { pattern: '**/*' });
+    // Updating an AGENTS.md that went out of date: the current file with the change.
+    const stale = /desactualizado[^\n]*?:\s*(.+)/.exec(prompt)?.[1]?.trim();
+    if (stale && fs.existsSync('AGENTS.md')) {
+      await call('Read', { file_path: path.join(process.cwd(), 'AGENTS.md') }, () => fs.readFileSync('AGENTS.md', 'utf8').slice(0, 200));
+      return finish(`${fs.readFileSync('AGENTS.md', 'utf8').trimEnd()}\n\n## Cambios recientes\n- ${stale}\n`);
+    }
     return finish('# AGENTS.md\n\nInstrucciones para agentes de IA en este proyecto (borrador falso).\n\n## Stack\n- Node.js (package.json)\n\n## Comandos\n- Build: `npm run build`\n- Tests: `npm test`\n\n## Convenciones\n- Código en inglés, documentación en español.\n\n## Estructura\n- `src/`: código de la app.\n');
   }
   if (asked.includes('FAKE_SLOW')) {
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     logRun({ kind: 'child', child: child.pid });
+    // A command that is still running (the chat shows it live).
+    jsonLine({ type: 'assistant', message: { model, content: [{ type: 'tool_use', id: 'toolu_fake_slow', name: 'Bash', input: { command: 'npm test', description: 'Tests' } }] }, session_id: sessionId });
     for (let i = 0; i < 200; i++) {
       jsonLine({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '.' } }, session_id: sessionId });
       await wait(300);
@@ -658,8 +703,35 @@ async function workMode(args, state) {
     saveSession(sessionId, { wantedCurl: !curl });
   }
   const built = await call('Bash', { command: 'npm run build', description: 'Build' }, () => 'build ok (falso)');
-  const notes = [`edité ${edited}`, built ? 'verifiqué con npm run build' : 'no pude correr el build', curl ? null : 'necesito permiso para ejecutar curl -s https://example.com'].filter(Boolean);
-  return finish(`Listo: ${notes.join('; ')}.`);
+  // Brisa's fixed summary (worker rules): what changed, how to test it, what is left.
+  const seen = images.length ? ` Vi ${images.length} ${images.length === 1 ? 'imagen' : 'imágenes'}.` : '';
+  const lines = [
+    `**Qué cambió:** edité \`${edited}\` (agregué un comentario con la tarea).${seen}`,
+    `**Cómo probarlo:** ${built ? 'verifiqué con npm run build; para repetirlo: `npm run build`.' : 'no pude correr el build.'}`,
+    `**Pendiente:** ${curl ? 'Nada.' : 'necesito permiso para ejecutar curl -s https://example.com.'}`,
+  ];
+  if (asked.includes('FAKE_MARKDOWN')) {
+    lines.push(
+      '',
+      'Detalle:',
+      '',
+      '- Revisé `src/app.js` y `package.json`.',
+      '- El build está en **verde**.',
+      '  1. Paso uno anidado',
+      '',
+      '| Archivo | Cambio |',
+      '| --- | --- |',
+      '| src/app.js | comentario |',
+      '',
+      '```js',
+      'const total = 1; // ejemplo',
+      '```',
+      '',
+      'HTML que un modelo podría escribir: <img src="x" onerror="window.__xss = 1"> <script>window.__xss = 2</script> <b>negrita</b> y [un link](javascript:window.__xss=3) y ![imagen](https://example.com/rastreo.png).',
+    );
+  }
+  if (asked.includes('FAKE_AGENTS_STALE')) lines.push('', 'AGENTS.md desactualizado: el comando de tests ahora es `npm run test:unit`.');
+  return finish(lines.join('\n'));
 }
 
 if (process.argv[2] === 'print') {
@@ -671,8 +743,9 @@ if (process.argv[2] === 'print') {
       return { loggedIn: true };
     }
   })();
-  if (args.includes('--input-format')) process.exitCode = await initMode(args);
-  else if (args.includes('--restricted')) process.exitCode = await workMode(args, state);
+  // A worker may also take its brief as stream-json (with images): `--restricted` first.
+  if (args.includes('--restricted')) process.exitCode = await workMode(args, state);
+  else if (args.includes('--input-format')) process.exitCode = await initMode(args);
   else process.exitCode = await printMode(args);
 } else {
   interactive();

@@ -12,6 +12,9 @@ import { useSystem } from '../store/system';
 import { useWorkspace } from '../store/workspace';
 import { panesOf, prettifyTitle, tabTitle } from '../store/workspaceModel';
 import { runAction } from './appActions';
+import { activeOrchestratorDir, openChat } from './orchestratorActions';
+import { sortChats } from './orchestratorChats';
+import { activeChatOf, projectKey, useOrchestrator } from '../store/orchestrator';
 import { openLayout } from './layoutActions';
 import { folderName, shortenPath } from './paths';
 import { selectTheme } from './settingsActions';
@@ -41,6 +44,11 @@ const KEEPS_FOCUS = new Set([
   'layout.saveWindow',
   'agents.multiAgent',
   'orchestrator.open',
+  'orchestrator.newChat',
+  'orchestrator.searchChats',
+  'orchestrator.showChats',
+  'chats.rename',
+  'chats.delete',
 ]);
 
 export function paletteItems(): PaletteItem[] {
@@ -53,6 +61,8 @@ export function paletteItems(): PaletteItem[] {
     if (action.paletteHidden) continue;
     if (action.category === 'agents' && !useSettings.getState().settings.agents.enabled) continue;
     if (action.category === 'orchestrator' && !useSettings.getState().settings.orchestrator.enabled) continue;
+    // The chat actions act on the active orchestrator tab.
+    if (action.category === 'orchestrator' && action.id !== 'orchestrator.open' && !activeOrchestratorDir()) continue;
     items.push({
       id: action.id,
       label: action.label,
@@ -106,6 +116,26 @@ export function paletteItems(): PaletteItem[] {
       });
     });
   });
+
+  // The chats of the active orchestrator's project.
+  const orchDir = activeOrchestratorDir();
+  const project = orchDir ? useOrchestrator.getState().projects[projectKey(orchDir)] : undefined;
+  const openId = activeChatOf(project)?.id;
+  for (const chat of sortChats(project?.chats ?? [])) {
+    if (!orchDir || chat.count === 0) continue;
+    items.push({
+      id: `chat:${chat.id}`,
+      label: `Ir al chat: ${chat.title}`,
+      category: 'Orquestador',
+      detail: chat.id === openId ? 'abierto' : undefined,
+      keys: [],
+      remember: false,
+      run: () => {
+        openChat(orchDir, chat.id);
+        focusActiveTerminal();
+      },
+    });
+  }
 
   const { profiles, defaultId } = currentProfiles();
   for (const profile of profiles) {

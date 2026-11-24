@@ -2692,7 +2692,7 @@ body,
 }
 
 
-/* ------------------------------------------------------------------ orchestrator (Fase 8A) */
+/* ------------------------------------------------------------------ orchestrator (Fase 8A; chat, ronda 1) */
 
 /* An "Orquestador" tab: a chat in the pane's rectangle, painted like a sidebar card. */
 .orch-pane {
@@ -2714,8 +2714,9 @@ body,
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2) var(--space-3);
-  padding: var(--space-2) var(--space-3);
+  gap: var(--space-1) var(--space-2);
+  min-height: 36px;
+  padding: var(--space-1) var(--space-2);
   border-bottom: var(--line);
 }
 
@@ -2724,13 +2725,32 @@ body,
   align-items: baseline;
   gap: var(--space-2);
   min-width: 0;
-  margin-right: auto;
+  flex: 1 1 160px;
 }
 
-.orch-title > span {
+.orch-chat-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
+}
+
+.orch-title > span {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.orch-total {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: default;
 }
 
 .orch-main-model {
@@ -2738,6 +2758,7 @@ body,
   align-items: center;
   gap: var(--space-1);
   color: var(--muted);
+  font-size: 12px;
 }
 
 .orch-picker {
@@ -2745,8 +2766,8 @@ body,
   gap: var(--space-1);
 }
 
-.orch-picker select,
-.orch-input textarea {
+.orch-picker select {
+  padding: 2px 4px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel);
@@ -2754,13 +2775,38 @@ body,
   font: inherit;
 }
 
-.orch-picker select {
-  padding: 2px 4px;
-}
-
 .orch-agent,
 .orch-muted {
   color: var(--muted);
+}
+
+.orch-agent {
+  font-size: 11px;
+}
+
+/* Small square buttons with an icon (header, plan line). */
+.orch-icon-button {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.orch-icon-button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.orch-icon-button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .orch-banner {
@@ -2784,82 +2830,86 @@ body,
   margin: var(--space-2) var(--space-3) 0;
 }
 
+/* The conversation: a centered column, like a chat. */
 .orch-log {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-3);
+  padding: var(--space-4) var(--space-3);
+}
+
+.orch-thread {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-3);
+  max-width: 860px;
+  margin: 0 auto;
 }
 
 .orch-empty {
   max-width: 620px;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
-.orch-user {
-  align-self: flex-end;
-  max-width: 80%;
-  padding: 6px 10px;
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.orch-user .orch-chip {
-  margin-right: 6px;
-}
-
-.orch-card {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  line-height: 1.45;
-}
-
-.orch-card-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin-bottom: 4px;
-}
-
-.orch-card-head .ai-link {
-  margin-left: auto;
-}
-
-.orch-text p,
-.orch-note-text p {
-  margin: 0 0 6px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.orch-text code,
-.orch-note code,
+.orch-empty code,
 .orch-banner code,
-.orch-question code,
-.orch-empty code {
+.orch-question code {
   padding: 0 3px;
   border-radius: var(--radius-xs);
   background: var(--panel);
   font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 0.92em;
 }
 
-.orch-live {
-  color: var(--muted);
+/* My messages: bubbles on the right. */
+.orch-user {
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: min(78%, 640px);
 }
 
-.orch-plan-meta {
+.orch-user-text {
+  padding: 8px 12px;
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-xs) var(--radius-lg);
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel));
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.orch-user-text .orch-chip {
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.orch-user-images {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.orch-user-images img {
+  max-width: 180px;
+  max-height: 120px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
+.orch-image-chip {
+  display: inline-flex;
+  align-items: center;
   gap: 4px;
-  margin: 2px 0 4px;
+  padding: 2px 8px;
+  border: var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .orch-chip,
@@ -2876,37 +2926,121 @@ body,
   border-color: var(--accent);
 }
 
-.orch-badge[data-tone='ok'] {
-  border-color: var(--success);
+/* The plan: one compact line. */
+.orch-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.orch-plan-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px var(--space-2);
+  min-width: 0;
+  padding: 4px 4px 4px 8px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.orch-plan[data-status='approved'] .orch-plan-line,
+.orch-plan[data-status='cancelled'] .orch-plan-line {
+  background: transparent;
+  color: var(--muted);
+}
+
+.orch-plan-icon {
+  color: var(--accent);
+}
+
+.orch-plan-icon[data-tone='ok'] {
   color: var(--success);
 }
 
-.orch-badge[data-tone='error'] {
-  border-color: var(--danger);
-  color: var(--danger);
+.orch-plan-summary {
+  flex: 1 1 260px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.orch-badge[data-tone='working'] {
-  border-color: var(--accent);
-  color: var(--accent);
-  animation: ai-dot 1.4s infinite ease-in-out;
+.orch-plan-summary:hover {
+  background: var(--hover);
 }
 
-.orch-why {
-  margin: 0 0 4px;
+.orch-plan-meta {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.orch-sep {
   color: var(--muted);
-  font-style: italic;
+  font-weight: 400;
+}
+
+.orch-plan-why {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.orch-plan-state {
+  font-size: 11px;
+}
+
+.orch-cost {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
+.orch-plan-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.orch-plan-change {
+  padding-left: 30px;
+}
+
+.orch-plan-details {
+  margin: 0 0 0 30px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--border);
+  font-size: 12.5px;
 }
 
 .orch-files {
-  margin: 0 0 4px;
+  margin: 4px 0 0;
   overflow-wrap: anywhere;
 }
 
-.orch-usage {
-  margin: 4px 0 0;
+.orch-chevron {
+  flex: none;
   color: var(--muted);
-  font-size: 11px;
 }
 
 .orch-actions {
@@ -2919,8 +3053,10 @@ body,
 
 .orch-actions button,
 .orch-banner button,
-.orch-input-side button {
-  padding: 4px 12px;
+.orch-plan-actions button:not(.orch-icon-button),
+.orch-send,
+.orch-mini {
+  padding: 3px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel);
@@ -2929,31 +3065,149 @@ body,
   cursor: pointer;
 }
 
+.orch-plan-actions button:not(.orch-icon-button),
+.orch-mini {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.orch-plan-actions .orch-icon-button {
+  width: 24px;
+  height: 24px;
+}
+
 .orch-actions button.primary,
 .orch-banner button.primary,
-.orch-input-side button.primary {
+.orch-plan-actions button.primary,
+.orch-send.primary {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 24%, var(--panel));
 }
 
+.orch-send.danger {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 18%, var(--panel));
+}
+
+.orch-actions button:hover:not(:disabled),
+.orch-banner button:hover:not(:disabled),
+.orch-plan-actions button:not(.orch-icon-button):hover:not(:disabled),
+.orch-send:hover:not(:disabled),
+.orch-mini:hover {
+  filter: brightness(1.12);
+}
+
 .orch-actions button:disabled,
 .orch-banner button:disabled,
-.orch-input-side button:disabled {
+.orch-plan-actions button:disabled,
+.orch-send:disabled {
   opacity: 0.5;
   cursor: default;
 }
 
 .orch-actions button:focus-visible,
 .orch-banner button:focus-visible,
-.orch-input-side button:focus-visible,
-.orch-diff-head:focus-visible {
+.orch-plan-actions button:focus-visible,
+.orch-plan-summary:focus-visible,
+.orch-activity-toggle:focus-visible,
+.orch-changes:focus-visible,
+.orch-send:focus-visible,
+.orch-icon-button:focus-visible,
+.orch-diff-head:focus-visible,
+.md-path:focus-visible,
+.md-code-copy:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
+/* An answer: full width, no card. */
+.orch-response {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.orch-activity-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.orch-activity-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 6px 2px 2px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orch-activity-toggle:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.orch-activity-toggle:disabled {
+  cursor: default;
+}
+
+.orch-activity-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orch-response[data-status='running'] .orch-activity-text {
+  color: var(--text);
+}
+
+.orch-activity-sofar {
+  flex: none;
+  font-size: 11px;
+}
+
+.orch-activity-sofar::before {
+  content: '· ';
+}
+
+.orch-activity-state[data-tone='ok'] {
+  color: var(--success);
+}
+
+.orch-activity-state[data-tone='error'] {
+  color: var(--danger);
+}
+
+.orch-response[data-status='running'] .orch-activity-state {
+  color: var(--accent);
+}
+
+.orch-activity-model {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.spin {
+  animation: status-spin 1s linear infinite;
+}
+
 .orch-activity {
-  margin: 4px 0;
-  padding: 0;
+  margin: 0 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--border);
   list-style: none;
   font-size: 12px;
 }
@@ -2988,18 +3242,27 @@ body,
 }
 
 .orch-activity-target {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: 'Cascadia Mono', Consolas, monospace;
 }
 
+.orch-answer {
+  min-width: 0;
+}
+
 .orch-question {
-  margin: var(--space-2) 0;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--warning);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--warning) 10%, transparent);
+  line-height: 1.5;
+}
+
+.orch-question .orch-actions {
+  margin-top: 6px;
 }
 
 .orch-question ul {
@@ -3007,8 +3270,28 @@ body,
   padding-left: 18px;
 }
 
-.orch-diff {
-  margin-top: var(--space-2);
+.orch-changes {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 2px 2px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.orch-changes:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.orch-changes-plain {
+  margin: 0;
+  font-size: 12px;
 }
 
 .orch-diff-file {
@@ -3028,6 +3311,7 @@ body,
   background: var(--panel);
   color: var(--text);
   font: inherit;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
@@ -3056,6 +3340,10 @@ body,
   font-family: 'Cascadia Mono', Consolas, monospace;
 }
 
+.orch-diff-counts {
+  font-variant-numeric: tabular-nums;
+}
+
 .orch-diff-counts [data-tone='add'] {
   color: var(--success);
 }
@@ -3071,6 +3359,7 @@ body,
   padding: 4px 0;
   background: var(--bg);
   font: 12px 'Cascadia Mono', Consolas, monospace;
+  user-select: text;
 }
 
 .orch-diff-text > span {
@@ -3091,50 +3380,668 @@ body,
   color: var(--muted);
 }
 
+/* Tokens and cost: small, under each answer (the detail on hover). */
+.orch-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.orch-foot [data-orch='usage'] {
+  cursor: default;
+}
+
+.orch-foot .ai-link {
+  font-size: 11px;
+}
+
 .orch-note {
   align-self: center;
   max-width: 90%;
-  margin: 0;
   color: var(--muted);
   font-size: 12px;
   text-align: center;
 }
 
-.orch-input {
+.orch-note .md p {
+  margin: 0;
+}
+
+/* The input: grows with the text; suggestions and attachments above it. */
+.orch-composer {
   flex: none;
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+}
+
+.orch-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.orch-attachment {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 48px;
+  height: 48px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-size: 11px;
+}
+
+.orch-attachment img {
+  max-width: 96px;
+  height: 46px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
+.orch-attachment button {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: var(--line);
+  border-radius: 50%;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.orch-attachment button .lucide {
+  width: 11px;
+  height: 11px;
+}
+
+.orch-input-row {
+  display: flex;
+  align-items: flex-end;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-top: var(--line);
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
 }
 
-.orch-input textarea {
+.orch-input-wrap {
+  position: relative;
   flex: 1;
-  min-height: 40px;
-  max-height: 160px;
-  padding: 6px 8px;
-  resize: vertical;
+  min-width: 0;
+  display: flex;
 }
 
-.orch-input textarea:focus {
+.orch-input-wrap textarea {
+  flex: 1;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+  resize: none;
+}
+
+.orch-input-wrap textarea:focus {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 
-.orch-input-side {
+.orch-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+}
+
+.orch-suggest {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 4px);
+  z-index: 3;
+  min-width: 220px;
+  margin: 0;
+  padding: 4px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+  list-style: none;
+}
+
+.orch-suggest li {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 4px;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.orch-suggest li[aria-selected='true'],
+.orch-suggest li:hover {
+  background: var(--hover);
+}
+
+.orch-suggest li span {
   font-size: 11px;
 }
+
+/* ---------------------------------------------------------- markdown of an answer */
+
+.md {
+  min-width: 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md p {
+  margin: 0 0 8px;
+}
+
+.md-plain {
+  white-space: pre-wrap;
+}
+
+.md h3,
+.md h4,
+.md h5 {
+  margin: 14px 0 6px;
+  line-height: 1.3;
+}
+
+.md h3 {
+  font-size: 15px;
+}
+
+.md h4 {
+  font-size: 14px;
+}
+
+.md h5 {
+  font-size: 13px;
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 8px;
+  padding-left: 22px;
+}
+
+.md li {
+  margin: 2px 0;
+}
+
+.md li > p {
+  margin: 0 0 4px;
+}
+
+.md li[data-task] {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.md-check {
+  margin: 0 6px 0 0;
+  vertical-align: -1px;
+  accent-color: var(--accent);
+}
+
+.md strong {
+  font-weight: 650;
+}
+
+.md blockquote {
+  margin: 0 0 8px;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.md hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: var(--line);
+}
+
+.md a,
+.md-path {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.md-path {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+.md code,
+.md-path[data-code] {
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.md-path[data-code] {
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.md-image {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.md-table {
+  margin: 0 0 8px;
+  overflow-x: auto;
+}
+
+.md table {
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.md th,
+.md td {
+  padding: 4px 10px;
+  border: var(--line);
+  vertical-align: top;
+}
+
+.md th {
+  background: var(--panel);
+  font-weight: 600;
+  text-align: left;
+}
+
+.md-code {
+  margin: 0 0 8px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 2px 4px 2px 10px;
+  border-bottom: var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.md-code-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.md-code-copy:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.md-code-copy .lucide {
+  width: 13px;
+  height: 13px;
+}
+
+.md-code pre {
+  margin: 0;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font: 12px/1.5 'Cascadia Mono', Consolas, monospace;
+}
+
+.md-code pre code {
+  padding: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+/* Prism's token types, in the theme's ANSI colors. */
+.tok-comment,
+.tok-prolog,
+.tok-doctype,
+.tok-cdata {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.tok-punctuation,
+.tok-operator {
+  color: color-mix(in srgb, var(--text) 75%, var(--muted));
+}
+
+.tok-keyword,
+.tok-atrule,
+.tok-important,
+.tok-selector {
+  color: var(--ansi-magenta, var(--accent));
+}
+
+.tok-string,
+.tok-char,
+.tok-attr-value,
+.tok-inserted,
+.tok-template-string {
+  color: var(--ansi-green, var(--success));
+}
+
+.tok-number,
+.tok-boolean,
+.tok-constant,
+.tok-symbol {
+  color: var(--tone-orange);
+}
+
+.tok-function,
+.tok-method {
+  color: var(--ansi-blue, var(--accent));
+}
+
+.tok-class-name,
+.tok-builtin,
+.tok-attr-name,
+.tok-namespace {
+  color: var(--ansi-yellow, var(--warning));
+}
+
+.tok-property,
+.tok-variable,
+.tok-parameter,
+.tok-tag {
+  color: var(--ansi-cyan, var(--accent));
+}
+
+.tok-regex,
+.tok-deleted,
+.tok-entity {
+  color: var(--ansi-red, var(--danger));
+}
+
+.tok-bold {
+  font-weight: 650;
+}
+
+.tok-italic {
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------- sidebar: the project's chats */
+
+.sidebar-switch {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  margin: 6px 6px 0;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.sidebar-switch button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sidebar-switch button[aria-selected='true'] {
+  background: var(--sidebar);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.sidebar-switch button:hover {
+  color: var(--text);
+}
+
+.sidebar[data-view='files'] .sidebar-switch + .explorer-header {
+  margin-top: 4px;
+  border-top: var(--line);
+}
+
+.chat-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-panel-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+}
+
+.chat-search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.chat-search:focus-within {
+  border-color: var(--accent);
+}
+
+.chat-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.chat-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.chat-search-clear {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.chat-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 4px 6px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.chat-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 6px 5px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.chat-item:hover {
+  background: var(--hover);
+}
+
+.chat-item[data-active] {
+  background: var(--pressed);
+}
+
+.chat-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.chat-item-icon {
+  color: var(--muted);
+}
+
+.chat-item[data-busy] .chat-item-icon {
+  color: var(--accent);
+}
+
+.chat-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+
+.chat-item-meta {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-item-actions {
+  display: none;
+  gap: 2px;
+}
+
+.chat-item:hover .chat-item-actions,
+.chat-item:focus-within .chat-item-actions {
+  display: flex;
+}
+
+.chat-item-actions .explorer-button {
+  width: 22px;
+  height: 22px;
+}
+
+.chat-item-actions .explorer-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.chat-item .rename-input {
+  width: 100%;
+}
+
+.chat-empty {
+  padding: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------- AGENTS.md / CLAUDE.md dialog */
 
 .dialog.orch-instructions {
   width: min(760px, calc(100vw - 32px));
   max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
+}
+
+.orch-instructions-diff {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.orch-instructions-diff .orch-diff-text {
+  max-height: 220px;
+  margin-top: 6px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.orch-sent-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.orch-sent-images img {
+  max-width: 220px;
+  max-height: 140px;
+  border: var(--line);
+  border-radius: var(--radius-sm);
 }
 
 .orch-instructions-text {

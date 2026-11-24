@@ -9,9 +9,10 @@ import type { Issue, JsonSchema, Schema } from './schema.ts';
 
 /**
  * global: anywhere in the app (not while typing in a text field, unless it has Ctrl or Alt);
- * terminal: only with the keyboard in a terminal; explorer: only in the file tree.
+ * terminal: only with the keyboard in a terminal; explorer: only in the file tree; chats: only
+ * in the orchestrator's chat list.
  */
-export type ActionScope = 'global' | 'terminal' | 'explorer';
+export type ActionScope = 'global' | 'terminal' | 'explorer' | 'chats';
 export type ActionCategory = 'app' | 'tabs' | 'panes' | 'terminal' | 'blocks' | 'agents' | 'orchestrator' | 'ai' | 'explorer' | 'layouts';
 
 export const CATEGORY_LABELS: Record<ActionCategory, string> = {
@@ -100,6 +101,12 @@ export const ACTIONS: readonly ActionDef[] = [
   def('blocks.next', 'Bloque siguiente', 'blocks', 'terminal', ['ctrl+down'], { repeat: true, passthrough: true, paletteHidden: true }),
   def('agents.multiAgent', 'Abrir multi-agente aquí…', 'agents', 'global', []),
   def('orchestrator.open', 'Abrir orquestador aquí', 'orchestrator', 'global', []),
+  // Only with an orchestrator tab active; elsewhere the key goes on to the program.
+  def('orchestrator.newChat', 'Orquestador: chat nuevo', 'orchestrator', 'global', ['ctrl+shift+n'], { passthrough: true }),
+  def('orchestrator.searchChats', 'Orquestador: buscar en los chats', 'orchestrator', 'global', ['ctrl+shift+k'], { passthrough: true }),
+  def('orchestrator.showChats', 'Orquestador: mostrar la lista de chats', 'orchestrator', 'global', [], { passthrough: true }),
+  def('chats.rename', 'Orquestador: renombrar el chat', 'orchestrator', 'chats', ['f2']),
+  def('chats.delete', 'Orquestador: eliminar el chat', 'orchestrator', 'chats', ['delete']),
   def('ai.command', 'IA: lenguaje natural a comando', 'ai', 'global', ['ctrl+i']),
   def('ai.panel', 'IA: panel de chat', 'ai', 'global', ['ctrl+shift+i']),
   def('ai.explainLast', 'IA: explicar el último comando que falló', 'ai', 'global', []),
@@ -436,8 +443,9 @@ export const sameKeys = (a: readonly string[], b: readonly string[]) =>
 
 /**
  * Two actions on one key clash when both would want the same press: same scope, or global and
- * terminal (the keyboard is almost always in a terminal). An explorer action shadows a global
- * one only while the file tree has the focus (F2 renames a tab, and a file in the tree).
+ * terminal (the keyboard is almost always in a terminal). An explorer (or chat list) action
+ * shadows a global one only while that list has the focus (F2 renames a tab, a file in the tree
+ * and a chat in the orchestrator's list).
  */
 export const scopesClash = (a: ActionScope, b: ActionScope) =>
   a === b || (a === 'global' && b === 'terminal') || (a === 'terminal' && b === 'global');
@@ -543,7 +551,7 @@ export function keymapConflicts(keymap: Keymap): Conflict[] {
       }
     }
     for (const a of actions) {
-      if (a.scope === 'explorer') continue;
+      if (a.scope === 'explorer' || a.scope === 'chats') continue;
       if (blocksTyping(key)) {
         out.push({ kind: 'typing', key, actions: [a.id], message: `${formatKey(key)} sin Ctrl ni Alt no se podría escribir` });
       } else if (!a.passthrough && RESERVED_KEYS[key]) {
@@ -582,7 +590,7 @@ export function keybindingsSchema(): Schema<KeybindingOverrides> {
       const at = typeof value === 'string' ? path : `${path}[${i}]`;
       const key = normalizeKey(raw);
       if (!key) issues.push({ path: at, message: `"${raw}" no es una tecla válida (ejemplos: "ctrl+shift+t", "alt+left", "f2")`, severity: 'error' });
-      else if (blocksTyping(key) && action.scope !== 'explorer') {
+      else if (blocksTyping(key) && action.scope !== 'explorer' && action.scope !== 'chats') {
         issues.push({ path: at, message: `"${raw}" sin Ctrl ni Alt impediría escribir esa tecla`, severity: 'error' });
       } else if (!keys.includes(key)) keys.push(key);
     });

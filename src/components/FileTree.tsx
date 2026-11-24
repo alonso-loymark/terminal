@@ -38,6 +38,7 @@ export function FileTree({ rows, root }: { rows: TreeRow[]; root: string }) {
   const [view, setView] = useState({ top: 0, height: 0 });
   const [ghost, setGhost] = useState<DragGhost | null>(null);
   const selected = useExplorer((s) => s.selected);
+  const revealing = useExplorer((s) => s.revealing);
   const editing = useExplorer((s) => s.editing);
   const git = useGit(selectGitFor(root));
   const decorations = useMemo(() => (git ? gitDecorations(git) : null), [git]);
@@ -49,6 +50,20 @@ export function FileTree({ rows, root }: { rows: TreeRow[]; root: string }) {
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+
+  // A path clicked elsewhere: once its row is listed, bring it into view (centered).
+  useEffect(() => {
+    const element = ref.current;
+    if (!revealing || !element) return;
+    const index = rows.findIndex((r) => r.type === 'entry' && r.key === revealing);
+    if (index < 0) return;
+    const top = index * ROW_HEIGHT;
+    if (top < element.scrollTop || top + ROW_HEIGHT > element.scrollTop + element.clientHeight) {
+      element.scrollTop = Math.max(0, top - element.clientHeight / 2);
+      setView({ top: element.scrollTop, height: element.clientHeight });
+    }
+    useExplorer.getState().setRevealing(null);
+  }, [revealing, rows]);
 
   const first = Math.max(0, Math.floor(view.top / ROW_HEIGHT) - OVERSCAN);
   const last = Math.min(rows.length, Math.ceil((view.top + view.height) / ROW_HEIGHT) + OVERSCAN);

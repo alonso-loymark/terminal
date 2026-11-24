@@ -2,6 +2,7 @@ import { TriangleAlert } from 'lucide-react';
 import { useEffect, useRef, type KeyboardEvent } from 'react';
 import { trashNow } from '../lib/explorerActions';
 import { forceRemoveWorktrees } from '../lib/multiAgent';
+import { deleteChat } from '../lib/orchestratorActions';
 import { closeTarget, focusActiveTerminal } from '../lib/tabActions';
 import { useUi } from '../store/ui';
 
@@ -28,6 +29,9 @@ export function ConfirmDialog() {
       focusActiveTerminal();
     } else if (confirm.target.kind === 'worktrees') {
       void forceRemoveWorktrees(confirm.target.paths);
+      focusActiveTerminal();
+    } else if (confirm.target.kind === 'chat') {
+      deleteChat(confirm.target.dir, confirm.target.chatId);
       focusActiveTerminal();
     } else {
       closeTarget(confirm.target);

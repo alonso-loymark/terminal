@@ -21,7 +21,9 @@ export type CloseTarget =
   | { kind: 'pane'; paneId: PaneId }
   | { kind: 'trash'; paths: string[] }
   /** Worktrees of closed panes that have uncommitted changes. */
-  | { kind: 'worktrees'; paths: string[] };
+  | { kind: 'worktrees'; paths: string[] }
+  /** A chat of the orchestrator (its messages go; the project's decision log stays). */
+  | { kind: 'chat'; dir: string; chatId: string };
 
 export interface ConfirmState {
   title: string;

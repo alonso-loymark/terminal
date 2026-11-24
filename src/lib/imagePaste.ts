@@ -34,20 +34,52 @@ async function agentIn(paneId: PaneId): Promise<AgentName | null> {
   }
 }
 
-/** The image as PNG bytes: as is if it already is one, otherwise drawn and encoded (JPEG, WebP, BMP...). */
-async function toPng(image: Blob): Promise<Uint8Array> {
+/**
+ * The image as PNG bytes: as is if it already is one (and fits `maxEdge`), otherwise drawn and
+ * encoded (JPEG, WebP, BMP...; scaled down so its longest side is at most `maxEdge`).
+ */
+async function toPng(image: Blob, maxEdge = Number.POSITIVE_INFINITY): Promise<Uint8Array> {
   const bytes = new Uint8Array(await image.arrayBuffer());
-  if (isPng(bytes)) return bytes;
-  const bitmap = await createImageBitmap(image);
+  const bitmap = isPng(bytes) && maxEdge === Number.POSITIVE_INFINITY ? null : await createImageBitmap(image);
+  if (!bitmap) return bytes;
   try {
-    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    if (scale === 1 && isPng(bytes)) return bytes;
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = new OffscreenCanvas(width, height);
     const context = canvas.getContext('2d');
     if (!context) throw new Error('no hay canvas 2D');
-    context.drawImage(bitmap, 0, 0);
+    context.drawImage(bitmap, 0, 0, width, height);
     return new Uint8Array(await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer());
   } finally {
     bitmap.close();
   }
+}
+
+/** Longest side of an image sent to a model: the Messages API scales anything bigger down anyway. */
+const AGENT_MAX_EDGE = 1568;
+
+/** Thumbnails of the images pasted in the orchestrator (object URLs; this session only). */
+const previews = new Map<string, string>();
+export const imagePreview = (path: string): string | undefined => previews.get(path);
+
+/**
+ * An image pasted in the orchestrator's input: saved as a PNG in Brisa's temporary folder (the
+ * same place and checks as the terminal's), scaled down for the model. Returns its path; the
+ * worker receives it with the brief.
+ */
+export async function saveImageForAgent(image: Blob): Promise<string> {
+  const png = await toPng(image, AGENT_MAX_EDGE);
+  const path = await savePastedImage(png);
+  previews.set(path, URL.createObjectURL(new Blob([png.slice().buffer], { type: 'image/png' })));
+  return path;
+}
+
+/** The first image of a paste (and no text), if any. */
+export function pastedImage(data: DataTransfer | null): File | null {
+  if (!data || data.getData('text/plain')) return null;
+  return [...data.items].find((item) => item.kind === 'file' && isImageType(item.type))?.getAsFile() ?? null;
 }
 
 /**

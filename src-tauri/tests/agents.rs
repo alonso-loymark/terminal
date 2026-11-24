@@ -124,6 +124,7 @@ fn task(dir: &Path, prompt: &str) -> TaskSpec {
         allowed_commands: vec!["npm run build *".into(), "npm test *".into()],
         max_turns: Some(30),
         agent_path: None,
+        images: Vec::new(),
     }
 }
 
@@ -268,7 +269,12 @@ fn a_worker_edits_the_project_runs_allowed_commands_and_reports_cost() {
     else {
         panic!("{events:?}")
     };
+    // The fixed summary the rules ask for.
     assert!(result.contains("verifiqué con npm run build"), "{result}");
+    assert!(
+        result.starts_with("**Qué cambió:**") && result.contains("**Pendiente:**"),
+        "{result}"
+    );
     assert!(denials.is_empty());
     assert!(session_id.is_some());
     assert!((usage.cost_usd - 0.0042).abs() < 1e-9);
@@ -310,6 +316,53 @@ fn a_worker_edits_the_project_runs_allowed_commands_and_reports_cost() {
             .unwrap(),
         project.canonicalize().unwrap()
     );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pasted_images_go_to_the_worker_with_the_brief() {
+    let dir = scratch("images");
+    let Some(manager) = manager(&dir) else {
+        return;
+    };
+    let project = project(&dir);
+    let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRimagen-de-prueba";
+    let saved = brisa_lib::images::save_png(&brisa_lib::images::images_dir(), png).unwrap();
+    let mut spec = task(&project, "## Tarea\nMirá la captura\n");
+    spec.images = vec![saved.display().to_string()];
+    let (_, rx) = run(&manager, spec);
+    let events = collect(&rx);
+    assert!(
+        matches!(events.last(), Some(TaskEvent::Done { .. })),
+        "{events:?}"
+    );
+    let work = log_entries(&dir)
+        .into_iter()
+        .find(|e| e["kind"] == "work")
+        .unwrap();
+    // One stream-json message: the brief as text, the image as base64 PNG.
+    assert_eq!(work["prompt"], "## Tarea\nMirá la captura\n");
+    assert_eq!(work["images"].as_array().map(Vec::len), Some(1), "{work}");
+    assert_eq!(work["images"][0]["png"], true);
+    assert_eq!(work["images"][0]["bytes"], png.len());
+    // A file the page names that Brisa did not save is refused before anything runs.
+    let stray = dir.join("brisa-1.png");
+    fs::write(&stray, png).unwrap();
+    let mut spec = task(&project, "## Tarea\nOtra\n");
+    spec.images = vec![stray.display().to_string()];
+    let (_, rx) = run(&manager, spec);
+    let events = collect(&rx);
+    assert!(
+        matches!(
+            events.last(),
+            Some(TaskEvent::Error {
+                code: ErrorCode::Invalid,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let _ = fs::remove_file(&saved);
     let _ = fs::remove_dir_all(&dir);
 }
 

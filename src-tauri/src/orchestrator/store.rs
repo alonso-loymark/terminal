@@ -1,9 +1,13 @@
 //! Per-project files of the orchestrator, in `<config>\orchestrator\<name>-<hash>\`:
-//! `conversation.json` (the chat: the orchestrator owns it), `decisions.json` (the decision log,
-//! updated after every task) and `project.json` (the project's path and the commands the user
-//! allowed for it). The frontend owns their format; this module only maps a project to its
-//! folder and reads/writes atomically. Nothing is ever written inside the project.
+//! `chats.json` (the index of the project's chats: title, dates, which one is open),
+//! `chats\<id>.json` (one chat's messages: the orchestrator owns them), `decisions.json` (the
+//! decision log, updated after every task, shared by every chat) and `project.json` (the
+//! project's path, main model and the commands the user allowed for it). `conversation.json` is
+//! the single chat of before (Fase 8A): read once to migrate it, kept as it was. The frontend
+//! owns the formats; this module only maps a project to its folder and reads/writes atomically.
+//! Nothing is ever written inside the project.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +19,7 @@ use crate::settings;
 #[serde(rename_all = "camelCase")]
 pub enum ProjectFile {
     Conversation,
+    Chats,
     Decisions,
     Project,
 }
@@ -23,6 +28,7 @@ impl ProjectFile {
     pub fn name(self) -> &'static str {
         match self {
             ProjectFile::Conversation => "conversation.json",
+            ProjectFile::Chats => "chats.json",
             ProjectFile::Decisions => "decisions.json",
             ProjectFile::Project => "project.json",
         }
@@ -90,6 +96,45 @@ pub fn write(config_dir: &Path, project: &Path, file: ProjectFile, text: &str) -
     settings::write(&folder(config_dir, project)?.join(file.name()), text)
 }
 
+/// A chat's id as the frontend makes them (`chat-<base36>-<n>`): lowercase ASCII letters, digits
+/// and dashes. Never a path: it names a file.
+pub fn valid_chat_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn chat_path(config_dir: &Path, project: &Path, id: &str) -> io::Result<PathBuf> {
+    if !valid_chat_id(id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("id de chat inválido: «{id}»"),
+        ));
+    }
+    Ok(folder(config_dir, project)?
+        .join("chats")
+        .join(format!("{id}.json")))
+}
+
+pub fn read_chat(config_dir: &Path, project: &Path, id: &str) -> io::Result<Option<String>> {
+    settings::read(&chat_path(config_dir, project, id)?)
+}
+
+pub fn write_chat(config_dir: &Path, project: &Path, id: &str, text: &str) -> io::Result<()> {
+    settings::write(&chat_path(config_dir, project, id)?, text)
+}
+
+/// Deletes a chat's file (one that does not exist is already deleted).
+pub fn delete_chat(config_dir: &Path, project: &Path, id: &str) -> io::Result<()> {
+    match fs::remove_file(chat_path(config_dir, project, id)?) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +169,48 @@ mod tests {
         // A config folder inside the project is refused.
         let inside = project.join(".brisa");
         assert!(write(&inside, &project, ProjectFile::Project, "{}").is_err());
+        assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn chats_are_files_named_by_a_safe_id() {
+        assert!(valid_chat_id("chat-mfx3k2-12"));
+        for bad in [
+            "",
+            "-x",
+            "Chat",
+            "a/b",
+            "..",
+            r"a\b",
+            "chat.json",
+            "c:x",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_chat_id(bad), "{bad}");
+        }
+        let base = std::env::temp_dir().join(format!("brisa-chats-{}", std::process::id()));
+        let config = base.join("config");
+        let project = base.join("proyecto");
+        std::fs::create_dir_all(&project).unwrap();
+        write_chat(&config, &project, "chat-a-1", "{\"messages\":[]}").unwrap();
+        assert_eq!(
+            read_chat(&config, &project, "chat-a-1").unwrap().as_deref(),
+            Some("{\"messages\":[]}")
+        );
+        assert!(
+            folder(&config, &project)
+                .unwrap()
+                .join("chats")
+                .join("chat-a-1.json")
+                .is_file()
+        );
+        assert!(write_chat(&config, &project, "../decisions", "x").is_err());
+        assert!(read_chat(&config, &project, "..").is_err());
+        delete_chat(&config, &project, "chat-a-1").unwrap();
+        assert_eq!(read_chat(&config, &project, "chat-a-1").unwrap(), None);
+        // Deleting one that is not there is fine.
+        delete_chat(&config, &project, "chat-a-1").unwrap();
         assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&base);
     }

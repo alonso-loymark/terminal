@@ -147,7 +147,9 @@ pub fn orch_cancel(manager: State<'_, AgentsManager>, id: u32) {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFiles {
+    /// The single chat of before (Fase 8A), to migrate when there is no `chats`.
     conversation: Option<String>,
+    chats: Option<String>,
     decisions: Option<String>,
     project: Option<String>,
 }
@@ -163,6 +165,7 @@ pub async fn orch_load(
         let read = |file| store::read(&config, &dir, file).map_err(|e| e.to_string());
         Ok(ProjectFiles {
             conversation: read(ProjectFile::Conversation)?,
+            chats: read(ProjectFile::Chats)?,
             decisions: read(ProjectFile::Decisions)?,
             project: read(ProjectFile::Project)?,
         })
@@ -181,6 +184,50 @@ pub async fn orch_save(
     blocking(move || {
         let dir = project_dir(&dir)?;
         store::write(&config, &dir, file, &text).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// One chat's messages (`None`: it has no file yet).
+#[tauri::command]
+pub async fn orch_chat_load(
+    settings: State<'_, SettingsState>,
+    dir: String,
+    id: String,
+) -> Result<Option<String>, String> {
+    let config = settings.dir.clone();
+    blocking(move || {
+        let dir = project_dir(&dir)?;
+        store::read_chat(&config, &dir, &id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn orch_chat_save(
+    settings: State<'_, SettingsState>,
+    dir: String,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    let config = settings.dir.clone();
+    blocking(move || {
+        let dir = project_dir(&dir)?;
+        store::write_chat(&config, &dir, &id, &text).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn orch_chat_delete(
+    settings: State<'_, SettingsState>,
+    dir: String,
+    id: String,
+) -> Result<(), String> {
+    let config = settings.dir.clone();
+    blocking(move || {
+        let dir = project_dir(&dir)?;
+        store::delete_chat(&config, &dir, &id).map_err(|e| e.to_string())
     })
     .await
 }

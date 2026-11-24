@@ -20,6 +20,7 @@ ejecutable `brisa.exe`, identificador `dev.brisa.desktop`.)
 | Explorador (Rust) | **notify** 8 (watcher), **ignore** 0.4 (`.gitignore`); git por la CLI `git` (sin libgit2) |
 | Configuración | `settings.json` y `layouts.json` (JSONC) leídos con **jsonc-parser** 3 (el de VS Code: comentarios, errores con posición y ediciones que conservan el formato del usuario); validación con un esquema propio en TS (`config/schema.ts`); `session.json` (JSON que escribe la app) |
 | Notificaciones y drop target | **windows** 0.62 (WinRT `ToastNotification`; y OLE para el drop target propio, `dragdrop.rs`: las mismas features Win32 que ya compila wry más `Memory` y `DataExchange`) + **windows-core** 0.62 (el macro `#[implement]` de un objeto COM); los dos ya estaban en el árbol por WebView2 y wry, misma versión. El resto de Win32 sigue con `windows-sys` |
+| Markdown del orquestador | **marked** 18 (solo el lexer) + **prismjs** 1.30 (solo el tokenizer, 13 gramáticas): tokens → elementos de React, nunca HTML de un modelo. En un chunk aparte que se carga la primera vez que el orquestador muestra una respuesta (109 kB, 37 kB gzip; el bundle principal no los incluye) |
 | IA | El CLI de Claude Code (`claude -p`, la suscripción del usuario) o la API de Anthropic por **WinHTTP** (`windows-sys`, feature `Win32_Networking_WinHttp`: parte de Windows, sin crate HTTP); la API key en el **Administrador de credenciales** (`Win32_Security_Credentials`). Sin dependencias nuevas |
 
 ## Arquitectura
@@ -129,8 +130,9 @@ Reglas de la arquitectura:
   (`orchestrator.enabled`; apagado, el resto se niega), `agents_detect` (CLIs instalados, sesión
   y modelos), `orch_project` (comandos detectados, AGENTS.md / CLAUDE.md), `orch_check_pattern`,
   `orch_ask` (el plan, canal por consulta), `orch_run` (un trabajador, canal), `orch_cancel`,
-  `orch_load` / `orch_save` (conversación, decisiones y preferencias del proyecto en la carpeta
-  de config), `orch_snapshot` / `orch_diff` y `orch_write_instructions`.
+  `orch_load` / `orch_save` (índice de chats, decisiones y preferencias del proyecto en la carpeta
+  de config), `orch_chat_load` / `orch_chat_save` / `orch_chat_delete` (los mensajes de un chat),
+  `orch_snapshot` / `orch_diff` y `orch_write_instructions`.
 - **Shift+Enter** (`pty/agents.rs`): el frontend no lo envía como CR; llama a `send_shift_enter` y
   Rust mira el árbol de procesos de la sesión. Si corre un agente de IA le manda *su* secuencia de
   salto de línea (la que instala su `/terminal-setup` en VS Code); si no, un Shift+Enter real en
@@ -567,8 +569,9 @@ cambiar de cwd, de panel o de tab, salvo que esté **fijada** (botón de pin).
 - **Registro** (`config/keybindings.ts`, puro, con tests): cada acción de la app con id, nombre en
   español, categoría, **alcance** y teclas por defecto. `global` (en toda la app; en un campo de
   texto solo si tiene Ctrl/Alt: F2 o Supr son del campo), `terminal` (solo con el foco en una
-  terminal: copiar, pegar, buscar, Shift+Enter) y `explorer` (solo en el árbol: renombrar,
-  eliminar). `repeat`: mantener apretado repite (moverse entre tabs y paneles); el resto actúa
+  terminal: copiar, pegar, buscar, Shift+Enter), `explorer` (solo en el árbol: renombrar,
+  eliminar) y `chats` (solo en la lista de chats del orquestador: renombrar y eliminar el chat
+  abierto; como el árbol, no choca con F2 de las tabs). `repeat`: mantener apretado repite (moverse entre tabs y paneles); el resto actúa
   una vez por pulsación y la tecla igual no llega al programa. `passthrough`: actúa solo a veces
   y si no la tecla sigue al programa (Ctrl+C copia **solo** si hay selección).
 - **settings.json** `keybindings`: `{ "acción": "tecla" | ["tecla", ...] }`; `[]` la deja sin
@@ -1037,16 +1040,21 @@ el panel de IA).
   por precio, rápido / medio / potente / máximo—, comandos permitidos, decisiones anteriores,
   conversación reciente resumida y el mensaje). Responde un JSON (`task`, `agent`, `model`,
   `effort`, `why`, `files`) que se valida contra lo detectado (`validatePlan`; un esfuerzo que
-  el modelo no tiene pasa al más cercano); si no es válido, un reintento diciendo por qué. La
-  tarjeta muestra tarea, agente, modelo, esfuerzo y el porqué con **Aprobar / Cambiar modelo /
-  Cancelar** (`orchestrator.autoApprove`: se ejecuta sin esperar). `@haiku`, `@sonnet`,
+  el modelo no tiene pasa al más cercano); si no es válido, un reintento diciendo por qué. El
+  plan es **una línea**: agente, modelo, esfuerzo y el porqué con **Aprobar / Cambiar modelo /
+  Cancelar** (`orchestrator.autoApprove`: se ejecuta sin esperar); clic en la línea muestra la
+  tarea y los archivos; el ojo, "Ver qué se envió". `@haiku`, `@sonnet`,
   `@opus` (cualquier modelo que ofrezca el CLI) al principio del mensaje fuerza el modelo.
-- **Historial**: el orquestador es dueño de la conversación. Por proyecto, en
+- **Historial**: el orquestador es dueño de las conversaciones. Por proyecto, en
   `<config>\orchestrator\<carpeta>-<hash FNV de la ruta>\` (`orchestrator/store.rs`; se niega si
-  quedara dentro del proyecto): `conversation.json` (200 mensajes), `decisions.json` (el
-  registro de decisiones: tarea, modelo, esfuerzo, porqué, resultado, archivos y costo, uno por
-  tarea al terminar) y `project.json` (modelo principal y comandos permitidos). **Nunca dentro del
-  repo.** El trabajador recibe un brief (`buildBrief`): la tarea, el resumen de las últimas
+  quedara dentro del proyecto): `chats.json` (el índice: título, de dónde salió, fechas, cantidad
+  de mensajes, lo que escribió el usuario para buscar, costo y tokens, y cuál está abierto),
+  `chats\<id>.json` (los mensajes de un chat, 200; el id lo valida Rust: minúsculas, dígitos y
+  guiones), `decisions.json` (el registro de decisiones: tarea, modelo, esfuerzo, porqué,
+  resultado, archivos y costo, uno por tarea al terminar, **de todo el proyecto**) y
+  `project.json` (modelo principal y comandos permitidos). `conversation.json` es el chat único
+  de la 8A: si no hay índice, se migra como el primer chat (y el archivo queda como estaba).
+  **Nunca dentro del repo.** El trabajador recibe un brief (`buildBrief`): la tarea, el resumen de las últimas
   decisiones, los archivos relevantes y los comandos permitidos; no la conversación.
 - **Redacción**: todo lo que sale (mensaje, decisiones, conversación resumida, tarea, archivos)
   pasa por `redact.ts` pieza por pieza (más `ai.redact`) y después por `ai_scrub_env`; "Ver
@@ -1059,12 +1067,80 @@ el panel de IA).
   (`git diff --no-index` de cada archivo contra su estado antes —la copia, HEAD o nada—: los
   cambios previos a la tarea no se le atribuyen; sin git, la lista de archivos editados) y tokens
   y costo según el `result` del CLI (`total_cost_usd`: con suscripción, lo que costaría a precio
-  de API). Esc o "Cancelar" mata el árbol del trabajador (Job Object). Cerrar la tab cancela lo
-  que corre (la confirmación de cierre lo menciona).
+  de API). Esc o "Detener" mata el árbol del trabajador (Job Object). Cerrar la tab cancela lo
+  que corre (la confirmación de cierre lo menciona). Una cosa a la vez **por proyecto**, la
+  empiece el chat que sea (los trabajadores comparten la carpeta): mientras tanto, el input de
+  los otros chats espera ("Ir al chat").
 - **Tab**: un panel de tipo `orchestrator` (`Pane.kind`; `orchestratorPane` en
   `workspaceModel.ts`): sin sesión PTY, su `cwd` es el proyecto (el explorador y la barra de
   estado lo siguen; dividirlo abre una terminal ahí), título "Orquestador · <carpeta>". La sesión
-  y los layouts lo guardan (`PaneSpec.orchestrator`).
+  y los layouts lo guardan (`PaneSpec.orchestrator`). Su UI (`OrchestratorPane` y la lista de
+  chats) se carga en diferido la primera vez que se abre uno (chunk aparte, ~33 kB).
+
+### Chats (rediseño, ronda 1)
+
+- **Varios chats por proyecto** (`lib/orchestratorChats.ts`, puro, con tests; acciones en
+  `orchestratorActions.ts`): cada uno con su propio contexto (el plan solo ve la conversación de
+  ese chat); el registro de decisiones y las preferencias siguen siendo del proyecto. Se lee el
+  índice al abrir el proyecto y los mensajes de un chat la primera vez que se abre. Un "Chat
+  nuevo" vacío no se guarda y desaparece al irse a otro.
+- **Barra lateral**: con una tab de orquestador activa, la barra lateral (`Sidebar.tsx` →
+  `ChatList.tsx`) muestra los chats del proyecto (los de actividad más reciente primero, con
+  fecha relativa y costo; un spinner en el que está trabajando) y un toggle "Chats / Archivos"
+  vuelve al explorador (que sigue la carpeta del proyecto). `Ctrl+B` la oculta como siempre; el
+  botón de chats del encabezado la vuelve a mostrar.
+- **Chat nuevo** (`orchestrator.newChat`, `Ctrl+Shift+N`, botón en la lista y en el encabezado),
+  **buscar** (`orchestrator.searchChats`, `Ctrl+Shift+K`: el título con búsqueda difusa, o cada
+  palabra en lo que escribió el usuario; Enter abre el primero), **renombrar** (doble clic, el
+  lápiz o `F2` en la lista: `chats.rename`) y **eliminar** (la papelera o `Supr`: `chats.delete`,
+  confirmación con el foco en Cancelar; un chat con una tarea en curso no se puede). Los de
+  `orchestrator.*` solo actúan con una tab de orquestador activa (si no, la tecla sigue al
+  programa) y la paleta suma "Ir al chat: …".
+- **Título automático sin gastar una llamada**: al enviar el primer mensaje, `chatTitle` (la
+  primera oración, sin `@modelo`, redactada, cortada en una palabra cerca de 48 caracteres); el
+  plan de ese primer mensaje pide además un `"title"` en el mismo JSON (unos tokens de salida de
+  la llamada que ya se hace) y, si llega, lo reemplaza. Renombrado a mano, ninguno lo toca.
+- **Mensajes**: los míos son burbujas a la derecha (texto tal cual, con las imágenes); las
+  respuestas van a lo ancho con **markdown completo** (`components/Markdown.tsx`: títulos, listas
+  anidadas y de tareas, negritas, tablas, citas, código inline y bloques con resaltado de Prism
+  y "Copiar"). **Seguro por construcción**: marked solo tokeniza y cada token es un elemento de
+  React (texto siempre escapado, ningún `dangerouslySetInnerHTML`); el HTML crudo de un modelo
+  queda como su texto (`htmlToText`: sin scripts ni estilos, ni su contenido), los links solo
+  abren http(s)/mailto en el navegador (`javascript:`, `data:`, `file:` se descartan) y las
+  imágenes **nunca se cargan** (un modelo podría filtrar datos en la URL): quedan como
+  "[imagen: …]". Lo puro (links, rutas, HTML, gramáticas) en `lib/markdownModel.ts`, con tests
+  de vectores XSS. Las **rutas de archivos** (en código inline, en el texto con al menos una
+  carpeta, en links relativos y en la actividad) son clicables: `revealInExplorer` pone la barra
+  en "Archivos", expande las carpetas hasta el archivo, lo selecciona y lo trae a la vista (fuera
+  de la carpeta del explorador, lo fija en la del archivo; si no existe, un aviso).
+- **Actividad**: una línea ("Leyó 2 archivos, creó 1, editó 1 y ejecutó 1 comando",
+  `activitySummary`) que se expande a cada paso; mientras trabaja, la misma línea dice qué hace
+  en vivo (`activityNow`: "Ejecutando npm test…", o la última línea que escribió). Los cambios,
+  otra línea ("Cambios en 1 archivo +1 −0") que se expande al diff de cada archivo.
+- **Costo**: tokens y costo en chico al pie de cada respuesta (el detalle —entrada, caché,
+  salida, turnos, duración, modelo— al pasar el mouse); el del plan, en su línea; el total del
+  chat (planes y tareas) en el encabezado, con el del proyecto en el tooltip.
+- **Respuestas con forma fija**: las reglas del trabajador (`worker_rules`, Rust) piden terminar
+  con un resumen corto en español con tres secciones —**Qué cambió**, **Cómo probarlo**,
+  **Pendiente**— sin repetir información ni copiar el diff. Si la tarea dejó AGENTS.md
+  desactualizado, el trabajador agrega una línea `AGENTS.md desactualizado: <qué cambiar>`
+  (`AGENTS_STALE_MARKER`); el orquestador la saca de la respuesta (`parseWorkerResult`) y ofrece
+  **"Actualizar AGENTS.md…"**: un análisis de solo lectura devuelve el archivo completo
+  actualizado, que se muestra (editable, con "Ver los cambios": diff por líneas, `lineDiff`)
+  antes de escribir nada, como siempre. Los trabajadores siguen sin poder editar AGENTS.md.
+- **Input** (`OrchestratorComposer.tsx`): multilínea que crece hasta 240 px; `@` al principio
+  sugiere los modelos del CLI (`modelMention`; Tab o Enter completa); `Ctrl+V` con una imagen la
+  adjunta reutilizando lo de la terminal (`toPng` + `save_pasted_image`: PNG en
+  `%TEMP%\brisa-images`, achicada a 1568 px de lado), con miniatura y ×; "Detener" mientras corre
+  una tarea de ese chat (y Esc).
+- **Imágenes al trabajador**: sus herramientas de archivos no pueden leer `%TEMP%` (están
+  confinadas al proyecto), así que la tarea va como **un mensaje stream-json**
+  (`--input-format stream-json`, el mismo formato que mandan los SDKs): las imágenes en base64
+  y después el brief (`stream_json_prompt`). Rust solo adjunta PNGs que guardó Brisa en su
+  carpeta (`images::read_attachment`, hasta 5 MB). El plan no las ve: se le dice cuántas hay.
+  "Ver qué se envió" las muestra (una imagen no se puede redactar). Al retomar una sesión no se
+  reenvían.
+
 - **Cómo agregar otro adaptador** (Codex, agy, Gemini CLI): un módulo en `agents/` que implementa
   `AgentAdapter`, agregado a `adapters()`; el frontend ya lista lo que devuelva `agents_detect` y
   el plan valida `agent` contra lo instalado. Para cada CLI: (1) cómo saber si está y con sesión
@@ -1091,8 +1167,11 @@ el panel de IA).
   del mensaje: trivial → haiku/low, arquitectura → opus/high, `FAKE_BAD_PLAN`) y el trabajador
   (`--restricted`: exige los flags de permisos, emite herramientas y **edita de verdad** el
   proyecto temporal, sesiones para `--resume`, `FAKE_DENIED`, `FAKE_SECRET`, `FAKE_SLOW` con
-  un proceso hijo, `FAKE_WORK_ERROR`, uso y costo). Solo mira la sección `## Tarea` del brief
-  (el resumen de decisiones puede nombrar tareas anteriores).
+  un proceso hijo y un `npm test` que queda corriendo, `FAKE_WORK_ERROR`, `FAKE_AGENTS_STALE`,
+  `FAKE_MARKDOWN` —listas, tabla, código, rutas y el HTML que un modelo podría escribir—, la
+  entrada stream-json con imágenes, el resumen fijo, uso y costo). Solo mira la sección
+  `## Tarea` del brief (el resumen de decisiones puede nombrar tareas anteriores). El plan
+  agrega `"title"` cuando se lo piden.
 
 ## Rendimiento
 
@@ -1222,9 +1301,15 @@ src/                        Frontend (solo render + input)
   components/AiAnswer.tsx   Respuesta de la IA: párrafos y tarjetas de comando (Insertar sin ejecutar, aviso destructivo)
   components/AiErrorBox.tsx Error de una consulta con cómo resolverlo
   components/AiContextDialog.tsx  "Ver qué se envía": el payload exacto, ya redactado
-  components/OrchestratorPane.tsx  Tab Orquestador: modelo principal, AGENTS.md, chat, plan (Aprobar / Cambiar
-                            modelo / Cancelar), actividad en vivo, permisos denegados, diff, tokens y costo
-  components/OrchestratorDialog.tsx  AGENTS.md / CLAUDE.md antes de escribirlos; "Ver qué se envió"
+  components/OrchestratorPane.tsx  Tab Orquestador (carga diferida): encabezado (chat, total, modelo del plan),
+                            avisos de AGENTS.md / CLAUDE.md, la conversación del chat abierto
+  components/OrchestratorMessage.tsx  Burbuja, plan en una línea, respuesta (actividad en una línea, markdown,
+                            permisos, AGENTS.md desactualizado, cambios, costo al pie)
+  components/OrchestratorComposer.tsx  Input: crece, @modelo, imágenes pegadas, Enviar / Detener
+  components/ChatList.tsx   Chats del proyecto en la barra lateral: buscar, nuevo, renombrar, eliminar
+  components/Markdown.tsx   Markdown de un modelo → React (marked + Prism, chunk aparte; nunca HTML)
+  components/ModelPicker.tsx  Selector de modelo y esfuerzo (encabezado, "Cambiar modelo")
+  components/OrchestratorDialog.tsx  AGENTS.md / CLAUDE.md antes de escribirlos (con los cambios); "Ver qué se envió"
   config/schema.ts          Mini librería de esquema: valida, defaults, tipos inferidos, JSON Schema
   config/settingsSchema.ts  El esquema de settings.json (+ settingsSchema.test.ts)
   config/keybindings.ts     Acciones, teclas por defecto, parseo, eventos → teclas, conflictos, keybindings (+ test)
@@ -1260,8 +1345,12 @@ src/                        Frontend (solo render + input)
   lib/agentsApi.ts          Punto de IPC del orquestador (agentes, plan, trabajadores, archivos del proyecto, diff)
   lib/orchestratorModel.ts  Plan (prompt, JSON validado, @modelo, modelos por precio), brief, decisiones,
                             CLAUDE.md con la importación, formatos de los archivos (puro, + test)
-  lib/orchestratorActions.ts  Abrir la tab, plan → aprobar → trabajador → diff → decisión, permisos,
-                            AGENTS.md / CLAUDE.md con confirmación, guardado por proyecto
+  lib/orchestratorActions.ts  Abrir la tab, chats (abrir, nuevo, renombrar, eliminar), plan → aprobar →
+                            trabajador → diff → decisión, permisos, AGENTS.md / CLAUDE.md con confirmación
+                            (también la actualización tras una tarea), guardado por proyecto y por chat
+  lib/orchestratorChats.ts  Chats: índice, títulos, búsqueda, totales, migración del chat único (puro, + test)
+  lib/markdownModel.ts      Markdown de un modelo: links seguros, rutas de archivos, HTML → texto, gramáticas (puro, + test)
+  lib/highlight.ts          Prism (solo el tokenizer) → árbol para React; lib/prismManual.ts lo pone en modo manual
   lib/appearance.ts         Tema → variables CSS y ventana (Mica/Acrylic); opciones de cada terminal
   lib/ligatures.ts          Ligaduras con un character joiner (+ test)
   lib/explorerModel.ts      Lógica pura del explorador, breadcrumbs que entran (+ explorerModel.test.ts)
@@ -1300,7 +1389,7 @@ src/                        Frontend (solo render + input)
   store/settings.ts         zustand: settings en uso, estado del archivo, avisos, zoom de la sesión
   store/profiles.ts         Perfiles en uso (detectados + settings), memoizados
   store/ai.ts               zustand: panel de IA, conversaciones por panel, barra Ctrl+I, diálogo "qué se envía"
-  store/orchestrator.ts     zustand: agentes detectados, proyectos (conversación, decisiones, en curso), diálogos
+  store/orchestrator.ts     zustand: agentes detectados, proyectos (chats, decisiones, en curso), diálogos, vista de la barra
 src-tauri/
   src/lib.rs                Builder de Tauri, ventana principal (transparente solo si se pide; sin barra de
                             Windows salvo appearance.titleBar: native), ciclo de vida
@@ -1322,7 +1411,7 @@ src-tauri/
   src/agents/               Adaptadores de agentes sin Tauri: mod.rs (AgentAdapter, TaskEvent), claude_code.rs
                             (detección por initialize, plan, trabajador con permisos), permissions.rs (comandos
                             del proyecto, reglas), stream.rs (eventos de un trabajador), manager.rs (hilos)
-  src/orchestrator/         store.rs (archivos por proyecto en la config), snapshot.rs (diff de una tarea sin
+  src/orchestrator/         store.rs (archivos por proyecto y por chat en la config), snapshot.rs (diff de una tarea sin
                             tocar el repo), instructions.rs (AGENTS.md / CLAUDE.md con confirmación)
   src/ai/                   Capa de IA sin Tauri: manager.rs (hilos, cancelación, dueños), claude_cli.rs
                             (claude -p aislado en un Job Object), anthropic.rs + http.rs (API por WinHTTP),
@@ -1586,8 +1675,12 @@ para cuando el usuario los pida o los corra.
   los modelos de tu Claude Code; "Generar AGENTS.md…" muestra el borrador antes de crear nada y
   CLAUDE.md se ofrece después; un mensaje trivial propone un modelo rápido con esfuerzo bajo,
   "Aprobar" lo ejecuta con actividad en vivo, diff y costo; `@opus …` fuerza el modelo; un
-  comando fuera de la lista aparece como pregunta; "Cancelar" corta la tarea;
-  `orchestrator.enabled: false` → nada.
+  comando fuera de la lista aparece como pregunta; "Detener" corta la tarea;
+  `orchestrator.enabled: false` → nada. Chats: la barra lateral los lista; `Ctrl+Shift+N`,
+  renombrar, buscar (`Ctrl+Shift+K`) y eliminar; el título aparece solo; una respuesta real se ve
+  con markdown (listas, tablas, código resaltado) y una ruta abre el archivo en el explorador;
+  pegar una captura en el input y que Claude Code real la describa (**no verificado**: imágenes
+  por stream-json con el CLI real).
 - [ ] Rendimiento (automatizado con dos agentes falsos: `npm run e2e -- perf`; **a mano y a criterio
   del usuario** con Claude Code y agy reales): una sesión larga, scroll mientras el agente trabaja,
   tipear en él y cambiar de tab sin trabas.
@@ -1612,6 +1705,8 @@ orquestador aquí, explicar el último comando que falló (IA), pegar imagen com
 | `Ctrl+,` | Configuración (otra vez o `Esc`: cerrar) |
 | Arrastrar / doble clic en el espacio vacío de la barra de tabs | Mover la ventana / maximizar o restaurar (barra propia) |
 | `Ctrl+I` | IA: lenguaje natural a comando sobre el panel activo (`Enter` propone, `Enter` otra vez inserta sin ejecutar, `Esc` cancela) |
+| `Ctrl+Shift+N` / `Ctrl+Shift+K` | Orquestador (con su tab activa): chat nuevo / buscar en los chats |
+| `F2` / `Supr` en la lista de chats | Renombrar / eliminar el chat abierto (con confirmación) |
 | `Ctrl+Shift+I` | IA: panel de chat (también recibe "Explicar / arreglar"; `Esc` cancela la consulta en curso) |
 | `Ctrl+Shift+T` / botón `+` | Nueva tab con el perfil por defecto (en su carpeta inicial o la del panel activo) |
 | Botón `▾` junto al `+` | Nueva tab con cualquier perfil; abrir y guardar layouts; paleta; Configuración |
@@ -2327,6 +2422,51 @@ entre tabs y paneles), y la tecla igual no llega al programa.
     fuente), el aviso de trabajo de cada agente en pantalla (sale de sus strings, no de una
     captura), un arrastre real desde Chrome/Edge/Firefox u otra app (la e2e entra por
     `debug_drop`; los formatos OLE, por `tests/dragdrop.rs`). Queda en el smoke manual.
+- **Rediseño del orquestador, ronda 1 — experiencia de chat: completa y verificada (2026-11-24).**
+  Varios chats por proyecto con su propio contexto (índice + un archivo por chat en la config;
+  el chat único de la 8A se migra), lista en la barra lateral cuando la tab activa es un
+  orquestador (toggle "Chats / Archivos"), chat nuevo (`Ctrl+Shift+N`), buscar
+  (`Ctrl+Shift+K`), renombrar (doble clic / F2) y eliminar con confirmación; título automático
+  del primer mensaje, mejorado por el plan en la misma respuesta (sin otra llamada). Mensajes:
+  burbujas propias a la derecha, respuestas a lo ancho con markdown completo (marked + Prism,
+  tokens → React: ningún HTML de un modelo llega a la página), rutas de archivos que abren el
+  archivo en el explorador. Actividad en una línea que se expande (en vivo mientras trabaja),
+  plan en una línea, tokens y costo al pie con el detalle al pasar el mouse, total del chat en el
+  encabezado. Resumen fijo del trabajador (Qué cambió / Cómo probarlo / Pendiente) y, si dejó
+  AGENTS.md desactualizado, la oferta de actualizarlo (análisis de solo lectura, archivo completo
+  y diff antes de escribir). Input que crece, `@modelo` con autocompletado, imágenes pegadas
+  (al trabajador por stream-json) y "Detener".
+  - **Dependencias**: `marked` 18.3 (solo el lexer) y `prismjs` 1.30 (solo el tokenizer, 13
+    gramáticas; la de markdown se dejó afuera: 5 kB). Elegidas por livianas y porque permiten no
+    usar HTML: marked ~40 kB min; Prism core ~7 kB + gramáticas. Descartados: DOMPurify (con
+    tokens → React no hay HTML que sanear: el saneo es por construcción, más `htmlToText` y
+    `linkTarget`), highlight.js (su salida es HTML), markdown-it / remark (más pesados).
+  - **Bundle** (build de producción): el JS principal 1131,9 → 1123,5 kB (332,5 → 331,5 kB
+    gzip) porque la UI del orquestador pasó a cargarse en diferido; con el chunk compartido de
+    lucide que eso generó (14 kB), lo que se carga al arrancar es +6 kB (+4,7 kB gzip). Al abrir
+    el orquestador: 33 kB (UI, 11 kB gzip); la primera respuesta: 109,5 kB (marked + Prism +
+    renderer, 37 kB gzip). CSS 48,5 → 60,4 kB (9,2 → 11,3 kB gzip).
+  - `npm test` de lo tocado: `orchestratorModel` (15; 6 nuevos: título en el plan, imágenes,
+    actividad en una línea y en vivo, resumen y marca de AGENTS.md, uso, `@` sugerido, diff por
+    líneas), `orchestratorChats` (6 nuevos: títulos sin modelo y sin secretos, ids, índice e ida y
+    vuelta, migración, búsqueda, fecha relativa), `markdownModel` (5 nuevos: links seguros,
+    rutas, resolver, HTML → texto con vectores XSS, gramáticas) y `keybindings`.
+  - `cargo test`: 105 unitarios (nuevos: chats como archivos con id seguro, base64, solo PNGs de
+    Brisa como adjuntos, imágenes por stream-json, reglas con el resumen fijo) + 10 de
+    `tests/agents.rs` (nuevo: la imagen pegada llega al trabajador falso como PNG y un archivo
+    ajeno se rechaza antes de lanzar nada).
+  - `npm run e2e -- orchestrator`: 38/38 en 34 s (nuevos: lista de chats y toggle, título
+    automático y del plan, actividad en una línea, resumen y costo con detalle y total,
+    markdown completo, HTML saneado, ruta → explorador, input que crece y `@` que completa,
+    AGENTS.md desactualizado → análisis → diff → nada escrito sin confirmar, "Detener" con la
+    línea en vivo, chat nuevo con contexto propio, cambiar, renombrar, buscar, eliminar con
+    confirmación, imagen pegada → trabajador). `explorer`, `palette`, `icons`: OK;
+    `keybindings` 15/15 (usaba Ctrl+Shift+N como "tecla libre": ahora Ctrl+Shift+Y). Capturas de
+    la página en `e2e/artifacts/orchestrator-*.png`.
+  - **No verificado**: Claude Code real (regla de pruebas): que acepte el brief con imágenes por
+    `--input-format stream-json` en modo `-p` (es el formato documentado de los SDKs) y que siga
+    el resumen fijo; respuestas reales en markdown. Queda en el smoke manual, a criterio del
+    usuario.
 - Siguiente candidata — **peso de WebView2**: medir WebGL vs DOM en memoria del proceso GPU,
   probar `--in-process-gpu` (`additionalBrowserArgs`) y `MemoryUsageTargetLevel = Low` al
   minimizar. Es lo que más mueve la aguja frente al objetivo "mucho más liviana que Warp".

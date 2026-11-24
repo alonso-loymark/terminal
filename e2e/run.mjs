@@ -3263,15 +3263,16 @@ const stages = {
     await freshTab();
     await resetSettings();
 
-    // The settings screen: a second key for "Nueva tab", recorded with the keyboard.
+    // The settings screen: a second key for "Nueva tab", recorded with the keyboard (a free
+    // key: Ctrl+Shift+N is the orchestrator's new chat).
     await openSettings('keybindings');
-    await recordKey('tab.new', 'Control+Shift+N');
-    const added = await waitUntil(() => /"tab\.new": \[\s*"ctrl\+shift\+t",\s*"ctrl\+shift\+n"\s*\]/.test(settingsOnDisk()), 3000);
+    await recordKey('tab.new', 'Control+Shift+Y');
+    const added = await waitUntil(() => /"tab\.new": \[\s*"ctrl\+shift\+t",\s*"ctrl\+shift\+y"\s*\]/.test(settingsOnDisk()), 3000);
     check('Atajos: agregar una tecla la guarda en settings.json (keybindings)', added, settingsOnDisk());
     await closeSettings();
     let tabs = (await wsState()).order.length;
-    await page.keyboard.press('Control+Shift+N');
-    check('... y la tecla nueva funciona al instante (Ctrl+Shift+N abre una tab)', await waitUntil(async () => (await wsState()).order.length === tabs + 1, 3000));
+    await page.keyboard.press('Control+Shift+Y');
+    check('... y la tecla nueva funciona al instante (Ctrl+Shift+Y abre una tab)', await waitUntil(async () => (await wsState()).order.length === tabs + 1, 3000));
     await waitUntil(atShellPrompt, 20000);
 
     // Ctrl+B removed from the explorer: it reaches the program again.
@@ -3295,11 +3296,11 @@ const stages = {
 
     // A key another action has: the screen says so and "Reasignar" moves it.
     await openSettings('keybindings');
-    await recordKey('explorer.toggleHidden', 'Control+Shift+N');
+    await recordKey('explorer.toggleHidden', 'Control+Shift+Y');
     const proposal = await page.locator('.key-proposal').textContent({ timeout: 3000 }).catch(() => '');
     check('una tecla de otra acción: avisa el conflicto antes de guardar', /Nueva tab/.test(proposal ?? ''), proposal ?? '');
     await page.click('[data-action="reassign-key"]');
-    await waitUntil(() => /"explorer\.toggleHidden": \[\s*"ctrl\+shift\+n"\s*\]/.test(settingsOnDisk()), 3000);
+    await waitUntil(() => /"explorer\.toggleHidden": \[\s*"ctrl\+shift\+y"\s*\]/.test(settingsOnDisk()), 3000);
     let disk = settingsOnDisk();
     check('... "Reasignar" la saca de la otra acción (y la que vuelve a su default no queda en el archivo)', /"explorer\.toggleHidden"/.test(disk) && !/"tab\.new"/.test(disk), disk);
 
@@ -4478,9 +4479,10 @@ const stages = {
     }
     const workRuns = () => fakeClaudeRuns().filter((r) => r.kind === 'work');
     const planRuns = () => fakeClaudeRuns().filter((r) => !r.kind && r.system?.includes('Sos el orquestador de Brisa'));
-    const input = '.orch-pane:not([hidden]) [data-orch-input]';
+    const pane = '.orch-pane:not([hidden])';
+    const input = `${pane} [data-orch-input]`;
     // The last card of a kind (no later sibling of the same kind; cards of other kinds may follow it).
-    const lastCard = (kind) => `.orch-pane:not([hidden]) [data-orch="${kind}"]:not(:has(~ [data-orch="${kind}"]))`;
+    const lastCard = (kind) => `${pane} [data-orch="${kind}"]:not(:has(~ [data-orch="${kind}"]))`;
     const cardStatus = (kind) => page.getAttribute(lastCard(kind), 'data-status').catch(() => null);
     const send = async (text) => {
       await page.fill(input, text);
@@ -4489,21 +4491,46 @@ const stages = {
     const proposed = () => waitUntil(async () => (await cardStatus('plan')) === 'proposed', 15000);
     const runEnded = (status = 'done') => waitUntil(async () => (await cardStatus('run')) === status, 20000);
     const project_ = () => page.evaluate(() => Object.values(window.__orch.getState().projects)[0] ?? null);
+    const chat_ = async () => {
+      const p = await project_();
+      return p?.chats.find((c) => c.id === p.activeChat) ?? null;
+    };
+    const lastMessages = async (n = 3) => ((await chat_())?.messages ?? []).slice(-n).map((m) => [m.kind, m.status, m.error?.message]);
+    const sidebarView = () => page.getAttribute('.sidebar', 'data-view').catch(() => null);
+    const chatTitles = () => page.$$eval('.chat-list [data-chat-id]', (els) => els.map((e) => e.querySelector('[data-orch="chat-title"]')?.textContent ?? ''));
+    const storeDir = () => {
+      const base = path.join(CONFIG_DIR, 'orchestrator');
+      const folders = fs.existsSync(base) ? fs.readdirSync(base) : [];
+      return folders.length ? path.join(base, folders[0]) : null;
+    };
+    const index = () => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(storeDir() ?? '', 'chats.json'), 'utf8'));
+      } catch {
+        return null;
+      }
+    };
+    // The run's activity, step by step (the line expands on click).
+    const activityItems = async () => {
+      if (!(await page.$(`${lastCard('run')} [data-orch="activity"]`))) await page.click(`${lastCard('run')} .orch-activity-toggle`);
+      return page.$$eval(`${lastCard('run')} [data-orch="activity"] li`, (items) => items.map((li) => `${li.dataset.action}:${li.textContent}`));
+    };
 
+    if (!(await page.evaluate(() => window.__explorer.getState().visible))) await page.keyboard.press('Control+b');
     await runIdle(`Set-Location -LiteralPath ${psQuote(project)}`);
     const runsBefore = fakeClaudeRuns().length;
     await paletteRun('orquestador aqui', 'orchestrator.open');
-    await page.waitForSelector('.orch-pane:not([hidden])', { timeout: 5000 });
+    await page.waitForSelector(pane, { timeout: 5000 });
     const tab = await activeTab();
-    const pane = await paneState(tab.activePaneId);
+    const paneState_ = await paneState(tab.activePaneId);
     check(
       'Abrir orquestador aquí: una tab "Orquestador" ligada a la carpeta del proyecto',
-      pane?.kind === 'orchestrator' && pane.cwd === project && (await tabLabel(tab.id)).includes('Orquestador'),
-      `${pane?.kind} ${pane?.cwd} ${await tabLabel(tab.id)}`,
+      paneState_?.kind === 'orchestrator' && paneState_.cwd === project && (await tabLabel(tab.id)).includes('Orquestador'),
+      `${paneState_?.kind} ${paneState_?.cwd} ${await tabLabel(tab.id)}`,
     );
-    const options = async () => page.$$eval('.orch-pane:not([hidden]) [data-orch="main-model"] option', (os) => os.map((o) => o.value));
+    const options = async () => page.$$eval(`${pane} [data-orch="main-model"] option`, (os) => os.map((o) => o.value));
     await waitUntil(async () => (await options()).length >= 4, 15000);
-    const mainSelected = await page.$eval('.orch-pane:not([hidden]) [data-orch="main-model"]', (s) => s.value);
+    const mainSelected = await page.$eval(`${pane} [data-orch="main-model"]`, (s) => s.value);
     const init = fakeClaudeRuns().slice(runsBefore).find((r) => r.kind === 'init');
     check(
       'los modelos salen de Claude Code (initialize), no hardcodeados; el principal por defecto es sonnet',
@@ -4511,10 +4538,17 @@ const stages = {
       `${JSON.stringify(await options())} ${mainSelected}`,
     );
     await waitUntil(async () => (await project_())?.info !== null, 10000);
+    // The sidebar: the project's chats while the orchestrator is the active tab; a toggle for the files.
+    await page.waitForSelector('.sidebar[data-view="chats"] .chat-list', { timeout: 5000 }).catch(() => null);
+    const chatsShown = (await sidebarView()) === 'chats' && (await page.$$('.chat-list [data-chat-id]')).length === 1;
+    await page.click('[data-action="sidebar-files"]');
+    const filesShown = await waitUntil(async () => (await sidebarView()) === 'files' && !!(await page.$('.sidebar .file-tree')), 3000);
+    await page.click('[data-action="sidebar-chats"]');
+    check('la barra lateral muestra los chats del proyecto (y el toggle vuelve al explorador)', chatsShown && filesShown && (await sidebarView()) === 'chats', `${chatsShown} ${filesShown}`);
 
     // AGENTS.md: offered, drafted read-only, shown (and editable) before anything is written.
     if (!SMOKE) {
-      await page.waitForSelector('.orch-pane:not([hidden]) [data-orch="agents-offer"]', { timeout: 5000 });
+      await page.waitForSelector(`${pane} [data-orch="agents-offer"]`, { timeout: 5000 });
       await page.click('[data-action="orch-draft-agents"]');
       await page.waitForSelector('[data-orch="instructions-dialog"][data-file="agents"]', { timeout: 15000 });
       const draft = await page.inputValue('[data-orch="instructions-text"]');
@@ -4535,14 +4569,14 @@ const stages = {
       await sleep(300);
       check(
         'CLAUDE.md: se ofrece uno mínimo que importa AGENTS.md; Cancelar no crea nada',
-        /^@AGENTS\.md$/m.test(minimal) && !fs.existsSync(path.join(project, 'CLAUDE.md')) && !!(await page.$('.orch-pane:not([hidden]) [data-orch="claude-offer"]')),
+        /^@AGENTS\.md$/m.test(minimal) && !fs.existsSync(path.join(project, 'CLAUDE.md')) && !!(await page.$(`${pane} [data-orch="claude-offer"]`)),
         minimal,
       );
       // A CLAUDE.md of the client's: never overwritten, only the import offered (shown whole).
       fs.writeFileSync(path.join(project, 'CLAUDE.md'), '# Cliente\nNo tocar la carpeta legacy.\n');
       // "Actualizar" reads the project again (and the agents).
       await page.click('[data-action="orch-refresh-agents"]');
-      await waitUntil(async () => (await page.textContent('.orch-pane:not([hidden]) [data-orch="claude-offer"]').catch(() => '')).includes('no importa'), 10000);
+      await waitUntil(async () => (await page.textContent(`${pane} [data-orch="claude-offer"]`).catch(() => '')).includes('no importa'), 10000);
       await page.click('[data-action="orch-offer-claude"]');
       await page.waitForSelector('[data-orch="instructions-dialog"][data-file="claude"]', { timeout: 5000 });
       const offered = await page.inputValue('[data-orch="instructions-text"]');
@@ -4553,20 +4587,23 @@ const stages = {
       );
       await page.click('[data-action="orch-confirm-instructions"]');
       await waitUntil(async () => !(await page.$('[data-orch="instructions-dialog"]')), 5000);
-      check('... y al confirmar se escribe exactamente eso', fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf8') === offered && !(await page.$('.orch-pane:not([hidden]) [data-orch="claude-offer"]')));
+      check('... y al confirmar se escribe exactamente eso', fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf8') === offered && !(await page.$(`${pane} [data-orch="claude-offer"]`)));
     }
 
     // A message: the main model proposes a plan (JSON, validated) before anything runs.
     const ghToken = ['ghp_', 'Orq81Kd93LmXp02Qw7Er4Ty6Ui8Op1As3Df5'].join('');
+    const runsAtSend = fakeClaudeRuns().length;
     await send(`renombrá la variable total en src/app.js (token ${ghToken})`);
+    const autoTitle = await page.textContent(`${pane} [data-orch="chat-heading"]`).catch(() => '');
     const planned = await proposed();
     const planText = planned ? await page.textContent(lastCard('plan')) : '';
     check(
-      'cada mensaje da un plan: tarea, agente, modelo, esfuerzo y por qué (trivial → rápido con esfuerzo bajo)',
+      'cada mensaje da un plan en una línea: agente, modelo, esfuerzo y por qué (trivial → rápido con esfuerzo bajo)',
       planned &&
         (await page.textContent(`${lastCard('plan')} [data-orch="plan-model"]`)).includes('Haiku') &&
         (await page.textContent(`${lastCard('plan')} [data-orch="plan-effort"]`)).includes('low') &&
         (await page.textContent(`${lastCard('plan')} [data-orch="plan-why"]`)).includes('trivial') &&
+        !!(await page.$(`${lastCard('plan')} [data-action="orch-approve"]`)) &&
         workRuns().length === (SMOKE ? 0 : 1),
       planText.slice(0, 160),
     );
@@ -4575,6 +4612,13 @@ const stages = {
       'el plan lo arma el modelo principal, sin herramientas, y el mensaje sale redactado',
       planRun?.args.includes('sonnet') && planRun.args.includes('--safe-mode') && !planRun.prompt.includes(ghToken) && planRun.prompt.includes('[REDACTED:github_token]'),
       planRun?.prompt.slice(-200),
+    );
+    // The chat's title: at once from the message (redacted), then the planner's, in the same answer.
+    const planTitle = await waitUntil(async () => (await page.textContent(`${pane} [data-orch="chat-heading"]`)) === 'Plan: renombrá la variable', 3000);
+    check(
+      'el título del chat sale del primer mensaje (sin el token) y lo mejora el plan, sin otra llamada',
+      autoTitle.startsWith('Renombrá la variable total') && !autoTitle.includes(ghToken) && planTitle && planRun.prompt.includes('## Título del chat') && fakeClaudeRuns().length - runsAtSend === 1,
+      `${autoTitle} → ${await page.textContent(`${pane} [data-orch="chat-heading"]`)}`,
     );
     await page.click(`${lastCard('plan')} [data-action="orch-sent"]`);
     await page.waitForSelector('[data-orch="sent-dialog"]', { timeout: 3000 });
@@ -4586,12 +4630,17 @@ const stages = {
     // Approve: a worker in the project folder, limited permissions, live activity, diff, cost.
     await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
     const done = await runEnded();
-    const activity = await page.$$eval(`${lastCard('run')} [data-orch="activity"] li`, (items) => items.map((li) => `${li.dataset.action}:${li.textContent}`));
+    const summary = await page.textContent(`${lastCard('run')} [data-orch="activity-summary"]`).catch(() => '');
+    const activity = await activityItems();
     const work = workRuns().at(-1);
     check(
-      'aprobado: el trabajador corre en la carpeta del proyecto y se ve lo que lee, edita y ejecuta',
-      done && activity.some((a) => a.startsWith('read:') && a.includes('package.json')) && activity.some((a) => a.startsWith('edit:') && a.includes('src/app.js')) && activity.some((a) => a.startsWith('command:') && a.includes('npm run build')),
-      JSON.stringify(activity),
+      'la actividad es una línea ("Leyó 1 archivo, editó 1 y ejecutó 1 comando") que se expande a cada paso',
+      done &&
+        summary === 'Leyó 1 archivo, editó 1 y ejecutó 1 comando' &&
+        activity.some((a) => a.startsWith('read:') && a.includes('package.json')) &&
+        activity.some((a) => a.startsWith('edit:') && a.includes('src/app.js')) &&
+        activity.some((a) => a.startsWith('command:') && a.includes('npm run build')),
+      `${summary} | ${JSON.stringify(activity)}`,
     );
     check(
       '... con permisos acotados: editar y solo los comandos del proyecto (nada que los desactive), secretos denegados',
@@ -4605,36 +4654,104 @@ const stages = {
         work.effort === 'low',
       JSON.stringify({ allowed: work?.allowed, model: work?.model }),
     );
-    check('... recibe un brief (la tarea), redactado, no la conversación', work?.prompt.startsWith('## Tarea\n') && !work.prompt.includes(ghToken) && !work.prompt.includes('Conversación'), work?.prompt.slice(0, 160));
+    check(
+      '... recibe un brief (la tarea), redactado, no la conversación; las reglas piden el resumen fijo en español',
+      work?.prompt.startsWith('## Tarea\n') &&
+        !work.prompt.includes(ghToken) &&
+        !work.prompt.includes('Conversación') &&
+        ['**Qué cambió:**', '**Cómo probarlo:**', '**Pendiente:**', 'en español', 'AGENTS.md desactualizado:'].every((p) => work.rules.includes(p)),
+      work?.prompt.slice(0, 160),
+    );
+    await page.click(`${lastCard('run')} .orch-changes`).catch(() => {});
     const diffFiles = await page.$$eval(`${lastCard('run')} .orch-diff-file`, (els) => els.map((e) => e.dataset.path));
     const usage = await page.textContent(`${lastCard('run')} [data-orch="usage"]`).catch(() => '');
+    const usageTitle = await page.getAttribute(`${lastCard('run')} [data-orch="usage"]`, 'title').catch(() => '');
     const result = await page.textContent(`${lastCard('run')} [data-orch="result"]`).catch(() => '');
+    const total = await page.textContent(`${pane} [data-orch="chat-total"]`).catch(() => '');
     check(
-      'al terminar: resumen, diff de lo que cambió, tokens y costo que informa el CLI',
-      result.includes('edité src/app.js') && JSON.stringify(diffFiles) === '["src/app.js"]' && usage.includes('US$0.0042') && usage.includes('tokens'),
-      `${result} | ${JSON.stringify(diffFiles)} | ${usage}`,
+      'al terminar: el resumen en markdown, el diff, tokens y costo al pie (detalle al pasar el mouse) y el total del chat arriba',
+      result.includes('Qué cambió: edité src/app.js') &&
+        (await page.$$(`${lastCard('run')} [data-orch="result"] strong`)).length === 3 &&
+        JSON.stringify(diffFiles) === '["src/app.js"]' &&
+        usage.includes('US$0.0042') &&
+        usage.includes('tokens') &&
+        usageTitle.includes('Caché leída') &&
+        usageTitle.includes('Turnos: 3') &&
+        /US\$0\.00\d+ · [\d.]+ k tokens/.test(total),
+      `${result} | ${JSON.stringify(diffFiles)} | ${usage} | ${total}`,
     );
-    const store = path.join(CONFIG_DIR, 'orchestrator');
     // Saved 300 ms after the last change: the folder may not exist yet.
     const saved = await waitUntil(() => {
-      const folders = fs.existsSync(store) ? fs.readdirSync(store) : [];
-      const dir = folders.length ? path.join(store, folders[0]) : null;
-      return !!dir && fs.existsSync(path.join(dir, 'decisions.json')) && fs.readFileSync(path.join(dir, 'decisions.json'), 'utf8').includes('renombrá');
+      const dir = storeDir();
+      const chatId = index()?.chats?.[0]?.id;
+      return !!dir && !!chatId && fs.readFileSync(path.join(dir, 'decisions.json'), 'utf8').includes('renombrá') && fs.existsSync(path.join(dir, 'chats', `${chatId}.json`));
     }, 5000);
     const status = git('status', '--porcelain').trimEnd().split('\n').sort();
     check(
-      'conversación y registro de decisiones en la carpeta de config de Brisa, nada nuevo en el repo',
+      'chats, decisiones y preferencias en la carpeta de config de Brisa (chats.json + un archivo por chat), nada nuevo en el repo',
       saved &&
+        index()?.chats?.[0]?.title === 'Plan: renombrá la variable' &&
         JSON.stringify(status) === JSON.stringify(SMOKE ? [' M src/app.js'] : [' M src/app.js', '?? AGENTS.md', '?? CLAUDE.md']) &&
-        !fs.readdirSync(project).some((f) => /brisa|orquest|decision/i.test(f)),
-      JSON.stringify(status),
+        !fs.readdirSync(project).some((f) => /brisa|orquest|decision|chats/i.test(f)),
+      JSON.stringify({ status, index: index()?.chats?.map((c) => c.title) }),
     );
     if (SMOKE) {
       await freshTab();
       return;
     }
 
-    // @opus at the start forces the model; "Cambiar modelo" and "Cancelar" on the card.
+    // Markdown: lists, bold, tables, code with highlighting and "Copiar"; paths open in the
+    // explorer; HTML from the model never becomes markup (no image, no script, no javascript: link).
+    await page.evaluate(() => delete window.__xss);
+    await send('mostrá el detalle del cambio FAKE_MARKDOWN');
+    await proposed();
+    await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
+    await runEnded();
+    const md = `${lastCard('run')} [data-orch="result"]`;
+    await page.waitForSelector(`${md} .md-code .tok`, { timeout: 5000 }).catch(() => null);
+    const shape = await page.$eval(md, (el) => ({
+      li: el.querySelectorAll('li').length,
+      table: el.querySelectorAll('table td').length,
+      tokens: el.querySelectorAll('.md-code .tok').length,
+      copy: !!el.querySelector('[data-action="md-copy"]'),
+      img: el.querySelectorAll('img').length,
+      script: el.querySelectorAll('script, iframe').length,
+      js: [...el.querySelectorAll('a')].some((a) => (a.getAttribute('href') ?? '').toLowerCase().startsWith('javascript')),
+      onerror: el.innerHTML.includes('onerror='),
+      text: el.textContent,
+    }));
+    await sleep(300);
+    const xss = await page.evaluate(() => window.__xss ?? null);
+    check(
+      'respuestas con markdown completo (listas, negritas, tablas, código resaltado con Copiar)',
+      shape.li >= 3 && shape.table >= 2 && shape.tokens > 0 && shape.copy,
+      JSON.stringify({ ...shape, text: undefined }),
+    );
+    check(
+      'el HTML de un modelo se sanea: sin imágenes, scripts ni links javascript:, solo texto',
+      shape.img === 0 && shape.script === 0 && !shape.js && !shape.onerror && xss === null && shape.text.includes('negrita') && !shape.text.includes('window.__xss = 2') && shape.text.includes('[imagen: imagen]'),
+      JSON.stringify({ img: shape.img, script: shape.script, js: shape.js, xss }),
+    );
+    // For a look at the design (the page only, as every capture of the e2e).
+    await page.$eval(md, (el) => el.scrollIntoView({ block: 'end' }));
+    await shot('orchestrator-chat');
+    await page.click(`${md} .md-path[data-path="src/app.js"]`);
+    const revealed = await waitUntil(
+      async () => (await sidebarView()) === 'files' && (await page.evaluate(() => window.__explorer.getState().selected ?? '')).endsWith('\\src\\app.js') && !!(await page.$('.file-tree [data-selected]')),
+      5000,
+    );
+    check('una ruta de archivo en la respuesta es clicable: abre el archivo en el explorador', revealed, `${await sidebarView()} ${await page.evaluate(() => window.__explorer.getState().selected)}`);
+    await page.click('[data-action="sidebar-chats"]');
+
+    // @opus at the start forces the model; the input completes it; "Cambiar modelo" and "Cancelar".
+    await page.fill(input, '@op');
+    const suggested = await page.$$eval(`${pane} [data-orch="model-suggest"] li`, (els) => els.map((e) => e.dataset.value)).catch(() => []);
+    await page.press(input, 'Tab');
+    const completed = await page.inputValue(input);
+    const oneLine = await page.$eval(input, (el) => el.getBoundingClientRect().height);
+    await page.fill(input, 'uno\ndos\ntres\ncuatro\ncinco\nseis');
+    const grown = await page.$eval(input, (el) => el.getBoundingClientRect().height);
+    check('el input crece con el texto y completa @haiku / @sonnet / @opus', JSON.stringify(suggested) === '["opus"]' && completed === '@opus ' && grown > oneLine * 2, `${JSON.stringify(suggested)} ${JSON.stringify(completed)} ${oneLine}→${grown}`);
     await send('@opus agregá un test para el contador');
     await proposed();
     const forcedModel = await page.textContent(`${lastCard('plan')} [data-orch="plan-model"]`);
@@ -4657,8 +4774,9 @@ const stages = {
     const question = await page.textContent(`${lastCard('run')} [data-orch="denials"]`).catch(() => '');
     check('un comando no permitido no se ejecuta: aparece como pregunta', question.includes('curl -s https://example.com') && (await page.textContent(`${lastCard('run')} [data-orch="result"]`)).includes('necesito permiso'), question);
     const denied = workRuns().at(-1);
+    const runCount = (await page.$$(`${pane} [data-orch="run"]`)).length;
     await page.click(`${lastCard('run')} [data-action="orch-allow"]`);
-    const continued = await waitUntil(async () => (await page.$$('.orch-pane:not([hidden]) [data-orch="run"]')).length >= 3 && (await cardStatus('run')) === 'done', 20000);
+    const continued = await waitUntil(async () => (await page.$$(`${pane} [data-orch="run"]`)).length > runCount && (await cardStatus('run')) === 'done', 20000);
     const resumed = workRuns().at(-1);
     check(
       '"Permitir y continuar" retoma la sesión con ese comando permitido (solo para esa tarea)',
@@ -4666,16 +4784,131 @@ const stages = {
       JSON.stringify({ resume: resumed?.resume, allowed: resumed?.allowed?.slice(-2) }),
     );
 
-    // Cancel: the worker's whole process tree dies.
+    // A task that left AGENTS.md out of date: the orchestrator says so and offers to update it,
+    // showing the whole file and what changes before writing anything.
+    const agentsBefore = fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf8');
+    await send('cambié el comando de tests FAKE_AGENTS_STALE');
+    await proposed();
+    await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
+    await runEnded();
+    const staleText = await page.textContent(`${lastCard('run')} [data-orch="agents-stale"]`).catch(() => '');
+    const staleResult = await page.textContent(`${lastCard('run')} [data-orch="result"]`).catch(() => '');
+    await page.click(`${lastCard('run')} [data-action="orch-update-agents"]`);
+    await page.waitForSelector('[data-orch="instructions-dialog"][data-file="agents"]', { timeout: 15000 }).catch(() => null);
+    const updated = await page.inputValue('[data-orch="instructions-text"]').catch(() => '');
+    const update = workRuns().at(-1);
+    const diffShown = await page.textContent('[data-orch="instructions-diff"]').catch(() => '');
+    check(
+      'si una tarea deja AGENTS.md desactualizado, el orquestador lo dice y ofrece actualizarlo (análisis de solo lectura, con los cambios a la vista)',
+      staleText.includes('npm run test:unit') &&
+        !staleResult.includes('desactualizado') &&
+        update?.tools === 'Read,Glob,Grep' &&
+        update.prompt.includes('quedó desactualizado') &&
+        updated.startsWith(agentsBefore.trimEnd()) &&
+        updated.includes('npm run test:unit') &&
+        /\+\d+/.test(diffShown),
+      JSON.stringify({
+        staleText,
+        tools: update?.tools,
+        diffShown,
+        resultClean: !staleResult.includes('desactualizado'),
+        prompt: update?.prompt.slice(0, 80),
+        starts: updated.startsWith(agentsBefore.trimEnd()),
+        head: [agentsBefore.slice(0, 40), updated.slice(0, 40)],
+      }),
+    );
+    await page.click('[data-orch="instructions-dialog"] [data-action="cancel"]');
+    await sleep(300);
+    check('... y sin confirmar no se escribe nada', fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf8') === agentsBefore);
+
+    // Cancel with "Detener": the worker's whole process tree dies; meanwhile the line shows what it does.
     await send('una tarea larga FAKE_SLOW');
     await proposed();
     await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
     const child = await waitUntil(() => fakeClaudeRuns().some((r) => r.kind === 'child' && alive(r.child)), 15000);
     const childPid = fakeClaudeRuns().filter((r) => r.kind === 'child').at(-1)?.child;
-    await page.click(`${lastCard('run')} [data-action="orch-cancel-run"]`);
+    const live = await waitUntil(async () => (await page.textContent(`${lastCard('run')} [data-orch="activity-summary"]`).catch(() => '')).includes('Ejecutando npm test'), 5000);
+    await page.click(`${pane} [data-action="orch-stop"]`);
     const cancelledRun = await runEnded('cancelled');
     const dead = await waitUntil(() => !alive(childPid), 5000);
-    check('cancelar mata todo el árbol del trabajador (Job Object)', child && cancelledRun && dead, `child ${childPid}`);
+    check('mientras trabaja se ve en vivo lo que hace; "Detener" mata todo el árbol del trabajador', child && live && cancelledRun && dead, `child ${childPid} live ${live}`);
+
+    // Chats: a new one (shortcut) has its own context; rename, search, delete; the first one stays.
+    const firstChat = (await project_()).activeChat;
+    await page.focus(input);
+    await page.keyboard.press('Control+Shift+N');
+    const fresh = await waitUntil(async () => (await project_()).activeChat !== firstChat && (await page.$$(`${pane} [data-orch="user"]`)).length === 0, 3000);
+    await send('arreglá una errata en el contador');
+    await proposed();
+    const ownContext = planRuns().at(-1)?.prompt ?? '';
+    const recent = /## Conversación reciente\n([\s\S]*?)\n## /.exec(ownContext)?.[1] ?? '';
+    check(
+      'Ctrl+Shift+N abre un chat nuevo con su propio contexto (el registro de decisiones sigue siendo del proyecto)',
+      fresh && recent.includes('arreglá una errata') && !recent.includes('renombrá') && !recent.includes('FAKE_MARKDOWN') && ownContext.includes('## Decisiones anteriores del proyecto\n- [hecha]') && (await chatTitles()).length === 2,
+      recent,
+    );
+    await page.click(`${lastCard('plan')} [data-action="orch-cancel-plan"]`);
+    const secondChat = (await project_()).activeChat;
+    await page.click(`.chat-list [data-chat-id="${firstChat}"]`);
+    const back = await waitUntil(async () => (await project_()).activeChat === firstChat && (await page.$$(`${pane} [data-orch="run"]`)).length >= 4, 3000);
+    check('cambiar de chat muestra su conversación', back, String((await page.$$(`${pane} [data-orch="run"]`)).length));
+    await page.dblclick(`.chat-list [data-chat-id="${secondChat}"]`);
+    await page.waitForSelector('.chat-list .rename-input', { timeout: 3000 });
+    await page.fill('.chat-list .rename-input', 'Erratas');
+    await page.press('.chat-list .rename-input', 'Enter');
+    const renamed = await waitUntil(() => index()?.chats?.some((c) => c.id === secondChat && c.title === 'Erratas' && c.titleFrom === 'user'), 5000);
+    check('renombrar un chat (doble clic) se guarda en el índice', renamed && (await chatTitles()).includes('Erratas'), JSON.stringify(await chatTitles()));
+    await page.focus(input);
+    await page.keyboard.press('Control+Shift+K');
+    const searchFocused = await waitUntil(() => page.evaluate(() => document.activeElement?.getAttribute('data-orch') === 'chat-search'), 2000);
+    await page.keyboard.type('errata');
+    const found = await waitUntil(async () => JSON.stringify(await chatTitles()) === '["Erratas"]', 3000);
+    await page.fill('[data-orch="chat-search"]', '');
+    check('Ctrl+Shift+K busca en los chats (título y lo que escribiste)', searchFocused && found, JSON.stringify(await chatTitles()));
+    await page.hover(`.chat-list [data-chat-id="${secondChat}"]`);
+    await page.click(`.chat-list [data-chat-id="${secondChat}"] [data-action="orch-delete-chat"]`);
+    await page.waitForSelector('[role="alertdialog"]', { timeout: 3000 });
+    await page.keyboard.press('Enter');
+    await sleep(300);
+    const keptOnCancel = (await chatTitles()).includes('Erratas');
+    await page.hover(`.chat-list [data-chat-id="${secondChat}"]`);
+    await page.click(`.chat-list [data-chat-id="${secondChat}"] [data-action="orch-delete-chat"]`);
+    await page.waitForSelector('[role="alertdialog"]', { timeout: 3000 });
+    await page.click('[role="alertdialog"] button:not(:focus)');
+    const gone = await waitUntil(() => !fs.existsSync(path.join(storeDir(), 'chats', `${secondChat}.json`)) && !index()?.chats?.some((c) => c.id === secondChat), 5000);
+    check('eliminar un chat pide confirmación (Enter cancela: el foco está en Cancelar) y borra su archivo', keptOnCancel && gone && !(await chatTitles()).includes('Erratas'), JSON.stringify(await chatTitles()));
+
+    // A pasted image goes to the worker with the brief (stream-json), shown before sending.
+    const clipboardBefore = await page.evaluate(() => navigator.clipboard.readText().catch(() => ''));
+    await page.evaluate(async () => {
+      const canvas = new OffscreenCanvas(40, 20);
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#3b82f6';
+      context.fillRect(0, 0, 40, 20);
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': await canvas.convertToBlob({ type: 'image/png' }) })]);
+    });
+    await page.focus(input);
+    await page.keyboard.press('Control+V');
+    const attached = await waitUntil(async () => !!(await page.$(`${pane} [data-orch="attachment"] img`)), 5000);
+    await send('mirá la captura y corregí el color');
+    await proposed();
+    const imagePlan = planRuns().at(-1);
+    await page.click(`${lastCard('plan')} [data-action="orch-approve"]`);
+    await runEnded();
+    await shot('orchestrator-image');
+    const withImage = workRuns().at(-1);
+    check(
+      'pegar una imagen en el input la adjunta y le llega al trabajador junto con la tarea (PNG)',
+      attached &&
+        !!(await page.$(`${lastCard('user')} [data-orch="user-image"]`)) &&
+        imagePlan?.prompt.includes('## Imágenes') &&
+        withImage?.args.includes('--input-format') &&
+        withImage.images?.length === 1 &&
+        withImage.images[0].png &&
+        (await page.textContent(`${lastCard('run')} [data-orch="result"]`)).includes('Vi 1 imagen'),
+      JSON.stringify({ attached, images: withImage?.images }),
+    );
+    await setClipboard(clipboardBefore || ' ');
 
     // Auto-approve, from the settings screen: the plan is shown and runs without waiting.
     await openSettings('agents');
@@ -4691,7 +4924,7 @@ const stages = {
     const before = workRuns().length;
     await send('corregí una errata del README');
     const auto = await waitUntil(async () => workRuns().length === before + 1 && (await cardStatus('run')) === 'done', 20000);
-    check('orchestrator.autoApprove: ejecuta el plan sin esperar "Aprobar"', auto && (await cardStatus('plan')) === 'approved', JSON.stringify({ auto, runs: workRuns().length - before, plan: await cardStatus('plan'), run: await cardStatus('run'), busy: (await project_())?.busy, last: (await project_())?.messages.slice(-3).map((m) => [m.kind, m.status, m.error?.message]) }));
+    check('orchestrator.autoApprove: ejecuta el plan sin esperar "Aprobar"', auto && (await cardStatus('plan')) === 'approved', JSON.stringify({ auto, runs: workRuns().length - before, plan: await cardStatus('plan'), run: await cardStatus('run'), busy: (await project_())?.busy, last: await lastMessages() }));
 
     // Off: nothing runs (the UI says so and the backend refuses on its own).
     await writeSettings({ orchestrator: { enabled: false } });
@@ -4704,7 +4937,7 @@ const stages = {
     await page.keyboard.press('Escape');
     check(
       'orchestrator.enabled: false → aviso en la tab, sin la acción en la paleta y el backend no lanza nada',
-      !!(await page.$('.orch-pane:not([hidden]) [data-orch="disabled"]')) && !listed && refused === 'disabled' && fakeClaudeRuns().length === runsOff,
+      !!(await page.$(`${pane} [data-orch="disabled"]`)) && !listed && refused === 'disabled' && fakeClaudeRuns().length === runsOff,
       refused,
     );
     check('la sesión recuerda la tab del orquestador', JSON.stringify(sessionOnDisk() ?? {}).includes('"orchestrator":true'));

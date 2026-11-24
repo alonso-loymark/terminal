@@ -33,6 +33,8 @@ interface ExplorerState extends ExplorerPrefs {
   notice: Notice | null;
   /** pathKey of the selected row. */
   selected: string | null;
+  /** pathKey of a row to scroll into view once it is listed (a path clicked elsewhere). */
+  revealing: string | null;
   /** Folders the backend confirmed it is watching (pathKeys; diagnostics and e2e). */
   watched: string[];
   toggleVisible: () => void;
@@ -48,6 +50,7 @@ interface ExplorerState extends ExplorerPrefs {
   setEditing: (editing: Editing | null) => void;
   setNotice: (notice: Notice | null) => void;
   select: (path: string | null) => void;
+  setRevealing: (path: string | null) => void;
   setWatched: (keys: string[]) => void;
 }
 
@@ -61,6 +64,7 @@ export const useExplorer = create<ExplorerState>()((set) => ({
   editing: null,
   notice: null,
   selected: null,
+  revealing: null,
   watched: [],
   toggleVisible: () => set((s) => ({ visible: !s.visible })),
   applyPrefs: (prefs) =>
@@ -93,5 +97,6 @@ export const useExplorer = create<ExplorerState>()((set) => ({
   setEditing: (editing) => set({ editing }),
   setNotice: (notice) => set({ notice }),
   select: (path) => set({ selected: path ? pathKey(path) : null }),
+  setRevealing: (path) => set({ revealing: path ? pathKey(path) : null }),
   setWatched: (watched) => set({ watched }),
 }));

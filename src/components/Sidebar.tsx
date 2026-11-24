@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { Fragment, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { loadDir, syncWatches } from '../lib/explorerData';
 import { openFolder, openTabAt } from '../lib/explorerActions';
 import { breadcrumbs, fitCrumbs, flattenTree, pathKey, visibleDirs, type Crumb, type FittedCrumbs } from '../lib/explorerModel';
@@ -10,9 +10,14 @@ import { useSystem } from '../store/system';
 import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { spawnOf } from '../store/workspaceModel';
-import { ChevronRight, Ellipsis, Eye, EyeOff, Pin, PinOff, X } from 'lucide-react';
+import { ChevronRight, Ellipsis, Eye, EyeOff, FolderTree, MessagesSquare, Pin, PinOff, X } from 'lucide-react';
+import { setSidebarView } from '../lib/orchestratorActions';
+import { useOrchestrator } from '../store/orchestrator';
 import { useSettings } from '../store/settings';
 import { FileTree } from './FileTree';
+
+// With the orchestrator's UI: loaded the first time an orchestrator tab is active.
+const ChatList = lazy(() => import('./ChatList').then((m) => ({ default: m.ChatList })));
 
 /** At most this share of the window, so the terminals keep room. */
 const MAX_SHARE = 0.6;
@@ -27,9 +32,27 @@ function useExplorerRoot(): string | null {
   return pinned ?? cwd ?? home;
 }
 
-/** File explorer on the left (Ctrl+B). It follows the active pane's cwd unless pinned. */
+/** The project of the active tab when it is an orchestrator (its chats can take the sidebar). */
+function useOrchestratorDir(): string | null {
+  const dir = useWorkspace((s) => {
+    const pane = s.panes[selectActivePaneId(s) ?? ''];
+    return pane?.kind === 'orchestrator' ? (pane.cwd ?? null) : null;
+  });
+  const enabled = useSettings((s) => s.settings.orchestrator.enabled);
+  return enabled ? dir : null;
+}
+
+/**
+ * The sidebar on the left (Ctrl+B): the file explorer, which follows the active pane's cwd unless
+ * pinned. With an orchestrator tab active it shows that project's chats instead (a toggle goes
+ * back to the files).
+ */
 export function Sidebar() {
   const visible = useExplorer((s) => s.visible);
+  const orchDir = useOrchestratorDir();
+  const view = useOrchestrator((s) => s.sidebarView);
+  const chats = orchDir !== null && view === 'chats';
+  const files = visible && !chats;
   const width = useExplorer((s) => s.width);
   const root = useExplorerRoot();
   const listings = useExplorer((s) => s.listings);
@@ -39,11 +62,11 @@ export function Sidebar() {
   const creating = editing?.kind === 'create' ? { dir: editing.dir, kind: editing.entry } : null;
 
   const rows = useMemo(
-    () => (root && visible ? flattenTree({ root, listings, expanded, showHidden, creating }) : []),
+    () => (root && files ? flattenTree({ root, listings, expanded, showHidden, creating }) : []),
     // `creating` is derived from `editing`.
-    [root, visible, listings, expanded, showHidden, editing],
+    [root, files, listings, expanded, showHidden, editing],
   );
-  const dirs = useMemo(() => (root && visible ? visibleDirs(root, rows) : []), [root, visible, rows]);
+  const dirs = useMemo(() => (root && files ? visibleDirs(root, rows) : []), [root, files, rows]);
   const dirsKey = dirs.join('\n');
 
   // Read what is on screen, forget the rest, and watch exactly those folders.
@@ -55,19 +78,51 @@ export function Sidebar() {
   }, [dirsKey]);
 
   useEffect(() => {
-    if (visible && root) refreshGit(root);
-  }, [visible, root]);
+    if (files && root) refreshGit(root);
+  }, [files, root]);
   const fileIcons = useSettings((st) => st.settings.explorer.fileIcons);
 
   if (!visible) return null;
 
   return (
-    <aside className="sidebar" style={{ width }} aria-label="Explorador de archivos" data-root={root ?? undefined} data-file-icons={fileIcons}>
-      <ExplorerHeader root={root} />
-      {root ? <FileTree rows={rows} root={root} /> : <div className="tree-message">Sin carpeta</div>}
-      <ExplorerNotice />
+    <aside
+      className="sidebar"
+      style={{ width }}
+      aria-label={chats ? 'Chats del orquestador' : 'Explorador de archivos'}
+      data-view={chats ? 'chats' : 'files'}
+      data-root={root ?? undefined}
+      data-file-icons={fileIcons}
+    >
+      {orchDir && <SidebarSwitch chats={chats} />}
+      {chats ? (
+        <Suspense fallback={null}>
+          <ChatList dir={orchDir} />
+        </Suspense>
+      ) : (
+        <>
+          <ExplorerHeader root={root} />
+          {root ? <FileTree rows={rows} root={root} /> : <div className="tree-message">Sin carpeta</div>}
+          <ExplorerNotice />
+        </>
+      )}
       <Resizer />
     </aside>
+  );
+}
+
+/** With an orchestrator tab: its chats, or the project's files. */
+function SidebarSwitch({ chats }: { chats: boolean }) {
+  return (
+    <div className="sidebar-switch" role="tablist" aria-label="Barra lateral">
+      <button type="button" role="tab" aria-selected={chats} data-action="sidebar-chats" onClick={() => setSidebarView('chats')}>
+        <MessagesSquare aria-hidden="true" />
+        Chats
+      </button>
+      <button type="button" role="tab" aria-selected={!chats} data-action="sidebar-files" onClick={() => setSidebarView('files')}>
+        <FolderTree aria-hidden="true" />
+        Archivos
+      </button>
+    </div>
   );
 }
 

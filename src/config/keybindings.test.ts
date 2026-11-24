@@ -123,7 +123,10 @@ test('conflicts: duplicates across overlapping scopes, keys programs use, keys t
 
   const before = conflictsFor(resolveKeymap(), 'app.commandPalette', 'ctrl+shift+t');
   assert.equal(before[0]?.kind, 'duplicate');
-  assert.deepEqual(conflictsFor(resolveKeymap(), 'app.commandPalette', 'ctrl+shift+k'), []);
+  // A free key (Ctrl+Shift+K searches the orchestrator's chats).
+  assert.deepEqual(conflictsFor(resolveKeymap(), 'app.commandPalette', 'ctrl+shift+y'), []);
+  // F2 in the chat list renames the chat: no clash with F2 on tabs (another scope).
+  assert.deepEqual(conflictsFor(resolveKeymap(), 'chats.rename', 'f2'), []);
   assert.equal(conflictsFor(resolveKeymap(), 'tab.new', 'ctrl+w')[0]?.kind, 'reserved');
 });
 

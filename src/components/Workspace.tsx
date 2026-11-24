@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { lazy, Suspense, useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { focusActiveTerminal } from '../lib/tabActions';
 import { useAi } from '../store/ai';
@@ -6,10 +6,12 @@ import { useUi } from '../store/ui';
 import { selectActivePaneId, useWorkspace } from '../store/workspace';
 import { layoutDividers, layoutRects, panesOf, type PaneId, type Rect, type Tab, type TabId } from '../store/workspaceModel';
 import { AiCommandBar } from './AiCommandBar';
-import { OrchestratorPane } from './OrchestratorPane';
 import { PaneDivider } from './PaneDivider';
 import { SearchBar } from './SearchBar';
 import { TerminalPane } from './TerminalPane';
+
+// The orchestrator's UI (and, inside it, marked + Prism) loads the first time one is opened.
+const OrchestratorPane = lazy(() => import('./OrchestratorPane').then((m) => ({ default: m.OrchestratorPane })));
 
 interface PanePlacement {
   rect: Rect;
@@ -72,7 +74,9 @@ export function Workspace() {
         {paneIds.map((id) => {
           const place = placement[id] ?? HIDDEN;
           return orchestratorIds.includes(id) ? (
-            <OrchestratorPane key={id} paneId={id} visible={place.visible} focused={place.focused} rect={place.rect} />
+            <Suspense key={id} fallback={null}>
+              <OrchestratorPane paneId={id} visible={place.visible} focused={place.focused} rect={place.rect} />
+            </Suspense>
           ) : (
             <TerminalPane key={id} paneId={id} visible={place.visible} focused={place.focused} rect={place.rect} />
           );
